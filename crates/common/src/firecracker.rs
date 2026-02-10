@@ -141,6 +141,9 @@ impl VmManager for FirecrackerManager {
             .vsock_uds_dir
             .join(format!("{user_id}.vsock.sock"));
 
+        if vsock_uds_path.exists() {
+            let _ = std::fs::remove_file(&vsock_uds_path);
+        }
         let listener = tokio::net::UnixListener::bind(&vsock_uds_path)
             .map_err(|e| VmError::new(format!("bind vsock uds failed: {e}")))?;
 
@@ -151,8 +154,7 @@ impl VmManager for FirecrackerManager {
         .kernel(&self.config.kernel_path)
         .api_socket(&api_socket)
         .vm_id(user_id.clone())
-        .vsock(3, &vsock_uds_path)
-        .network(znskr_firecracker::network::slirp::SlirpNetBackend::default());
+        .vsock(3, &vsock_uds_path);
 
         if self.config.rootfs_path.is_dir() {
             builder = builder.rootfs_dir(&self.config.rootfs_path);
