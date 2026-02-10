@@ -144,8 +144,6 @@ impl VmManager for FirecrackerManager {
         if vsock_uds_path.exists() {
             let _ = std::fs::remove_file(&vsock_uds_path);
         }
-        let listener = tokio::net::UnixListener::bind(&vsock_uds_path)
-            .map_err(|e| VmError::new(format!("bind vsock uds failed: {e}")))?;
 
         let mut builder = znskr_firecracker::runtime::builder::MicroVmBuilder::<
             znskr_firecracker::network::slirp::SlirpNetBackend,
@@ -167,14 +165,28 @@ impl VmManager for FirecrackerManager {
         .await
         .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;
 
-        // Wait for the guest to connect to the host vsock listener (UDS endpoint).
-        let (stream, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            listener.accept(),
-        )
+        // Firecracker creates and listens on the host-side UDS endpoint for vsock.
+        // Connect to it from the host side.
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match tokio::net::UnixStream::connect(&vsock_uds_path).await {
+                    Ok(stream) => break Ok(stream),
+                    Err(err) => {
+                        // Retry until Firecracker is ready.
+                        if err.kind() == std::io::ErrorKind::NotFound
+                            || err.kind() == std::io::ErrorKind::ConnectionRefused
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            continue;
+                        }
+                        break Err(err);
+                    }
+                }
+            }
+        })
         .await
-        .map_err(|_| VmError::new("vsock accept timed out"))?
-        .map_err(|e| VmError::new(format!("vsock accept failed: {e}")))?;
+        .map_err(|_| VmError::new("vsock connect timed out"))?
+        .map_err(|e| VmError::new(format!("vsock connect failed: {e}")))?;
 
         self.handles.lock().await.insert(user_id.clone(), handle);
 
