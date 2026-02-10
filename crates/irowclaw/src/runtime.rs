@@ -23,7 +23,7 @@ impl IrowclawError {
 
 pub struct Runtime {
     config: GuestConfig,
-    brain: BrainPaths,
+    _brain: BrainPaths,
     db: Connection,
     bash_tool: Box<dyn BashTool>,
     file_tool: Box<dyn FileTool>,
@@ -42,7 +42,7 @@ impl Runtime {
         let file_tool: Box<dyn FileTool> = Box::new(StubFileTool::new(brain.root.clone()));
         Ok(Self {
             config,
-            brain,
+            _brain: brain,
             db,
             bash_tool,
             file_tool,

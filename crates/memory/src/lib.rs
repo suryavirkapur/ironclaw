@@ -311,9 +311,7 @@ fn try_load_vector_extension(conn: &Connection) -> Result<(), MemoryError> {
     let load_result = unsafe { conn.load_extension(&path, None::<&str>) }
         .map_err(|err| MemoryError::new(format!("vector extension load failed: {err}")));
 
-    unsafe {
-        conn.load_extension_disable()
-            .map_err(|err| MemoryError::new(format!("vector extension disable failed: {err}")))?;
-    }
+    conn.load_extension_disable()
+        .map_err(|err| MemoryError::new(format!("vector extension disable failed: {err}")))?;
     load_result
 }
