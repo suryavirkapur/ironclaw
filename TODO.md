@@ -32,7 +32,9 @@
 
 ### Host-guest protocol wiring
 - Define how the guest runtime (`irowclaw`) boots and connects to host transport.
-- Ensure websocket messages are bridged host <-> guest in Firecracker mode.
+  - Guest side vsock client transport is implemented (connects to host CID 2, port 5000 by default).
+  - Remaining: guest rootfs entrypoint/service must set `IRONCLAW_VSOCK=1` (and optionally `IRONCLAW_VSOCK_PORT`).
+- Ensure websocket messages are bridged host <-> guest in Firecracker mode (end to end test).
 
 ### Firecracker VM spec
 - Confirm required guest kernel/rootfs expectations.

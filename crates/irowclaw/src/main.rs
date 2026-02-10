@@ -5,6 +5,28 @@ async fn main() -> Result<(), irowclaw::runtime::IrowclawError> {
     let config_path = std::env::var("IROWCLAW_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/mnt/brain/config/irowclaw.toml"));
+
+    // Firecracker best path: guest connects to host over vsock.
+    // Firecracker reserves CID 2 for the host.
+    let use_vsock = std::env::var("IRONCLAW_VSOCK")
+        .ok()
+        .as_deref()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if use_vsock {
+        let port = std::env::var("IRONCLAW_VSOCK_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(5000);
+
+        let transport = irowclaw::vsock_transport::VsockTransport::connect(2, port)
+            .await
+            .map_err(|e| irowclaw::runtime::IrowclawError::new(e.to_string()))?;
+
+        return irowclaw::runtime::run_with_transport(transport, config_path).await;
+    }
+
     let transport = local_stdio_transport();
     irowclaw::runtime::run_with_transport(transport, config_path).await
 }

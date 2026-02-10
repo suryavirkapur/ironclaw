@@ -11,6 +11,7 @@ memory = { path = "../memory" }
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
 thiserror = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "time"] }
+tokio-vsock = "*"
 toml = "*"
 tools = { path = "../tools" }
