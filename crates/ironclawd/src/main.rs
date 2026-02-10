@@ -60,6 +60,15 @@ impl AppState {
                     kernel_path: config.firecracker.kernel_path.clone(),
                     rootfs_path: config.firecracker.rootfs_path.clone(),
                     api_socket_dir: config.firecracker.api_socket_dir.clone(),
+                    vsock_uds_dir: config
+                        .firecracker
+                        .vsock_uds_dir
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("/tmp/ironclaw/vsock")),
+                    vsock_port: config
+                        .firecracker
+                        .vsock_port
+                        .unwrap_or_else(common::firecracker::default_vsock_port),
                 });
                 (Arc::new(manager) as Arc<dyn VmManager>, None)
             }

@@ -26,9 +26,9 @@
 ## Pending / Next
 
 ### Firecracker guest transport
-- Implement a real `Transport` for Firecracker mode.
-  - Current `FirecrackerTransportStub` always errors.
-  - Decide on mechanism (vsock, virtio-console, UDS forwarded into guest, or HTTP over slirp).
+- Implement a real `Transport` for Firecracker mode using vsock.
+  - Host side UDS endpoint + framed stream transport is now implemented.
+  - Remaining: guest side vsock client transport and guest bootstrapping so the guest actually connects.
 
 ### Host-guest protocol wiring
 - Define how the guest runtime (`irowclaw`) boots and connects to host transport.

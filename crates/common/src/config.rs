@@ -27,6 +27,12 @@ pub struct HostFirecrackerConfig {
     pub kernel_path: PathBuf,
     pub rootfs_path: PathBuf,
     pub api_socket_dir: PathBuf,
+    /// Directory for Firecracker vsock UDS endpoints.
+    #[serde(default)]
+    pub vsock_uds_dir: Option<PathBuf>,
+    /// Guest port used for host-guest transport.
+    #[serde(default)]
+    pub vsock_port: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +56,8 @@ impl HostConfig {
                 kernel_path: PathBuf::from("kernels/vmlinux"),
                 rootfs_path: PathBuf::from("rootfs/ironclaw.ext4"),
                 api_socket_dir: PathBuf::from("/tmp/ironclaw-fc"),
+                vsock_uds_dir: Some(PathBuf::from("/tmp/ironclaw/vsock")),
+                vsock_port: Some(5000),
             },
             storage: HostStorageConfig { users_root },
         }

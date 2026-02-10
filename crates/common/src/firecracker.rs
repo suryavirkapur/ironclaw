@@ -96,6 +96,10 @@ pub struct FirecrackerManagerConfig {
     pub kernel_path: PathBuf,
     pub rootfs_path: PathBuf,
     pub api_socket_dir: PathBuf,
+    /// Directory for Firecracker vsock UDS endpoints.
+    pub vsock_uds_dir: PathBuf,
+    /// Guest listens/connects on this vsock port.
+    pub vsock_port: u32,
 }
 
 #[cfg(feature = "firecracker")]
@@ -109,27 +113,8 @@ impl FirecrackerManager {
 }
 
 #[cfg(feature = "firecracker")]
-struct FirecrackerTransportStub;
-
-#[cfg(feature = "firecracker")]
-#[async_trait::async_trait]
-impl Transport for FirecrackerTransportStub {
-    async fn send(
-        &mut self,
-        _message: crate::protocol::MessageEnvelope,
-    ) -> Result<(), crate::transport::TransportError> {
-        Err(crate::transport::TransportError::new(
-            "firecracker transport not implemented yet",
-        ))
-    }
-
-    async fn recv(
-        &mut self,
-    ) -> Result<Option<crate::protocol::MessageEnvelope>, crate::transport::TransportError> {
-        Err(crate::transport::TransportError::new(
-            "firecracker transport not implemented yet",
-        ))
-    }
+pub fn default_vsock_port() -> u32 {
+    5000
 }
 
 #[cfg(feature = "firecracker")]
@@ -140,6 +125,8 @@ impl VmManager for FirecrackerManager {
 
         std::fs::create_dir_all(&self.config.api_socket_dir)
             .map_err(|e| VmError::new(format!("create api socket dir failed: {e}")))?;
+        std::fs::create_dir_all(&self.config.vsock_uds_dir)
+            .map_err(|e| VmError::new(format!("create vsock uds dir failed: {e}")))?;
 
         // If one already exists, stop it first.
         let existing = { self.handles.lock().await.remove(&user_id) };
@@ -149,6 +136,13 @@ impl VmManager for FirecrackerManager {
         }
 
         let api_socket = self.config.api_socket_dir.join(format!("{user_id}.sock"));
+        let vsock_uds_path = self
+            .config
+            .vsock_uds_dir
+            .join(format!("{user_id}.vsock.sock"));
+
+        let listener = tokio::net::UnixListener::bind(&vsock_uds_path)
+            .map_err(|e| VmError::new(format!("bind vsock uds failed: {e}")))?;
 
         let handle = znskr_firecracker::runtime::builder::MicroVmBuilder::<
             znskr_firecracker::network::slirp::SlirpNetBackend,
@@ -158,17 +152,29 @@ impl VmManager for FirecrackerManager {
         .rootfs(&self.config.rootfs_path)
         .api_socket(&api_socket)
         .vm_id(user_id.clone())
+        .vsock(3, &vsock_uds_path)
         .network(znskr_firecracker::network::slirp::SlirpNetBackend::default())
         .build_and_start()
         .await
         .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;
 
+        // Wait for the guest to connect to the host vsock listener (UDS endpoint).
+        let (stream, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            listener.accept(),
+        )
+        .await
+        .map_err(|_| VmError::new("vsock accept timed out"))?
+        .map_err(|e| VmError::new(format!("vsock accept failed: {e}")))?;
+
         self.handles.lock().await.insert(user_id.clone(), handle);
+
+        let transport = crate::stream_transport::StreamTransport::new(stream);
 
         Ok(VmInstance {
             user_id,
             brain_path: config.brain_path,
-            transport: Box::new(FirecrackerTransportStub),
+            transport: Box::new(transport),
         })
     }
 

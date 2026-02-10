@@ -9,7 +9,7 @@ async-trait = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["sync"] }
+tokio = { version = "*", features = ["sync", "io-util", "net", "time"] }
 znskr-firecracker = { path = "../../../znskr-firecracker", optional = true }
 
 [features]
