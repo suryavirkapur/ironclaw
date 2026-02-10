@@ -1,0 +1,18 @@
+[server]
+bind = "127.0.0.1"
+port = 9938
+
+[ui]
+mount = "/ui"
+index_file = "index.html"
+
+[storage]
+users_root = "data/users"
+
+[firecracker]
+enabled = true
+kernel_path = "kernels/firecracker/vmlinux.bin"
+rootfs_path = "rootfs/build/guest-root"
+api_socket_dir = "/tmp/ironclaw-fc"
+vsock_uds_dir = "/tmp/ironclaw/vsock"
+vsock_port = 5000
