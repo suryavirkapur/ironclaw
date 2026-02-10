@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+// mutex no longer used
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 
@@ -27,7 +27,7 @@ async fn main() -> Result<(), IronclawError> {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/ui", get(ui_index_handler))
-        .route("/ui/*path", get(ui_asset_handler))
+        .route("/ui/{*path}", get(ui_asset_handler))
         .with_state(state);
 
     tracing_subscriber::fmt::init();
@@ -135,7 +135,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     let transport = vm_instance.transport;
     if state.local_guest {
         if let Some(guest_transport) = guest_transport {
+            let guest_user_id = user_id.clone();
             tokio::spawn(async move {
+                // Local guest mode runs irowclaw in-process. Use a writable brain root.
+                let brain_root = state
+                    .host_config
+                    .storage
+                    .users_root
+                    .join(&guest_user_id)
+                    .join("guest");
+                if let Err(err) = std::fs::create_dir_all(&brain_root) {
+                    tracing::warn!("create brain root failed: {err}");
+                }
+                std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+
                 if let Err(err) = irowclaw::runtime::run_with_transport(
                     guest_transport,
                     (*state.guest_config_path).clone(),
@@ -149,71 +162,61 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     }
 
     let (mut sender, mut receiver) = socket.split();
-    let transport = Arc::new(Mutex::new(transport));
-    let inbound = transport.clone();
-    let outbound = transport.clone();
 
-    let mut inbound_task = tokio::spawn(async move {
-        let mut msg_id = 1u64;
-        while let Some(Ok(message)) = receiver.next().await {
-            if let Message::Text(text) = message {
-                let timestamp_ms = match now_ms() {
-                    Ok(value) => value,
-                    Err(err) => {
-                        tracing::warn!("time error: {err}");
-                        0
+    // Single-loop bridge.
+    // Avoid holding a mutex across `.await` on `Transport::recv()`.
+    let mut transport = transport;
+    let mut msg_id = 1u64;
+
+    loop {
+        tokio::select! {
+            ws_msg = receiver.next() => {
+                let Some(Ok(message)) = ws_msg else { break; };
+                if let Message::Text(text) = message {
+                    let timestamp_ms = match now_ms() {
+                        Ok(value) => value,
+                        Err(err) => {
+                            tracing::warn!("time error: {err}");
+                            0
+                        }
+                    };
+                    let envelope = MessageEnvelope {
+                        user_id: user_id.clone(),
+                        session_id: session_id.clone(),
+                        msg_id,
+                        timestamp_ms,
+                        payload: MessagePayload::UserMessage { text: text.to_string() },
+                    };
+                    msg_id += 1;
+                    if let Err(err) = transport.send(envelope).await {
+                        tracing::error!("transport send failed: {err}");
+                        break;
                     }
-                };
-                let envelope = MessageEnvelope {
-                    user_id: user_id.clone(),
-                    session_id: session_id.clone(),
-                    msg_id,
-                    timestamp_ms,
-                    payload: MessagePayload::UserMessage {
-                        text: text.to_string(),
-                    },
-                };
-                msg_id += 1;
-                let mut guard = inbound.lock().await;
-                if let Err(err) = guard.send(envelope).await {
-                    tracing::error!("transport send failed: {err}");
-                    break;
                 }
             }
-        }
-    });
 
-    let mut outbound_task = tokio::spawn(async move {
-        loop {
-            let mut guard = outbound.lock().await;
-            let message = guard.recv().await;
-            drop(guard);
-            match message {
-                Ok(Some(envelope)) => {
-                    match serde_json::to_string(&envelope) {
-                        Ok(payload) => {
-                            if sender.send(Message::Text(payload.into())).await.is_err() {
+            transport_msg = transport.recv() => {
+                match transport_msg {
+                    Ok(Some(envelope)) => {
+                        let payload = match serde_json::to_string(&envelope) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                tracing::error!("serialize ws message failed: {err}");
                                 break;
                             }
-                        }
-                        Err(err) => {
-                            tracing::error!("serialize ws message failed: {err}");
+                        };
+                        if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
                         }
                     }
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    tracing::error!("transport recv failed: {err}");
-                    break;
+                    Ok(None) => break,
+                    Err(err) => {
+                        tracing::error!("transport recv failed: {err}");
+                        break;
+                    }
                 }
             }
         }
-    });
-
-    tokio::select! {
-        _ = (&mut inbound_task) => {},
-        _ = (&mut outbound_task) => {},
     }
 }
 

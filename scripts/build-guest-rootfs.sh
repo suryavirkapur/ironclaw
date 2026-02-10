@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Builds a minimal ext4 rootfs directory tree for the Firecracker guest.
+# - includes /init (busybox shell script)
+# - includes /bin/irowclaw
+# - includes busybox + common applets
+#
+# Notes:
+# - This builds a directory tree, not an ext4 image.
+#   ironclawd will convert it to ext4 at VM start (if configured that way).
+# - If /bin/irowclaw is dynamically linked, this script will try to copy required libs.
+
+ROOT_DIR="${1:-rootfs/build/guest-root}"
+IROWCLAW_BIN_REL="${IROWCLAW_BIN_REL:-target/x86_64-unknown-linux-musl/release/irowclaw}"
+IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
+
+mkdir -p "${ROOT_DIR}"
+
+# Layout
+mkdir -p \
+  "${ROOT_DIR}/bin" \
+  "${ROOT_DIR}/sbin" \
+  "${ROOT_DIR}/etc" \
+  "${ROOT_DIR}/proc" \
+  "${ROOT_DIR}/sys" \
+  "${ROOT_DIR}/dev" \
+  "${ROOT_DIR}/tmp" \
+  "${ROOT_DIR}/mnt/brain/config" \
+  "${ROOT_DIR}/usr/bin" \
+  "${ROOT_DIR}/usr/sbin" \
+  "${ROOT_DIR}/lib" \
+  "${ROOT_DIR}/lib64"
+
+# /init
+install -m 0755 rootfs/guest-skel/init "${ROOT_DIR}/init"
+
+# BusyBox
+BUSYBOX_BIN="${BUSYBOX_BIN:-}"
+if [[ -z "${BUSYBOX_BIN}" ]]; then
+  if command -v busybox >/dev/null 2>&1; then
+    BUSYBOX_BIN="$(command -v busybox)"
+  elif [[ -x /usr/bin/busybox ]]; then
+    BUSYBOX_BIN="/usr/bin/busybox"
+  else
+    echo "busybox not found. Install it (eg: sudo pacman -S busybox)" >&2
+    exit 1
+  fi
+fi
+
+install -m 0755 "${BUSYBOX_BIN}" "${ROOT_DIR}/bin/busybox"
+
+# Common applet links
+for app in sh mount mkdir ln echo cat sleep ip ifconfig route udhcpc su ss modprobe insmod lsmod; do
+  ln -sf busybox "${ROOT_DIR}/bin/${app}"
+done
+
+# Build irowclaw
+pushd . >/dev/null
+cd "$(git rev-parse --show-toplevel)"
+
+if [[ ! -f "${IROWCLAW_BIN_REL}" ]]; then
+  echo "building irowclaw musl (if toolchain available)" >&2
+  rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+  cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
+fi
+
+IROWCLAW_BIN=""
+if [[ -f "${IROWCLAW_BIN_REL}" ]]; then
+  IROWCLAW_BIN="${IROWCLAW_BIN_REL}"
+elif [[ -f "${IROWCLAW_BIN_ALT_REL}" ]]; then
+  echo "musl build not found, falling back to host target/release (likely dynamic)" >&2
+  cargo build -q -p irowclaw --release
+  IROWCLAW_BIN="${IROWCLAW_BIN_ALT_REL}"
+else
+  echo "irowclaw binary not found and build failed" >&2
+  exit 1
+fi
+
+popd >/dev/null
+
+install -m 0755 "${IROWCLAW_BIN}" "${ROOT_DIR}/bin/irowclaw"
+
+# If dynamic, copy libs.
+# This is best-effort and intended for local dev.
+if ldd "${ROOT_DIR}/bin/irowclaw" 2>/dev/null | grep -q "=>"; then
+  echo "irowclaw appears dynamically linked, copying shared libs" >&2
+
+  while read -r line; do
+    # Example lines:
+    #   libz.so.1 => /usr/lib/libz.so.1 (0x...)
+    #   /lib64/ld-linux-x86-64.so.2 (0x...)
+    src="$(echo "$line" | awk '{print $3}' | sed 's/(.*//')"
+    if [[ -z "${src}" || ! -e "${src}" ]]; then
+      # try direct path line
+      src="$(echo "$line" | awk '{print $1}' | sed 's/(.*//')"
+    fi
+    if [[ -n "${src}" && -e "${src}" ]]; then
+      dest_dir="${ROOT_DIR}$(dirname "${src}")"
+      mkdir -p "${dest_dir}"
+      cp -L "${src}" "${dest_dir}/"
+    fi
+  done < <(ldd "${ROOT_DIR}/bin/irowclaw" || true)
+fi
+
+echo "rootfs dir ready: ${ROOT_DIR}" >&2

@@ -7,3 +7,6 @@
 
 # Editor
 .DS_Store
+
+# Generated guest rootfs build output
+/rootfs/build/

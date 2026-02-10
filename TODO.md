@@ -49,3 +49,6 @@
   - how to run `ironclawd`
   - config file path/env vars
   - how to enable Firecracker feature and required host deps
+- Added helper scripts:
+  - `scripts/build-guest-rootfs.sh` (builds a minimal guest rootfs directory tree)
+  - `scripts/smoke-local-guest.sh` (local websocket smoke test)
