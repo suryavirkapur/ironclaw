@@ -34,4 +34,4 @@ IRONCLAWD_PID=$!
 
 sleep 1.2
 
-node ./scripts/smoke-local-ws.mjs "${WS_URL}"
+WS_TIMEOUT_MS=${WS_TIMEOUT_MS:-20000} node ./scripts/smoke-local-ws.mjs "${WS_URL}"

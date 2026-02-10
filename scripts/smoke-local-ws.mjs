@@ -5,7 +5,7 @@ const url = process.argv[2] || "ws://127.0.0.1:9938/ws";
 
 const ws = new WebSocket(url);
 
-const timeoutMs = 5000;
+const timeoutMs = Number.parseInt(process.env.WS_TIMEOUT_MS || "5000", 10);
 const timer = setTimeout(() => {
   console.error(`timeout after ${timeoutMs}ms`);
   process.exit(1);
