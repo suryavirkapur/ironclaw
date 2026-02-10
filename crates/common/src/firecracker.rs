@@ -144,16 +144,23 @@ impl VmManager for FirecrackerManager {
         let listener = tokio::net::UnixListener::bind(&vsock_uds_path)
             .map_err(|e| VmError::new(format!("bind vsock uds failed: {e}")))?;
 
-        let handle = znskr_firecracker::runtime::builder::MicroVmBuilder::<
+        let mut builder = znskr_firecracker::runtime::builder::MicroVmBuilder::<
             znskr_firecracker::network::slirp::SlirpNetBackend,
         >::new()
         .firecracker_bin(&self.config.firecracker_bin)
         .kernel(&self.config.kernel_path)
-        .rootfs(&self.config.rootfs_path)
         .api_socket(&api_socket)
         .vm_id(user_id.clone())
         .vsock(3, &vsock_uds_path)
-        .network(znskr_firecracker::network::slirp::SlirpNetBackend::default())
+        .network(znskr_firecracker::network::slirp::SlirpNetBackend::default());
+
+        if self.config.rootfs_path.is_dir() {
+            builder = builder.rootfs_dir(&self.config.rootfs_path);
+        } else {
+            builder = builder.rootfs(&self.config.rootfs_path);
+        }
+
+        let handle = builder
         .build_and_start()
         .await
         .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;

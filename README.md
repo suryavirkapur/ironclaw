@@ -54,7 +54,16 @@ Firecracker mode is enabled when:
 - host config sets `firecracker.enabled = true`, and
 - `ironclawd` is built with `--features firecracker`
 
+Rootfs notes:
+
+- `firecracker.rootfs_path` can be either:
+  - an ext4 image path, or
+  - a directory tree; if a directory, it is converted to an ext4 image at VM start
+- The guest needs an executable `/init` and a guest binary at `/bin/irowclaw`.
+  - See `rootfs/guest-skel/init` for a minimal init script that enables vsock.
+
 Current status:
 
 - VM start/stop is wired via the `znskr-firecracker` crate.
-- Guest transport is not implemented yet, so websocket bridging does not work in Firecracker mode.
+- Host side vsock accept and guest side vsock connect are implemented.
+- Remaining: build a usable guest rootfs (ext4) that includes `/init` + `/bin/irowclaw`, so the guest actually connects.

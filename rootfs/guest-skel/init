@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+exec >/dev/ttyS0 2>&1
+
+echo "ironclaw guest init: starting"
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+# Minimal mounts
+mount -t proc proc /proc || true
+mount -t sysfs sysfs /sys || true
+mount -t devtmpfs devtmpfs /dev || true
+mount -t tmpfs tmpfs /tmp || true
+
+# Networking (optional)
+ip link set lo up || true
+ip link set eth0 up || true
+
+# Vsock transport
+export IRONCLAW_VSOCK=1
+export IRONCLAW_VSOCK_PORT=${IRONCLAW_VSOCK_PORT:-5000}
+
+# Guest config
+export IROWCLAW_CONFIG=${IROWCLAW_CONFIG:-/mnt/brain/config/irowclaw.toml}
+
+# Run guest runtime
+if [ -x /bin/irowclaw ]; then
+  echo "ironclaw guest init: exec /bin/irowclaw"
+  exec /bin/irowclaw
+fi
+
+echo "ironclaw guest init: missing /bin/irowclaw" 
+sleep 3600
