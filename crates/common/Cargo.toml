@@ -10,7 +10,7 @@ serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
 tokio = { version = "*", features = ["sync", "io-util", "net", "time"] }
-znskr-firecracker = { path = "../../../znskr-firecracker", optional = true }
+znskr-firecracker = { git = "https://github.com/suryavirkapur/znskr-firecracker", optional = true }
 
 [features]
 firecracker = ["znskr-firecracker"]

@@ -2441,6 +2441,7 @@ checksum = "4de98dfa5d5b7fef4ee834d0073d560c9ca7b6c46a71d058c48db7960f8cfaf7"
 [[package]]
 name = "znskr-firecracker"
 version = "0.1.0"
+source = "git+https://github.com/suryavirkapur/znskr-firecracker#5a3b0c162c622e368c49a97ca47079ec85fc7323"
 dependencies = [
  "async-trait",
  "base64",
