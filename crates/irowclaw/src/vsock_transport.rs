@@ -21,14 +21,14 @@ impl VsockTransport {
 impl Transport for VsockTransport {
     async fn send(
         &mut self,
-        message: common::protocol::MessageEnvelope,
+        message: common::proto::ironclaw::MessageEnvelope,
     ) -> Result<(), TransportError> {
         self.inner.send(message).await
     }
 
     async fn recv(
         &mut self,
-    ) -> Result<Option<common::protocol::MessageEnvelope>, TransportError> {
+    ) -> Result<Option<common::proto::ironclaw::MessageEnvelope>, TransportError> {
         self.inner.recv().await
     }
 }

@@ -6,11 +6,15 @@ license.workspace = true
 
 [dependencies]
 async-trait = "*"
+prost = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
 tokio = { version = "*", features = ["sync", "io-util", "net", "time"] }
 znskr-firecracker = { git = "https://github.com/suryavirkapur/znskr-firecracker", optional = true }
+
+[build-dependencies]
+prost-build = "*"
 
 [features]
 firecracker = ["znskr-firecracker"]

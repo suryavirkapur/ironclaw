@@ -1,11 +1,12 @@
-use crate::protocol::{FrameCodec, MessageEnvelope};
+use crate::codec::ProtoCodec;
+use crate::proto::ironclaw::MessageEnvelope;
 use crate::transport::{Transport, TransportError};
 use async_trait::async_trait;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub struct StreamTransport<S> {
     stream: S,
-    codec: FrameCodec,
+    codec: ProtoCodec,
     read_buf: Vec<u8>,
 }
 
@@ -13,7 +14,7 @@ impl<S> StreamTransport<S> {
     pub fn new(stream: S) -> Self {
         Self {
             stream,
-            codec: FrameCodec::new(),
+            codec: ProtoCodec::new(),
             read_buf: vec![0u8; 8192],
         }
     }
@@ -29,7 +30,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     async fn send(&mut self, message: MessageEnvelope) -> Result<(), TransportError> {
-        let bytes = FrameCodec::encode(&message)
+        let bytes = ProtoCodec::encode(&message)
             .map_err(|err| TransportError::new(err.to_string()))?;
         self.stream
             .write_all(&bytes)

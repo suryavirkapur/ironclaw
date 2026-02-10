@@ -1,4 +1,5 @@
-use crate::protocol::{FrameCodec, MessageEnvelope, ProtocolError};
+use crate::codec::ProtoCodec;
+use crate::proto::ironclaw::MessageEnvelope;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -25,7 +26,7 @@ impl TransportError {
 pub struct LocalTransport {
     tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
-    codec: FrameCodec,
+    codec: ProtoCodec,
 }
 
 impl LocalTransport {
@@ -35,12 +36,12 @@ impl LocalTransport {
         let a = Self {
             tx: a_tx,
             rx: b_rx,
-            codec: FrameCodec::new(),
+            codec: ProtoCodec::new(),
         };
         let b = Self {
             tx: b_tx,
             rx: a_rx,
-            codec: FrameCodec::new(),
+            codec: ProtoCodec::new(),
         };
         (a, b)
     }
@@ -49,7 +50,7 @@ impl LocalTransport {
 #[async_trait]
 impl Transport for LocalTransport {
     async fn send(&mut self, message: MessageEnvelope) -> Result<(), TransportError> {
-        let bytes = FrameCodec::encode(&message)
+        let bytes = ProtoCodec::encode(&message)
             .map_err(|err| TransportError::new(err.to_string()))?;
         self.tx
             .send(bytes)
@@ -59,7 +60,7 @@ impl Transport for LocalTransport {
 
     async fn recv(&mut self) -> Result<Option<MessageEnvelope>, TransportError> {
         loop {
-            if let Some(frame) = self.codec.next_frame().map_err(map_protocol_error)? {
+            if let Some(frame) = self.codec.next_frame().map_err(map_codec_error)? {
                 return Ok(Some(frame));
             }
             match self.rx.recv().await {
@@ -72,6 +73,6 @@ impl Transport for LocalTransport {
     }
 }
 
-fn map_protocol_error(err: ProtocolError) -> TransportError {
+fn map_codec_error(err: crate::codec::CodecError) -> TransportError {
     TransportError::new(err.to_string())
 }

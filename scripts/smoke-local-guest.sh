@@ -14,6 +14,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
 cargo build -q -p ironclawd
 
 ./target/debug/ironclawd >/tmp/ironclawd.local.log 2>&1 &
@@ -22,4 +25,4 @@ IRONCLAWD_PID=$!
 # give it a moment
 sleep 0.3
 
-node scripts/smoke-local-ws.mjs "${WS_URL}"
+node ./scripts/smoke-local-ws.mjs "${WS_URL}"

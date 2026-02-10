@@ -18,6 +18,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
 ./scripts/build-guest-rootfs.sh rootfs/build/guest-root
 cargo build -q -p ironclawd --features firecracker --release
 

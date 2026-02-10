@@ -1,5 +1,5 @@
 use common::config::{GuestConfig, JobsConfig};
-use common::protocol::{MessageEnvelope, MessagePayload};
+use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use common::transport::Transport;
 use memory::{hybrid_fusion, index_chunks, initialize_schema, lexical_search, Chunk};
 use rusqlite::Connection;
@@ -145,12 +145,15 @@ fn handle_message(
     message: MessageEnvelope,
 ) -> Result<Option<MessageEnvelope>, IrowclawError> {
     match message.payload {
-        MessagePayload::UserMessage { ref text } => {
-            let reply = format!("stub: {text}");
+        Some(message_envelope::Payload::UserMessage(ref msg)) => {
+            let reply = format!("stub: {}", msg.text);
             let response = build_stream_delta(&message, reply, true)?;
             Ok(Some(response))
         }
-        MessagePayload::FileOpRequest { op, path, data } => {
+        Some(message_envelope::Payload::FileOpRequest(ref req)) => {
+            let op = req.op.clone();
+            let path = req.path.clone();
+            let data = req.data.clone();
             let result = match op.as_str() {
                 "read" => runtime
                     .file_tool
@@ -179,11 +182,13 @@ fn handle_message(
                 session_id: message.session_id,
                 msg_id: message.msg_id,
                 timestamp_ms: now_ms()?,
-                payload: MessagePayload::ToolResult {
-                    tool: format!("file_{op}"),
-                    output,
-                    ok,
-                },
+                payload: Some(message_envelope::Payload::ToolResult(
+                    common::proto::ironclaw::ToolResult {
+                        tool: format!("file_{op}"),
+                        output,
+                        ok,
+                    },
+                )),
             }))
         }
         _ => Ok(None),
@@ -200,7 +205,9 @@ fn build_stream_delta(
         session_id: source.session_id.clone(),
         msg_id: source.msg_id,
         timestamp_ms: now_ms()?,
-        payload: MessagePayload::StreamDelta { delta, done },
+        payload: Some(message_envelope::Payload::StreamDelta(
+            common::proto::ironclaw::StreamDelta { delta, done },
+        )),
     })
 }
 

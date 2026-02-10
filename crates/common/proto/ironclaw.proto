@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package ironclaw;
+
+message MessageEnvelope {
+  string user_id = 1;
+  string session_id = 2;
+  uint64 msg_id = 3;
+  uint64 timestamp_ms = 4;
+
+  oneof payload {
+    UserMessage user_message = 10;
+    ToolResult tool_result = 11;
+    StreamDelta stream_delta = 12;
+    JobTrigger job_trigger = 13;
+    JobStatus job_status = 14;
+    FileOpRequest file_op_request = 15;
+  }
+}
+
+message UserMessage {
+  string text = 1;
+}
+
+message ToolResult {
+  string tool = 1;
+  string output = 2;
+  bool ok = 3;
+}
+
+message StreamDelta {
+  string delta = 1;
+  bool done = 2;
+}
+
+message JobTrigger {
+  string job_id = 1;
+}
+
+message JobStatus {
+  string job_id = 1;
+  string status = 2;
+}
+
+message FileOpRequest {
+  string op = 1;
+  string path = 2;
+  optional string data = 3;
+}

@@ -18,9 +18,10 @@ ws.addEventListener("open", () => {
 ws.addEventListener("message", (ev) => {
   try {
     const msg = JSON.parse(ev.data.toString());
-    if (msg?.payload?.type === "StreamDelta") {
+    const delta = msg?.payload?.StreamDelta || msg?.payload?.streamDelta;
+    if (delta) {
       clearTimeout(timer);
-      console.log("OK", msg.payload.data);
+      console.log("OK", delta);
       ws.close();
       process.exit(0);
     }

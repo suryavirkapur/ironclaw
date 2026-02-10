@@ -36,13 +36,13 @@ fn local_stdio_transport() -> StdioTransport {
 }
 
 struct StdioTransport {
-    codec: common::protocol::FrameCodec,
+    codec: common::codec::ProtoCodec,
 }
 
 impl StdioTransport {
     fn new() -> Self {
         Self {
-            codec: common::protocol::FrameCodec::new(),
+            codec: common::codec::ProtoCodec::new(),
         }
     }
 }
@@ -51,9 +51,9 @@ impl StdioTransport {
 impl common::transport::Transport for StdioTransport {
     async fn send(
         &mut self,
-        message: common::protocol::MessageEnvelope,
+        message: common::proto::ironclaw::MessageEnvelope,
     ) -> Result<(), common::transport::TransportError> {
-        let bytes = common::protocol::FrameCodec::encode(&message)
+        let bytes = common::codec::ProtoCodec::encode(&message)
             .map_err(|err| common::transport::TransportError::new(err.to_string()))?;
         use tokio::io::AsyncWriteExt;
         let mut stdout = tokio::io::stdout();
@@ -70,7 +70,7 @@ impl common::transport::Transport for StdioTransport {
 
     async fn recv(
         &mut self,
-    ) -> Result<Option<common::protocol::MessageEnvelope>, common::transport::TransportError> {
+    ) -> Result<Option<common::proto::ironclaw::MessageEnvelope>, common::transport::TransportError> {
         use tokio::io::AsyncReadExt;
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];

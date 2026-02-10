@@ -8,7 +8,7 @@ use common::config::HostConfig;
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
-use common::protocol::{MessageEnvelope, MessagePayload};
+use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
 use include_dir::{include_dir, Dir};
 use serde::Deserialize;
@@ -185,7 +185,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         session_id: session_id.clone(),
                         msg_id,
                         timestamp_ms,
-                        payload: MessagePayload::UserMessage { text: text.to_string() },
+                        payload: Some(message_envelope::Payload::UserMessage(
+                            common::proto::ironclaw::UserMessage { text: text.to_string() },
+                        )),
                     };
                     msg_id += 1;
                     if let Err(err) = transport.send(envelope).await {
