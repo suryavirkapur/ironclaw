@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ironclaw ui</title>
+    <link rel="stylesheet" href="/ui/app.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <div>
+          <p class="eyebrow">ironclaw v0.1.0</p>
+          <h1>ui scaffold</h1>
+          <p class="subtitle">placeholder only. server provides websocket at /ws.</p>
+        </div>
+        <div class="status" id="status">offline</div>
+      </header>
+      <section class="panel">
+        <div class="panel-header">
+          <h2>chat stream</h2>
+          <button id="connect">connect</button>
+        </div>
+        <div class="panel-body" id="log"></div>
+        <div class="panel-footer">
+          <input id="input" type="text" placeholder="type a message" />
+          <button id="send">send</button>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-header">
+          <h2>memory layout</h2>
+        </div>
+        <div class="panel-body">
+          <p>/mnt/brain/soul.md</p>
+          <p>/mnt/brain/identity.md</p>
+          <p>/mnt/brain/instructions/*.md</p>
+          <p>/mnt/brain/memory.md</p>
+          <p>/mnt/brain/logs/yyyy-mm-dd.md</p>
+          <p>/mnt/brain/cron/jobs.toml</p>
+          <p>/mnt/brain/config/irowclaw.toml</p>
+          <p>/mnt/brain/db/ironclaw.db</p>
+        </div>
+      </section>
+    </main>
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+# Rust
+/target/
+**/target/
+
+# Local data
+/data/
+
+# Editor
+.DS_Store

@@ -1,0 +1,16 @@
+[package]
+name = "irowclaw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "*"
+common = { path = "../common" }
+memory = { path = "../memory" }
+rusqlite = { version = "*", features = ["bundled"] }
+serde = { version = "*", features = ["derive"] }
+thiserror = "*"
+tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+toml = "*"
+tools = { path = "../tools" }

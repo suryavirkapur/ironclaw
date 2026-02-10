@@ -1,0 +1,16 @@
+[package]
+name = "common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+thiserror = "*"
+tokio = { version = "*", features = ["sync"] }
+znskr-firecracker = { path = "../../../znskr-firecracker", optional = true }
+
+[features]
+firecracker = ["znskr-firecracker"]

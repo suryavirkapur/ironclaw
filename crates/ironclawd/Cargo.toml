@@ -1,0 +1,24 @@
+[package]
+name = "ironclawd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { version = "*", features = ["ws"] }
+common = { path = "../common" }
+dirs = "*"
+futures = "*"
+include_dir = "*"
+irowclaw = { path = "../irowclaw" }
+mime_guess = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+thiserror = "*"
+tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
+toml = "*"
+tracing = "*"
+tracing-subscriber = "*"
+
+[features]
+firecracker = ["common/firecracker"]

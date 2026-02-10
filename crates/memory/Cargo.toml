@@ -1,0 +1,10 @@
+[package]
+name = "memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "*", features = ["bundled", "load_extension"] }
+sha2 = "*"
+thiserror = "*"

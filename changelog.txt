@@ -1,0 +1,19 @@
+0.1.0 2026-02-10
+- added rust toolchain pin for 1.92.0
+- wired firecracker manager selection with feature-gated error handling
+- initialized guest brain layout files and jobs.toml scaffolding
+- added sqlite vector extension load stub
+- tightened websocket timestamp handling without unwraps
+
+0.1.0 2026-02-09
+- initial repository scaffolding and workspace layout
+- added rustfmt and biome configuration
+- created base crates for warden, inmate, and shared modules
+- updated agent context with implementation plan
+- added common protocol framing, config structs, and transport stubs
+- implemented irowclaw runtime scaffolding with config loader and sqlite schema
+- implemented memory chunker and sqlite indexer with hybrid retrieval fusion stub
+- added tool interfaces with bash and file stubs
+- implemented ironclawd axum server with websocket bridge and embedded ui serving
+- added ui placeholder assets
+- added guest config fallback and ws framing fixes

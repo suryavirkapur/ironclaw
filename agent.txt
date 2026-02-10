@@ -1,0 +1,35 @@
+current context:
+- spec v0.1.0 implementation scaffolded across common, ironclawd, irowclaw, memory, tools,
+  and ui
+- ironclawd serves axum http + ws, embeds ui at /ui, and bridges ws to guest transport
+- irowclaw loads config from /mnt/brain/config/irowclaw.toml and initializes sqlite at
+  /mnt/brain/db/ironclaw.db
+- memory provides heading-aware chunking and sqlite indexing with fts5 and embeddings stub
+- tools provide bash and file tool interfaces with stubs
+ - next pass focuses on firecracker manager wiring, brain layout initialization, and
+   vector extension stub loading
+
+pending tasks:
+- wire firecracker manager selection when enabled, with explicit error when feature missing
+- ensure brain file layout files and jobs.toml are created on guest startup
+- add vector extension load stub for sqlite when env configured
+- tighten ws timestamp handling without unwraps
+
+important decisions:
+- sqlite remains vm-only at /mnt/brain/db/ironclaw.db
+- host auth storage is separate and never shared with vm db
+- config files are toml; brain layout defaults to /mnt/brain with optional env override
+- local guest bridge uses in-process transport; firecracker integration is a stub feature
+ - vector extension load is opt-in via env to keep sqlite-only defaults
+
+architectural notes:
+- vsock framing uses length-prefixed json envelopes
+- host ws bridge translates text frames into user messages and streams json replies back
+- ui assets are embedded via include_dir and served at /ui
+- hybrid retrieval fusion combines lexical and semantic weights from guest config
+
+plan:
+- update ironclawd firecracker manager selection and timestamp handling
+- add brain layout file initialization and jobs.toml scaffolding in irowclaw
+- add sqlite vector extension load stub in memory
+- update changelog for v0.1.0 adjustments

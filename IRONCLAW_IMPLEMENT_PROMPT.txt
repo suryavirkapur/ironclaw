@@ -1,0 +1,54 @@
+implement spec.md in this repo.
+
+constraints
+- rust 1.92
+- toml config
+- sqlite only inside guest at /mnt/brain/db/ironclaw.db
+- host may have separate auth db but must not share vm db
+- do not use web.run or any web lookup.
+- use latest versions for dependencies by letting cargo resolve them (do not pin versions unless already pinned).
+
+firecracker bindings
+- firecracker bindings already exist in ~/Projekts/znskr-firecracker.
+- prefer using that code as a local dependency or vendoring minimal parts into crates/common.
+- if changes are needed in znskr-firecracker, commit them there and push to github using gh cli.
+
+deliverables for v0.1.0
+1) host daemon crate ironclawd
+- axum http server
+- websocket endpoint for chat streaming
+- firecracker vm lifecycle management with per user brain ext4
+- vsock proxy bridge host ui websocket to guest
+- serve embedded ui at /ui
+
+2) guest runtime crate irowclaw
+- config loader from /mnt/brain/config/irowclaw.toml
+- sovereign memory file layout under /mnt/brain
+- sqlite schema with fts5 and vector extension integration stub
+- hybrid retrieval fusion
+- tool sandbox stubs
+- scheduler jobs.toml
+
+3) common crate
+- vsock protocol types framing
+- config structs
+- firecracker integration surface using znskr-firecracker
+
+4) memory crate
+- markdown chunker heading aware
+- indexer writes to sqlite
+
+5) tools crate
+- bash file browser tool interfaces for guest
+
+6) ui
+- scaffold placeholder only. do not add a full frontend toolchain.
+
+workflow
+- read agent.txt and changelog.txt first
+- update agent.txt with concrete plan
+- update changelog.txt for every modification
+- implement minimal vertical slice: ironclawd can start, load config, and communicate with a stub irowclaw over a local transport. firecracker boot can be stubbed behind a feature flag.
+
+when finished run
+openclaw gateway wake --text "done: ironclaw scaffolding v0.1.0 implemented" --mode now
