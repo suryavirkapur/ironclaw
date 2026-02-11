@@ -123,13 +123,90 @@ pub async fn run_with_transport<T: Transport + 'static>(
     config_path: PathBuf,
 ) -> Result<(), IrowclawError> {
     let runtime = Runtime::load(&config_path)?;
+
+    // Auth handshake: wait for host challenge and reply with ack.
+    let cap_token = match transport.recv().await {
+        Ok(Some(message)) => match message.payload {
+            Some(message_envelope::Payload::AuthChallenge(ch)) => {
+                let token = ch.cap_token.clone();
+                transport
+                    .send(MessageEnvelope {
+                        user_id: message.user_id,
+                        session_id: message.session_id,
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: token.clone(),
+                        payload: Some(message_envelope::Payload::AuthAck(
+                            common::proto::ironclaw::AuthAck { cap_token: token.clone() },
+                        )),
+                    })
+                    .await
+                    .map_err(|err| IrowclawError::new(err.to_string()))?;
+                token
+            }
+            other => {
+                return Err(IrowclawError::new(format!(
+                    "expected AuthChallenge, got {other:?}"
+                )))
+            }
+        },
+        Ok(None) => return Ok(()),
+        Err(err) => return Err(IrowclawError::new(err.to_string())),
+    };
+
+    let mut call_id = 1u64;
+
     loop {
         let message = match transport.recv().await {
             Ok(Some(message)) => message,
             Ok(None) => break,
             Err(err) => return Err(IrowclawError::new(err.to_string())),
         };
-        let response = handle_message(&runtime, message)?;
+
+        // Minimal tool execution path (host tools).
+        // Syntax:
+        // - !bash <cmd>
+        // - !read <path>
+        // - !write <path>\n<contents>
+        if let Some(message_envelope::Payload::UserMessage(ref um)) = message.payload {
+            if let Some(rest) = um.text.strip_prefix("!bash ") {
+                let req = common::proto::ironclaw::ToolCallRequest {
+                    call_id,
+                    tool: "bash".to_string(),
+                    input: rest.to_string(),
+                };
+                call_id += 1;
+                transport
+                    .send(MessageEnvelope {
+                        user_id: message.user_id.clone(),
+                        session_id: message.session_id.clone(),
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::ToolCallRequest(req)),
+                    })
+                    .await
+                    .map_err(|e| IrowclawError::new(e.to_string()))?;
+
+                let resp = transport
+                    .recv()
+                    .await
+                    .map_err(|e| IrowclawError::new(e.to_string()))?;
+                if let Some(r) = resp {
+                    if let Some(message_envelope::Payload::ToolCallResponse(tr)) = r.payload {
+                        let out = if tr.ok { tr.output } else { format!("error: {}", tr.output) };
+                        let response = build_stream_delta(&message, &cap_token, out, true)?;
+                        transport
+                            .send(response)
+                            .await
+                            .map_err(|e| IrowclawError::new(e.to_string()))?;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let response = handle_message(&runtime, &cap_token, message)?;
         if let Some(response) = response {
             transport
                 .send(response)
@@ -142,12 +219,13 @@ pub async fn run_with_transport<T: Transport + 'static>(
 
 fn handle_message(
     runtime: &Runtime,
+    cap_token: &str,
     message: MessageEnvelope,
 ) -> Result<Option<MessageEnvelope>, IrowclawError> {
     match message.payload {
         Some(message_envelope::Payload::UserMessage(ref msg)) => {
             let reply = format!("stub: {}", msg.text);
-            let response = build_stream_delta(&message, reply, true)?;
+            let response = build_stream_delta(&message, cap_token, reply, true)?;
             Ok(Some(response))
         }
         Some(message_envelope::Payload::FileOpRequest(ref req)) => {
@@ -182,6 +260,7 @@ fn handle_message(
                 session_id: message.session_id,
                 msg_id: message.msg_id,
                 timestamp_ms: now_ms()?,
+                cap_token: cap_token.to_string(),
                 payload: Some(message_envelope::Payload::ToolResult(
                     common::proto::ironclaw::ToolResult {
                         tool: format!("file_{op}"),
@@ -197,6 +276,7 @@ fn handle_message(
 
 fn build_stream_delta(
     source: &MessageEnvelope,
+    cap_token: &str,
     delta: String,
     done: bool,
 ) -> Result<MessageEnvelope, IrowclawError> {
@@ -205,6 +285,7 @@ fn build_stream_delta(
         session_id: source.session_id.clone(),
         msg_id: source.msg_id,
         timestamp_ms: now_ms()?,
+        cap_token: cap_token.to_string(),
         payload: Some(message_envelope::Payload::StreamDelta(
             common::proto::ironclaw::StreamDelta { delta, done },
         )),

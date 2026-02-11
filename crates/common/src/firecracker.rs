@@ -1,6 +1,7 @@
 use crate::transport::{LocalTransport, Transport};
 use std::path::PathBuf;
 
+
 #[derive(Clone, Debug)]
 pub struct VmConfig {
     pub user_id: String,
@@ -11,6 +12,7 @@ pub struct VmInstance {
     pub user_id: String,
     pub brain_path: PathBuf,
     pub transport: Box<dyn Transport>,
+    pub allowed_tools: Vec<String>,
 }
 
 #[async_trait::async_trait]
@@ -55,6 +57,7 @@ impl StubVmManager {
             user_id: config.user_id,
             brain_path: config.brain_path,
             transport: Box::new(host_transport),
+            allowed_tools: vec![],
         };
         Ok((instance, guest_transport))
     }
@@ -68,6 +71,7 @@ impl VmManager for StubVmManager {
             user_id: config.user_id,
             brain_path: config.brain_path,
             transport: Box::new(host_transport),
+            allowed_tools: vec![],
         })
     }
 
@@ -246,6 +250,7 @@ impl VmManager for FirecrackerManager {
             user_id,
             brain_path: config.brain_path,
             transport: Box::new(transport),
+            allowed_tools: vec![],
         })
     }
 

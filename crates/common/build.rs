@@ -10,7 +10,23 @@ fn main() {
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );
     config.type_attribute(
+        ".ironclaw.AuthChallenge",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.AuthAck",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
         ".ironclaw.UserMessage",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.ToolCallRequest",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.ToolCallResponse",
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );
     config.type_attribute(

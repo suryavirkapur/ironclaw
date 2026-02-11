@@ -1,4 +1,10 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+
+mod auth_transport;
+mod host_tools;
+
+use auth_transport::AuthenticatedTransport;
+use host_tools::run_host_tool;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -132,7 +138,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
         }
     };
 
-    let transport = vm_instance.transport;
+    // Auth + tool policy (host-only enforcement)
+    let allowed_tools = vec!["bash".to_string(), "file_read".to_string(), "file_write".to_string()];
+
+    let cap_token = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+
+    let mut transport = vm_instance.transport;
+
     if state.local_guest {
         if let Some(guest_transport) = guest_transport {
             let guest_user_id = user_id.clone();
@@ -160,8 +177,52 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             });
         }
     }
+    // Send AuthChallenge and wait for AuthAck before starting WS bridge.
+    {
+        use common::proto::ironclaw::AuthChallenge;
+        let challenge = MessageEnvelope {
+            user_id: user_id.clone(),
+            session_id: session_id.clone(),
+            msg_id: 0,
+            timestamp_ms: now_ms().unwrap_or(0),
+            cap_token: cap_token.clone(),
+            payload: Some(message_envelope::Payload::AuthChallenge(AuthChallenge {
+                cap_token: cap_token.clone(),
+                allowed_tools: allowed_tools.clone(),
+            })),
+        };
+        if let Err(err) = transport.send(challenge).await {
+            tracing::error!("auth challenge send failed: {err}");
+            return;
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(5), transport.recv()).await {
+            Ok(Ok(Some(msg))) => match msg.payload {
+                Some(message_envelope::Payload::AuthAck(ack)) if ack.cap_token == cap_token => {}
+                other => {
+                    tracing::error!("invalid auth ack: {other:?}");
+                    return;
+                }
+            },
+            Ok(Ok(None)) => return,
+            Ok(Err(err)) => {
+                tracing::error!("auth ack recv failed: {err}");
+                return;
+            }
+            Err(_) => {
+                tracing::error!("auth ack timed out");
+                return;
+            }
+        }
+
+        transport = Box::new(AuthenticatedTransport::new(transport, cap_token.clone()));
+    }
+
 
     let (mut sender, mut receiver) = socket.split();
+
+    // Tool policy.
+    let tool_user_id = user_id.clone();
 
     // Single-loop bridge.
     // Avoid holding a mutex across `.await` on `Transport::recv()`.
@@ -185,6 +246,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         session_id: session_id.clone(),
                         msg_id,
                         timestamp_ms,
+                        cap_token: String::new(),
                         payload: Some(message_envelope::Payload::UserMessage(
                             common::proto::ironclaw::UserMessage { text: text.to_string() },
                         )),
@@ -200,6 +262,36 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             transport_msg = transport.recv() => {
                 match transport_msg {
                     Ok(Some(envelope)) => {
+                        // Handle host-side tools requested by the guest.
+                        if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
+                            let result = run_host_tool(&allowed_tools, &tool_user_id, &req.tool, &req.input).await;
+                            let (ok, output) = match result {
+                                Ok(out) => (true, out),
+                                Err(err) => (false, err),
+                            };
+
+                            let resp = MessageEnvelope {
+                                user_id: envelope.user_id,
+                                session_id: envelope.session_id,
+                                msg_id: envelope.msg_id,
+                                timestamp_ms: envelope.timestamp_ms,
+                                cap_token: String::new(),
+                                payload: Some(message_envelope::Payload::ToolCallResponse(
+                                    common::proto::ironclaw::ToolCallResponse {
+                                        call_id: req.call_id,
+                                        ok,
+                                        output,
+                                    },
+                                )),
+                            };
+
+                            if let Err(err) = transport.send(resp).await {
+                                tracing::error!("tool response send failed: {err}");
+                                break;
+                            }
+                            continue;
+                        }
+
                         let payload = match serde_json::to_string(&envelope) {
                             Ok(value) => value,
                             Err(err) => {

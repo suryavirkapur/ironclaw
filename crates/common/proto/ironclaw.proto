@@ -8,8 +8,18 @@ message MessageEnvelope {
   uint64 msg_id = 3;
   uint64 timestamp_ms = 4;
 
+  // Capability token required by the host for all non-auth messages.
+  // Provided by host via AuthChallenge.
+  string cap_token = 5;
+
   oneof payload {
+    AuthChallenge auth_challenge = 9;
+    AuthAck auth_ack = 8;
+
     UserMessage user_message = 10;
+    ToolCallRequest tool_call_request = 16;
+    ToolCallResponse tool_call_response = 17;
+
     ToolResult tool_result = 11;
     StreamDelta stream_delta = 12;
     JobTrigger job_trigger = 13;
@@ -18,8 +28,29 @@ message MessageEnvelope {
   }
 }
 
+message AuthChallenge {
+  string cap_token = 1;
+  repeated string allowed_tools = 2;
+}
+
+message AuthAck {
+  string cap_token = 1;
+}
+
 message UserMessage {
   string text = 1;
+}
+
+message ToolCallRequest {
+  uint64 call_id = 1;
+  string tool = 2;
+  string input = 3;
+}
+
+message ToolCallResponse {
+  uint64 call_id = 1;
+  bool ok = 2;
+  string output = 3;
 }
 
 message ToolResult {

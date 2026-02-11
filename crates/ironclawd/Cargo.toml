@@ -15,10 +15,13 @@ mime_guess = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "*", features = ["macros", "rt-multi-thread", "time", "process", "fs"] }
 toml = "*"
 tracing = "*"
 tracing-subscriber = "*"
+rand = "*"
+hex = "*"
+async-trait = "*"
 
 [features]
 firecracker = ["common/firecracker"]
