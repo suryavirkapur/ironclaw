@@ -16,9 +16,9 @@ use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
-use host_tools::run_host_tool;
+use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
-use llm_client::LlmClient;
+use llm_client::{LlmClient, ToolPlan};
 use serde::Deserialize;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -165,24 +165,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     if state.local_guest {
         if let Some(guest_transport) = guest_transport {
             let guest_user_id = user_id.clone();
+            let users_root = state.host_config.storage.users_root.clone();
+            let guest_config_path = (*state.guest_config_path).clone();
             tokio::spawn(async move {
                 // Local guest mode runs irowclaw in-process. Use a writable brain root.
-                let brain_root = state
-                    .host_config
-                    .storage
-                    .users_root
-                    .join(&guest_user_id)
-                    .join("guest");
+                let brain_root = users_root.join(&guest_user_id).join("guest");
                 if let Err(err) = std::fs::create_dir_all(&brain_root) {
                     tracing::warn!("create brain root failed: {err}");
                 }
                 std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
 
-                if let Err(err) = irowclaw::runtime::run_with_transport(
-                    guest_transport,
-                    (*state.guest_config_path).clone(),
-                )
-                .await
+                if let Err(err) =
+                    irowclaw::runtime::run_with_transport(guest_transport, guest_config_path).await
                 {
                     tracing::error!("guest runtime failed: {err}");
                 }
@@ -252,10 +246,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             0
                         }
                     };
-                    let response_text = match state.llm_client.complete(&text).await {
+                    let response_text = match run_host_turn(
+                        &state,
+                        &tool_user_id,
+                        &allowed_tools,
+                        text.as_str(),
+                    )
+                    .await
+                    {
                         Ok(value) => value,
                         Err(err) => {
-                            tracing::error!("llm completion failed: {err}");
+                            tracing::error!("host turn failed: {err}");
                             "llm request failed".to_string()
                         }
                     };
@@ -290,11 +291,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 match transport_msg {
                     Ok(Some(envelope)) => {
                         // Handle host-side tools requested by the guest.
-                        if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
-                            let result = run_host_tool(&allowed_tools, &tool_user_id, &req.tool, &req.input).await;
+                        if let Some(message_envelope::Payload::ToolCallRequest(req)) =
+                            envelope.payload.clone()
+                        {
+                            let result =
+                                run_host_tool(&allowed_tools, &tool_user_id, &req.tool, &req.input)
+                                    .await;
                             let (ok, output) = match result {
-                                Ok(out) => (true, out),
-                                Err(err) => (false, err),
+                                Ok(out) => (true, truncate_tool_output(&out)),
+                                Err(err) => (false, truncate_tool_output(&err)),
                             };
 
                             let resp = MessageEnvelope {
@@ -435,4 +440,44 @@ fn now_ms() -> Result<u64, IronclawError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|err| IronclawError::new(format!("time error: {err}")))
         .map(|duration| duration.as_millis() as u64)
+}
+
+async fn run_host_turn(
+    state: &AppState,
+    user_id: &str,
+    allowed_tools: &[String],
+    user_text: &str,
+) -> Result<String, IronclawError> {
+    let plan = state
+        .llm_client
+        .plan_tool_or_answer(user_text, allowed_tools)
+        .await
+        .map_err(|err| IronclawError::new(format!("tool planning failed: {err}")))?;
+
+    match plan {
+        ToolPlan::Answer { text } => {
+            tracing::info!("tool plan action=answer");
+            Ok(text)
+        }
+        ToolPlan::Tool { tool, input } => {
+            tracing::info!("tool plan action=tool tool={tool}");
+            let tool_result = run_host_tool(allowed_tools, user_id, &tool, &input).await;
+            let (ok, raw_output) = match tool_result {
+                Ok(output) => (true, output),
+                Err(output) => (false, output),
+            };
+            let output = truncate_tool_output(&raw_output);
+            tracing::info!(
+                "tool execution tool={} ok={} output_len={}",
+                tool,
+                ok,
+                output.len()
+            );
+            state
+                .llm_client
+                .finalize_with_tool_output(user_text, &tool, &input, ok, &output)
+                .await
+                .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))
+        }
+    }
 }

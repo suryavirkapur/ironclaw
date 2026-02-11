@@ -1,12 +1,14 @@
 current context:
-- step 1 host-only llm flow is implemented in ironclawd
-- ironclawd websocket user messages now call openai from host using reqwest and return streamdelta json to ui
+- step 2 host-only tool planning/execution loop is implemented in ironclawd
+- ironclawd websocket user messages now use host llm planning json (`tool` or `answer`)
+- when planned, host executes allowlisted tools directly and sends truncated tool output
+  into host llm for final response
 - auth challenge/auth ack handshake and cap token enforcement remain active on host-guest transport
-- irowclaw is still running for vm/session plumbing but no host websocket user message is forwarded to guest llm path
+- irowclaw is still running for vm/session plumbing and can still request host
+  tool execution via authenticated transport
 - host config now includes llm model, base_url, and api selector fields in toml
 
 pending tasks:
-- step 2 tool call loop: let host llm produce tool requests and execute via existing host tool policy
 - add stronger integration test coverage for websocket + llm path with mocked http service
 - validate firecracker e2e behavior with real openai key in a controlled smoke run
 
@@ -21,5 +23,5 @@ architectural notes:
 - host tool request handling from guest remains wired but tool use is not initiated in step 1
 
 plan:
-- keep step 1 stable and verified with cargo check and smoke-firecracker
-- implement step 2 host tool orchestration through llm output schema
+- keep step 2 stable and verified with cargo check and smoke-firecracker
+- continue with firecracker guest transport and host-guest e2e bridge hardening

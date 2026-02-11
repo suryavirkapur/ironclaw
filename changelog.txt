@@ -1,3 +1,10 @@
+0.2.0 2026-02-11
+- added host-only tool planning loop with json plan schema (`tool` or `answer`)
+- added plan parsing + validation in llm client with parser unit coverage
+- wired host allowlisted tool execution for websocket user turns without guest llm involvement
+- added safe tool output truncation and execution logging before llm finalization
+- updated todo and agent context for step 2 completion
+
 0.1.2 2026-02-11
 - switched ironclawd openai integration from curl subprocess calls to reqwest http client
 - kept host-only llm websocket streamdelta flow and cap token auth enforcement intact

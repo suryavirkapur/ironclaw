@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
+
 pub async fn run_host_tool(
     allowed_tools: &[String],
     user_id: &str,
@@ -18,6 +20,19 @@ pub async fn run_host_tool(
         "file_write" => file_write(&ws_root, input).await,
         _ => Err(format!("unknown tool: {tool}")),
     }
+}
+
+pub fn truncate_tool_output(output: &str) -> String {
+    if output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return output.to_string();
+    }
+
+    let mut truncated = String::new();
+    for ch in output.chars().take(MAX_TOOL_OUTPUT_CHARS) {
+        truncated.push(ch);
+    }
+    truncated.push_str("\n[output truncated]");
+    truncated
 }
 
 fn host_workspace_root(user_id: &str) -> Result<PathBuf, String> {

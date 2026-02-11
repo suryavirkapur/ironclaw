@@ -76,6 +76,28 @@ impl LlmClient {
 
         parse_llm_response(self.config.api, &body)
     }
+
+    pub async fn plan_tool_or_answer(
+        &self,
+        user_text: &str,
+        allowed_tools: &[String],
+    ) -> Result<ToolPlan, LlmClientError> {
+        let prompt = build_tool_plan_prompt(user_text, allowed_tools);
+        let raw = self.complete(&prompt).await?;
+        parse_tool_plan(&raw, allowed_tools)
+    }
+
+    pub async fn finalize_with_tool_output(
+        &self,
+        user_text: &str,
+        tool: &str,
+        input: &str,
+        tool_ok: bool,
+        tool_output: &str,
+    ) -> Result<String, LlmClientError> {
+        let prompt = build_tool_finalize_prompt(user_text, tool, input, tool_ok, tool_output);
+        self.complete(&prompt).await
+    }
 }
 
 fn parse_llm_response(api: HostLlmApi, body: &str) -> Result<String, LlmClientError> {
@@ -108,6 +130,140 @@ fn parse_llm_response(api: HostLlmApi, body: &str) -> Result<String, LlmClientEr
             Err(LlmClientError::new("responses output did not contain text"))
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolPlan {
+    Tool { tool: String, input: String },
+    Answer { text: String },
+}
+
+fn build_tool_plan_prompt(user_text: &str, allowed_tools: &[String]) -> String {
+    let tools = allowed_tools.join(", ");
+    format!(
+        "you are a host planner. choose exactly one action.\n\
+         output valid json only.\n\
+         schema:\n\
+         - tool action: {{\"action\":\"tool\",\"tool\":\"<name>\",\"input\":\"<text>\"}}\n\
+         - answer action: {{\"action\":\"answer\",\"text\":\"<response>\"}}\n\
+         allowed tools: [{tools}]\n\
+         rules:\n\
+         - if a tool is needed, choose action tool.\n\
+         - if no tool is needed, choose action answer.\n\
+         - do not include markdown.\n\
+         user message:\n\
+         {user_text}"
+    )
+}
+
+fn build_tool_finalize_prompt(
+    user_text: &str,
+    tool: &str,
+    input: &str,
+    tool_ok: bool,
+    tool_output: &str,
+) -> String {
+    let status = if tool_ok { "ok" } else { "error" };
+    format!(
+        "you are a host assistant. write the final user-facing response.\n\
+         use the tool result below.\n\
+         user message:\n\
+         {user_text}\n\
+         tool used: {tool}\n\
+         tool input:\n\
+         {input}\n\
+         tool status: {status}\n\
+         tool output:\n\
+         {tool_output}\n\
+         response rules:\n\
+         - answer directly.\n\
+         - if tool failed, explain failure briefly and suggest next step.\n\
+         - no markdown code fences unless the user requested them."
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+enum RawToolPlan {
+    Tool { tool: String, input: String },
+    Answer { text: String },
+}
+
+pub fn parse_tool_plan(raw: &str, allowed_tools: &[String]) -> Result<ToolPlan, LlmClientError> {
+    let json = extract_json_object(raw).ok_or_else(|| LlmClientError::new("missing json plan"))?;
+    let parsed: RawToolPlan = serde_json::from_str(json)
+        .map_err(|err| LlmClientError::new(format!("tool plan parse failed: {err}")))?;
+    match parsed {
+        RawToolPlan::Tool { tool, input } => {
+            let tool = tool.trim().to_string();
+            if tool.is_empty() {
+                return Err(LlmClientError::new("tool plan missing tool"));
+            }
+            if !allowed_tools.iter().any(|name| name == &tool) {
+                return Err(LlmClientError::new(format!("tool not allowed in plan: {tool}")));
+            }
+
+            let input = input.trim().to_string();
+            if input.is_empty() {
+                return Err(LlmClientError::new("tool plan missing input"));
+            }
+            Ok(ToolPlan::Tool { tool, input })
+        }
+        RawToolPlan::Answer { text } => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return Err(LlmClientError::new("answer plan missing text"));
+            }
+            Ok(ToolPlan::Answer { text })
+        }
+    }
+}
+
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Some(trimmed);
+    }
+
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, byte) in raw.char_indices() {
+        match byte {
+            '"' if !escaped => {
+                in_string = !in_string;
+            }
+            '\\' if in_string => {
+                escaped = !escaped;
+                continue;
+            }
+            '{' if !in_string => {
+                if start.is_none() {
+                    start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' if !in_string => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(begin) = start {
+                        return Some(raw[begin..=idx].trim());
+                    }
+                }
+            }
+            _ => {}
+        }
+        if byte != '\\' {
+            escaped = false;
+        }
+    }
+
+    None
 }
 
 #[derive(Serialize)]
@@ -165,7 +321,7 @@ struct ResponsesContentItem {
 
 #[cfg(test)]
 mod llm_client_test {
-    use super::parse_llm_response;
+    use super::{parse_llm_response, parse_tool_plan, ToolPlan};
     use common::config::HostLlmApi;
 
     #[test]
@@ -184,4 +340,42 @@ mod llm_client_test {
         assert_eq!(result.unwrap_or_default(), "hello from responses");
     }
 
+    #[test]
+    fn parses_answer_plan_json() {
+        let allowed_tools = vec!["bash".to_string()];
+        let raw = r#"{"action":"answer","text":"hello"}"#;
+        let result = parse_tool_plan(raw, &allowed_tools);
+        assert!(matches!(
+            result,
+            Ok(ToolPlan::Answer { text }) if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn parses_tool_plan_from_wrapped_text() {
+        let allowed_tools = vec!["bash".to_string(), "file_read".to_string()];
+        let raw =
+            r#"plan follows: {"action":"tool","tool":"bash","input":"ls -la"} thanks"#;
+        let result = parse_tool_plan(raw, &allowed_tools);
+        assert!(matches!(
+            result,
+            Ok(ToolPlan::Tool { tool, input }) if tool == "bash" && input == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_tool_in_plan() {
+        let allowed_tools = vec!["file_read".to_string()];
+        let raw = r#"{"action":"tool","tool":"bash","input":"pwd"}"#;
+        let result = parse_tool_plan(raw, &allowed_tools);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_empty_answer_text() {
+        let allowed_tools = vec!["bash".to_string()];
+        let raw = r#"{"action":"answer","text":"   "}"#;
+        let result = parse_tool_plan(raw, &allowed_tools);
+        assert!(result.is_err());
+    }
 }

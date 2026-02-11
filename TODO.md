@@ -25,6 +25,11 @@
   - websocket user messages now call host openai api via `OPENAI_API_KEY` using reqwest
   - websocket replies return `StreamDelta` directly from host llm output
   - auth handshake and cap token transport enforcement remain intact
+- step 2 complete: host-only tool planning and execution loop
+  - added json tool plan parsing and validation in `llm_client`
+  - host websocket message flow now supports plan action `tool` and `answer`
+  - host tool execution uses allowlist and feeds truncated output back to host llm
+  - streamdelta response still returns from host only
 - Published repo
   - Created GitHub repo and pushed: https://github.com/suryavirkapur/ironclaw
 
