@@ -2,21 +2,23 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
 mod auth_transport;
 mod host_tools;
+mod llm_client;
 
 use auth_transport::AuthenticatedTransport;
-use host_tools::run_host_tool;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use common::config::HostConfig;
-use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
+use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
+use host_tools::run_host_tool;
 use include_dir::{include_dir, Dir};
+use llm_client::LlmClient;
 use serde::Deserialize;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -48,6 +50,7 @@ async fn main() -> Result<(), IronclawError> {
 #[derive(Clone)]
 struct AppState {
     host_config: Arc<HostConfig>,
+    llm_client: Arc<LlmClient>,
     vm_manager: Arc<dyn VmManager>,
     guest_config_path: Arc<PathBuf>,
     local_guest: bool,
@@ -56,6 +59,10 @@ struct AppState {
 
 impl AppState {
     fn new(config: HostConfig) -> Result<Self, IronclawError> {
+        let llm_client = Arc::new(
+            LlmClient::new(config.llm.clone())
+                .map_err(|err| IronclawError::new(format!("llm client init failed: {err}")))?,
+        );
         let local_guest = !config.firecracker.enabled;
         let guest_config_path = Arc::new(guest_config_path());
         let (vm_manager, stub_vm_manager) = if config.firecracker.enabled {
@@ -91,6 +98,7 @@ impl AppState {
         };
         Ok(Self {
             host_config: Arc::new(config),
+            llm_client,
             vm_manager,
             guest_config_path,
             local_guest,
@@ -139,7 +147,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     };
 
     // Auth + tool policy (host-only enforcement)
-    let allowed_tools = vec!["bash".to_string(), "file_read".to_string(), "file_write".to_string()];
+    let allowed_tools = vec![
+        "bash".to_string(),
+        "file_read".to_string(),
+        "file_write".to_string(),
+    ];
 
     let cap_token = {
         use rand::RngCore;
@@ -218,7 +230,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
         transport = Box::new(AuthenticatedTransport::new(transport, cap_token.clone()));
     }
 
-
     let (mut sender, mut receiver) = socket.split();
 
     // Tool policy.
@@ -241,19 +252,35 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             0
                         }
                     };
+                    let response_text = match state.llm_client.complete(&text).await {
+                        Ok(value) => value,
+                        Err(err) => {
+                            tracing::error!("llm completion failed: {err}");
+                            "llm request failed".to_string()
+                        }
+                    };
                     let envelope = MessageEnvelope {
                         user_id: user_id.clone(),
                         session_id: session_id.clone(),
                         msg_id,
                         timestamp_ms,
                         cap_token: String::new(),
-                        payload: Some(message_envelope::Payload::UserMessage(
-                            common::proto::ironclaw::UserMessage { text: text.to_string() },
+                        payload: Some(message_envelope::Payload::StreamDelta(
+                            common::proto::ironclaw::StreamDelta {
+                                delta: response_text,
+                                done: true,
+                            },
                         )),
                     };
                     msg_id += 1;
-                    if let Err(err) = transport.send(envelope).await {
-                        tracing::error!("transport send failed: {err}");
+                    let payload = match serde_json::to_string(&envelope) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            tracing::error!("serialize ws message failed: {err}");
+                            break;
+                        }
+                    };
+                    if sender.send(Message::Text(payload.into())).await.is_err() {
                         break;
                     }
                 }
@@ -344,7 +371,11 @@ async fn ui_index_handler() -> Response {
 }
 
 async fn ui_asset_handler(Path(path): Path<String>) -> Response {
-    let path = if path.is_empty() { "index.html" } else { path.as_str() };
+    let path = if path.is_empty() {
+        "index.html"
+    } else {
+        path.as_str()
+    };
     ui_file_response(path)
 }
 
@@ -353,11 +384,11 @@ fn ui_file_response(path: &str) -> Response {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
             let mut response = Response::new(file.contents().into());
-            response
-                .headers_mut()
-                .insert("content-type", HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| {
-                    HeaderValue::from_static("application/octet-stream")
-                }));
+            response.headers_mut().insert(
+                "content-type",
+                HeaderValue::from_str(mime.as_ref())
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
             response
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),

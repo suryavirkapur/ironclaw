@@ -7,6 +7,35 @@ pub struct HostConfig {
     pub ui: HostUiConfig,
     pub firecracker: HostFirecrackerConfig,
     pub storage: HostStorageConfig,
+    pub llm: HostLlmConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostLlmApi {
+    ChatCompletions,
+    Responses,
+}
+
+impl HostLlmApi {
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/chat/completions",
+            Self::Responses => "/responses",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostLlmConfig {
+    pub model: String,
+    pub base_url: String,
+    #[serde(default = "default_host_llm_api")]
+    pub api: HostLlmApi,
+}
+
+fn default_host_llm_api() -> HostLlmApi {
+    HostLlmApi::Responses
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,6 +89,11 @@ impl HostConfig {
                 vsock_port: Some(5000),
             },
             storage: HostStorageConfig { users_root },
+            llm: HostLlmConfig {
+                model: "gpt-5-mini".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                api: HostLlmApi::Responses,
+            },
         }
     }
 }

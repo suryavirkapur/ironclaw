@@ -9,6 +9,11 @@ index_file = "index.html"
 [storage]
 users_root = "data/users"
 
+[llm]
+model = "gpt-5-mini"
+base_url = "https://api.openai.com/v1"
+api = "responses"
+
 [firecracker]
 enabled = true
 kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"

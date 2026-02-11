@@ -12,6 +12,7 @@ futures = "*"
 include_dir = "*"
 irowclaw = { path = "../irowclaw" }
 mime_guess = "*"
+reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"

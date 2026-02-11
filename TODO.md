@@ -20,6 +20,11 @@
 - Workspace builds
   - `cargo check` succeeds
   - `cargo check -p ironclawd --features firecracker` succeeds
+- step 1 complete: host-only llm call in `ironclawd`
+  - added host llm config (`model`, `base_url`, `api`) in host toml/config structs
+  - websocket user messages now call host openai api via `OPENAI_API_KEY` using reqwest
+  - websocket replies return `StreamDelta` directly from host llm output
+  - auth handshake and cap token transport enforcement remain intact
 - Published repo
   - Created GitHub repo and pushed: https://github.com/suryavirkapur/ironclaw
 

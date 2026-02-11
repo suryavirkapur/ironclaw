@@ -1,3 +1,14 @@
+0.1.2 2026-02-11
+- switched ironclawd openai integration from curl subprocess calls to reqwest http client
+- kept host-only llm websocket streamdelta flow and cap token auth enforcement intact
+- documented step 1 completion detail in todo
+
+0.1.1 2026-02-11
+- added host llm config fields for model, base_url, and api selection
+- implemented host-only openai llm client in ironclawd using openai_api_key env
+- switched websocket user message handling to return host-generated streamdelta responses
+- added unit coverage for llm response parsing paths
+
 0.1.0 2026-02-10
 - added rust toolchain pin for 1.92.0
 - wired firecracker manager selection with feature-gated error handling
