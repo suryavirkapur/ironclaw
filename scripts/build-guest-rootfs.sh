@@ -60,10 +60,20 @@ done
 pushd . >/dev/null
 cd "$(git rev-parse --show-toplevel)"
 
-if [[ ! -f "${IROWCLAW_BIN_REL}" ]]; then
-  echo "building irowclaw musl (if toolchain available)" >&2
-  rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
-  cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
+IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-0}"
+
+if [[ "${IROWCLAW_USE_MUSL}" == "1" && ! -f "${IROWCLAW_BIN_REL}" ]]; then
+  if command -v musl-gcc >/dev/null 2>&1; then
+    echo "building irowclaw musl" >&2
+    rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+    export CC_x86_64_unknown_linux_musl=musl-gcc
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+    # Force a fully static, non-PIE binary for the minimal guest.
+    export RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-static -C link-arg=-no-pie'
+    cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
+  else
+    echo "musl-gcc not found, skipping musl build" >&2
+  fi
 fi
 
 IROWCLAW_BIN=""
@@ -81,6 +91,15 @@ fi
 popd >/dev/null
 
 install -m 0755 "${IROWCLAW_BIN}" "${ROOT_DIR}/bin/irowclaw"
+
+# If this is a musl-linked binary, ensure the musl interpreter exists inside the rootfs.
+# Without it, execve returns ENOENT and /init will report "/bin/irowclaw: not found".
+if file "${ROOT_DIR}/bin/irowclaw" | grep -q "interpreter /lib/ld-musl-x86_64.so.1"; then
+  if [[ -f /usr/lib/musl/lib/libc.so ]]; then
+    mkdir -p "${ROOT_DIR}/lib"
+    install -m 0755 /usr/lib/musl/lib/libc.so "${ROOT_DIR}/lib/ld-musl-x86_64.so.1"
+  fi
+fi
 
 # Copy vsock-related kernel modules (best effort).
 # This helps when the host kernel has vsock as modules, and the guest rootfs is minimal.

@@ -20,9 +20,13 @@ async fn main() -> Result<(), irowclaw::runtime::IrowclawError> {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(5000);
 
+        eprintln!("irowclaw: starting (vsock accept on port {port})");
+
         let transport = irowclaw::vsock_transport::VsockTransport::accept(port)
             .await
             .map_err(|e| irowclaw::runtime::IrowclawError::new(e.to_string()))?;
+
+        eprintln!("irowclaw: vsock accepted, entering loop");
 
         return irowclaw::runtime::run_with_transport(transport, config_path).await;
     }

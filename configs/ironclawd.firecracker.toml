@@ -11,7 +11,7 @@ users_root = "data/users"
 
 [firecracker]
 enabled = true
-kernel_path = "kernels/firecracker/vmlinux.bin"
+kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
 rootfs_path = "rootfs/build/guest-root"
 api_socket_dir = "/tmp/ironclaw-fc"
 vsock_uds_dir = "/tmp/ironclaw/vsock"

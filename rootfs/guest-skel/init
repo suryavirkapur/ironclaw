@@ -34,11 +34,17 @@ export IRONCLAW_VSOCK_PORT=${IRONCLAW_VSOCK_PORT:-5000}
 # Guest config
 export IROWCLAW_CONFIG=${IROWCLAW_CONFIG:-/mnt/brain/config/irowclaw.toml}
 
-# Run guest runtime
+# Run guest runtime (do not exec as PID1; keep init alive if it crashes)
 if [ -x /bin/irowclaw ]; then
-  echo "ironclaw guest init: exec /bin/irowclaw"
-  exec /bin/irowclaw
+  echo "ironclaw guest init: starting /bin/irowclaw"
+  set +e
+  while true; do
+    /bin/irowclaw
+    code=$?
+    echo "ironclaw guest init: irowclaw exited code=${code}, restarting in 1s"
+    sleep 1
+  done
 fi
 
-echo "ironclaw guest init: missing /bin/irowclaw" 
-sleep 3600
+echo "ironclaw guest init: missing /bin/irowclaw"
+while true; do sleep 3600; done
