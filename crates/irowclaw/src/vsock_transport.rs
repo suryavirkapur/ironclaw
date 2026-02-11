@@ -6,11 +6,18 @@ pub struct VsockTransport {
 }
 
 impl VsockTransport {
-    pub async fn connect(host_cid: u32, port: u32) -> Result<Self, TransportError> {
-        let addr = tokio_vsock::VsockAddr::new(host_cid, port);
-        let stream = tokio_vsock::VsockStream::connect(addr)
+    /// Listen inside the guest and accept a single host-initiated connection.
+    pub async fn accept(port: u32) -> Result<Self, TransportError> {
+        use tokio_vsock::{VsockAddr, VsockListener, VMADDR_CID_ANY};
+
+        let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))
+            .map_err(|e| TransportError::new(format!("vsock bind failed: {e}")))?;
+
+        let (stream, _peer) = listener
+            .accept()
             .await
-            .map_err(|e| TransportError::new(format!("vsock connect failed: {e}")))?;
+            .map_err(|e| TransportError::new(format!("vsock accept failed: {e}")))?;
+
         Ok(Self {
             inner: StreamTransport::new(stream),
         })

@@ -10,3 +10,7 @@
 
 # Generated guest rootfs build output
 /rootfs/build/
+
+# Local kernel artifacts (do not commit)
+/kernels/linux-src-*
+/kernels/fc-*

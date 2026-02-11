@@ -166,22 +166,72 @@ impl VmManager for FirecrackerManager {
         .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;
 
         // Firecracker creates and listens on the host-side UDS endpoint for vsock.
-        // Connect to it from the host side.
-        let stream = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // Host-initiated connection flow (Firecracker docs):
+        // - connect(uds_path)
+        // - write: "CONNECT <port>\n"
+        // - read:  "OK <host_port>\n" (must be consumed before we start framing)
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // The guest may not be listening yet when the VM first starts.
+        // Firecracker will close the UDS connection if nobody is listening on the requested port.
+        // So we retry the entire host-initiated handshake until we get an OK.
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
-                match tokio::net::UnixStream::connect(&vsock_uds_path).await {
-                    Ok(stream) => break Ok(stream),
-                    Err(err) => {
-                        // Retry until Firecracker is ready.
-                        if err.kind() == std::io::ErrorKind::NotFound
-                            || err.kind() == std::io::ErrorKind::ConnectionRefused
-                        {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                            continue;
+                // 1) connect to uds_path (wait for Firecracker to create it)
+                let mut stream = loop {
+                    match tokio::net::UnixStream::connect(&vsock_uds_path).await {
+                        Ok(stream) => break stream,
+                        Err(err) => {
+                            if err.kind() == std::io::ErrorKind::NotFound
+                                || err.kind() == std::io::ErrorKind::ConnectionRefused
+                            {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                continue;
+                            }
+                            return Err(err);
                         }
-                        break Err(err);
+                    }
+                };
+
+                // 2) send CONNECT
+                let connect_cmd = format!("CONNECT {}\n", self.config.vsock_port);
+                if let Err(_e) = stream.write_all(connect_cmd.as_bytes()).await {
+                    // treat as transient
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                let _ = stream.flush().await;
+
+                // 3) read OK line
+                let mut line = Vec::with_capacity(64);
+                let mut buf = [0u8; 1];
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) => {
+                            // guest likely not listening yet
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            break;
+                        }
+                        Ok(_) => {
+                            line.push(buf[0]);
+                            if buf[0] == b'\n' || line.len() > 256 {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            break;
+                        }
                     }
                 }
+
+                let s = String::from_utf8_lossy(&line);
+                if s.starts_with("OK ") {
+                    return Ok(stream);
+                }
+
+                // Not acknowledged yet, retry.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         })
         .await

@@ -30,7 +30,8 @@ mkdir -p \
   "${ROOT_DIR}/usr/bin" \
   "${ROOT_DIR}/usr/sbin" \
   "${ROOT_DIR}/lib" \
-  "${ROOT_DIR}/lib64"
+  "${ROOT_DIR}/lib64" \
+  "${ROOT_DIR}/lib/modules"
 
 # /init
 install -m 0755 rootfs/guest-skel/init "${ROOT_DIR}/init"
@@ -81,6 +82,32 @@ popd >/dev/null
 
 install -m 0755 "${IROWCLAW_BIN}" "${ROOT_DIR}/bin/irowclaw"
 
+# Copy vsock-related kernel modules (best effort).
+# This helps when the host kernel has vsock as modules, and the guest rootfs is minimal.
+KVER="$(uname -r)"
+MOD_BASE="/usr/lib/modules/${KVER}"
+if [[ -d "${MOD_BASE}" ]]; then
+  mods=(
+    "kernel/net/vmw_vsock/vsock.ko.zst"
+    "kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko.zst"
+    "kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko.zst"
+    "kernel/drivers/vhost/vhost_iotlb.ko.zst"
+    "kernel/drivers/vhost/vhost.ko.zst"
+    "kernel/drivers/vhost/vhost_vsock.ko.zst"
+  )
+
+  if command -v zstd >/dev/null 2>&1; then
+    for rel in "${mods[@]}"; do
+      src="${MOD_BASE}/${rel}"
+      if [[ -f "${src}" ]]; then
+        out_name="$(basename "${src}" .zst)"
+        out_path="${ROOT_DIR}/lib/modules/${out_name}"
+        zstd -q -d -c "${src}" >"${out_path}" || true
+      fi
+    done
+  fi
+fi
+
 # If dynamic, copy libs.
 # This is best-effort and intended for local dev.
 if ldd "${ROOT_DIR}/bin/irowclaw" 2>/dev/null | grep -q "=>"; then
@@ -101,6 +128,13 @@ if ldd "${ROOT_DIR}/bin/irowclaw" 2>/dev/null | grep -q "=>"; then
       cp -L "${src}" "${dest_dir}/"
     fi
   done < <(ldd "${ROOT_DIR}/bin/irowclaw" || true)
+
+  # Ensure the dynamic loader exists at the path encoded in the ELF interpreter.
+  # On Arch the file often lives under /usr/lib64 but the interpreter is /lib64/ld-linux-x86-64.so.2.
+  if [[ -f "${ROOT_DIR}/usr/lib64/ld-linux-x86-64.so.2" && ! -e "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2" ]]; then
+    mkdir -p "${ROOT_DIR}/lib64"
+    ln -sf /usr/lib64/ld-linux-x86-64.so.2 "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2"
+  fi
 fi
 
 echo "rootfs dir ready: ${ROOT_DIR}" >&2

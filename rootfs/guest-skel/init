@@ -15,6 +15,18 @@ mount -t tmpfs tmpfs /tmp || true
 ip link set lo up || true
 ip link set eth0 up || true
 
+# Load vsock kernel modules if present (best effort).
+# Needed on many distros where vsock is modular.
+if [ -f /lib/modules/vsock.ko ]; then
+  echo "ironclaw guest init: loading vsock modules"
+  insmod /lib/modules/vsock.ko || true
+  insmod /lib/modules/vmw_vsock_virtio_transport_common.ko || true
+  insmod /lib/modules/vmw_vsock_virtio_transport.ko || true
+  insmod /lib/modules/vhost_iotlb.ko || true
+  insmod /lib/modules/vhost.ko || true
+  insmod /lib/modules/vhost_vsock.ko || true
+fi
+
 # Vsock transport
 export IRONCLAW_VSOCK=1
 export IRONCLAW_VSOCK_PORT=${IRONCLAW_VSOCK_PORT:-5000}
