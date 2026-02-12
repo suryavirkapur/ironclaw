@@ -1,27 +1,29 @@
 current context:
-- step 2 host-only tool planning/execution loop is implemented in ironclawd
-- ironclawd websocket user messages now use host llm planning json (`tool` or `answer`)
-- when planned, host executes allowlisted tools directly and sends truncated tool output
-  into host llm for final response
-- auth challenge/auth ack handshake and cap token enforcement remain active on host-guest transport
-- irowclaw is still running for vm/session plumbing and can still request host
-  tool execution via authenticated transport
-- host config now includes llm model, base_url, and api selector fields in toml
+- firecracker guest rootfs build now produces:
+  - rootfs/build/guest-root (directory tree)
+  - rootfs/build/guest-rootfs.ext4 (bootable ext4 image)
+- guest rootfs build now copies shared libs for both busybox and irowclaw when dynamic
+- default guest build now attempts x86_64-unknown-linux-musl irowclaw first
+- smoke-firecracker now runs direct firecracker vsock roundtrip via common example
+- common example firecracker_vsock_roundtrip validates auth handshake + streamdelta reply
 
 pending tasks:
-- add stronger integration test coverage for websocket + llm path with mocked http service
-- validate firecracker e2e behavior with real openai key in a controlled smoke run
+- run firecracker smoke on a host that allows unix socket bind syscalls
+- verify successful guest boot and vsock reply outside this restricted sandbox
+- keep websocket + llm integration coverage work on backlog
 
 important decisions:
 - llm network calls are host-only and keyed by openai_api_key env var
 - guest must never call llm endpoints
 - default host llm api is responses at https://api.openai.com/v1 with model gpt-5-mini
+- firecracker rootfs default path in config is now ext4 image for direct boot
 
 architectural notes:
 - websocket payload stays messageenvelope json with payload.streamdelta for text output
 - host keeps vm start and authenticated transport setup intact before ws bridge loop
 - host tool request handling from guest remains wired but tool use is not initiated in step 1
+- firecracker smoke path is now independent of websocket tcp bind requirements
 
 plan:
-- keep step 2 stable and verified with cargo check and smoke-firecracker
-- continue with firecracker guest transport and host-guest e2e bridge hardening
+- execute smoke-firecracker on a non-restricted host runtime to confirm full pass
+- if needed, add dedicated firecracker logger path plumbing for easier guest boot debugging
