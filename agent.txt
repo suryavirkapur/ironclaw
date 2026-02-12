@@ -1,29 +1,27 @@
 current context:
-- firecracker guest rootfs build now produces:
-  - rootfs/build/guest-root (directory tree)
-  - rootfs/build/guest-rootfs.ext4 (bootable ext4 image)
-- guest rootfs build now copies shared libs for both busybox and irowclaw when dynamic
-- default guest build now attempts x86_64-unknown-linux-musl irowclaw first
-- smoke-firecracker now runs direct firecracker vsock roundtrip via common example
-- common example firecracker_vsock_roundtrip validates auth handshake + streamdelta reply
+- firecracker guest rootfs build produces rootfs/build/guest-root and guest-rootfs.ext4
+- websocket handler now forwards user text to guest transport when firecracker mode is enabled
+- new smoke-firecracker-ws script validates websocket -> host -> guest(vsock) -> websocket
+- ws smoke client asserts unique marker is returned by guest-derived streamdelta payload
 
 pending tasks:
-- run firecracker smoke on a host that allows unix socket bind syscalls
-- verify successful guest boot and vsock reply outside this restricted sandbox
-- keep websocket + llm integration coverage work on backlog
+- run smoke-firecracker-ws twice on a host with kvm/firecracker and capture output
+- push step 4 commit to origin/master after local validation
 
 important decisions:
 - llm network calls are host-only and keyed by openai_api_key env var
 - guest must never call llm endpoints
 - default host llm api is responses at https://api.openai.com/v1 with model gpt-5-mini
 - firecracker rootfs default path in config is now ext4 image for direct boot
+- firecracker websocket path bypasses host llm turn and sends protobuf usermessage to guest
 
 architectural notes:
 - websocket payload stays messageenvelope json with payload.streamdelta for text output
 - host keeps vm start and authenticated transport setup intact before ws bridge loop
+- firecracker websocket replies are forwarded from transport.recv back to websocket client
 - host tool request handling from guest remains wired but tool use is not initiated in step 1
 - firecracker smoke path is now independent of websocket tcp bind requirements
 
 plan:
-- execute smoke-firecracker on a non-restricted host runtime to confirm full pass
-- if needed, add dedicated firecracker logger path plumbing for easier guest boot debugging
+- execute smoke-firecracker-ws twice and verify pass logs with guest-derived marker echo
+- if runtime flakes, tune retry/backoff and error surfacing in smoke script

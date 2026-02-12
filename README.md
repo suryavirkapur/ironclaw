@@ -22,7 +22,9 @@ cargo check -p ironclawd --features firecracker
 
 ## Run (local guest mode)
 
-Local guest mode is the default when Firecracker is disabled. In this mode, `ironclawd` uses an in-process transport pair and runs the guest runtime locally.
+Local guest mode is the default when Firecracker is disabled.
+In this mode, `ironclawd` uses an in-process transport pair
+and runs the guest runtime locally.
 
 ```bash
 cargo run -p ironclawd
@@ -68,6 +70,11 @@ Smoke:
   - `scripts/build-guest-rootfs.sh`
 - run firecracker + host/guest vsock roundtrip smoke:
   - `scripts/smoke-firecracker.sh`
+- run websocket end-to-end smoke through ironclawd + guest:
+  - `scripts/smoke-firecracker-ws.sh`
+  - this path validates websocket -> host daemon -> guest over vsock
+    -> websocket response
+  - prints `PASS` with a guest-derived `streamdelta` line on success
 
 Current status:
 

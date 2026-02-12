@@ -1,3 +1,9 @@
+0.2.2 2026-02-12
+- wired websocket user messages to guest transport when firecracker mode is enabled
+- added scripts/smoke-firecracker-ws.sh for one-command websocket end-to-end firecracker smoke
+- added scripts/smoke-firecracker-ws.mjs client with marker assertion for guest-derived response
+- documented firecracker websocket smoke command in readme
+
 0.2.1 2026-02-12
 - updated guest rootfs build to emit both directory tree and ext4 image artifact
 - added dependency copy handling for busybox and irowclaw when binaries are dynamically linked

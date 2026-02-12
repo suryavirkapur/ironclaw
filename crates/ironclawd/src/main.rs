@@ -246,43 +246,63 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             0
                         }
                     };
-                    let response_text = match run_host_turn(
-                        &state,
-                        &tool_user_id,
-                        &allowed_tools,
-                        text.as_str(),
-                    )
-                    .await
-                    {
-                        Ok(value) => value,
-                        Err(err) => {
-                            tracing::error!("host turn failed: {err}");
-                            "llm request failed".to_string()
-                        }
-                    };
-                    let envelope = MessageEnvelope {
-                        user_id: user_id.clone(),
-                        session_id: session_id.clone(),
-                        msg_id,
-                        timestamp_ms,
-                        cap_token: String::new(),
-                        payload: Some(message_envelope::Payload::StreamDelta(
-                            common::proto::ironclaw::StreamDelta {
-                                delta: response_text,
-                                done: true,
-                            },
-                        )),
-                    };
-                    msg_id += 1;
-                    let payload = match serde_json::to_string(&envelope) {
-                        Ok(value) => value,
-                        Err(err) => {
-                            tracing::error!("serialize ws message failed: {err}");
+                    if state.host_config.firecracker.enabled {
+                        let envelope = MessageEnvelope {
+                            user_id: user_id.clone(),
+                            session_id: session_id.clone(),
+                            msg_id,
+                            timestamp_ms,
+                            cap_token: String::new(),
+                            payload: Some(message_envelope::Payload::UserMessage(
+                                common::proto::ironclaw::UserMessage {
+                                    text: text.to_string(),
+                                },
+                            )),
+                        };
+                        msg_id += 1;
+                        if let Err(err) = transport.send(envelope).await {
+                            tracing::error!("send to guest failed: {err}");
                             break;
                         }
-                    };
-                    if sender.send(Message::Text(payload.into())).await.is_err() {
-                        break;
+                    } else {
+                        let response_text = match run_host_turn(
+                            &state,
+                            &tool_user_id,
+                            &allowed_tools,
+                            text.as_str(),
+                        )
+                        .await
+                        {
+                            Ok(value) => value,
+                            Err(err) => {
+                                tracing::error!("host turn failed: {err}");
+                                "llm request failed".to_string()
+                            }
+                        };
+                        let envelope = MessageEnvelope {
+                            user_id: user_id.clone(),
+                            session_id: session_id.clone(),
+                            msg_id,
+                            timestamp_ms,
+                            cap_token: String::new(),
+                            payload: Some(message_envelope::Payload::StreamDelta(
+                                common::proto::ironclaw::StreamDelta {
+                                    delta: response_text,
+                                    done: true,
+                                },
+                            )),
+                        };
+                        msg_id += 1;
+                        let payload = match serde_json::to_string(&envelope) {
+                            Ok(value) => value,
+                            Err(err) => {
+                                tracing::error!("serialize ws message failed: {err}");
+                                break;
+                            }
+                        };
+                        if sender.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
