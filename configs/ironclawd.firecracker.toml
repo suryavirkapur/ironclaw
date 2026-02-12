@@ -17,7 +17,7 @@ api = "responses"
 [firecracker]
 enabled = true
 kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
-rootfs_path = "rootfs/build/guest-root"
+rootfs_path = "rootfs/build/guest-rootfs.ext4"
 api_socket_dir = "/tmp/ironclaw-fc"
 vsock_uds_dir = "/tmp/ironclaw/vsock"
 vsock_port = 5000

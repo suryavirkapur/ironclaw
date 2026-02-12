@@ -1,23 +1,69 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds a minimal ext4 rootfs directory tree for the Firecracker guest.
-# - includes /init (busybox shell script)
-# - includes /bin/irowclaw
-# - includes busybox + common applets
-#
-# Notes:
-# - This builds a directory tree, not an ext4 image.
-#   ironclawd will convert it to ext4 at VM start (if configured that way).
-# - If /bin/irowclaw is dynamically linked, this script will try to copy required libs.
+# builds a minimal firecracker guest rootfs directory and ext4 image.
+# outputs:
+# - root tree: rootfs/build/guest-root (or arg1)
+# - ext4 image: rootfs/build/guest-rootfs.ext4 (or arg2 / ROOTFS_IMAGE)
 
 ROOT_DIR="${1:-rootfs/build/guest-root}"
+ROOTFS_IMAGE="${2:-${ROOTFS_IMAGE:-rootfs/build/guest-rootfs.ext4}}"
+ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-256}"
 IROWCLAW_BIN_REL="${IROWCLAW_BIN_REL:-target/x86_64-unknown-linux-musl/release/irowclaw}"
 IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
+IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-1}"
+
+require_bin() {
+  local bin
+  bin="$1"
+  if ! command -v "${bin}" >/dev/null 2>&1; then
+    echo "missing required tool: ${bin}" >&2
+    exit 1
+  fi
+}
+
+copy_binary_deps() {
+  local bin_path
+  bin_path="$1"
+
+  if ldd "${bin_path}" 2>/dev/null | grep -q "=>"; then
+    while IFS= read -r line; do
+      local src
+      src="$(echo "${line}" | awk '{print $3}' | sed 's/(.*//')"
+      if [[ -z "${src}" || ! -e "${src}" ]]; then
+        src="$(echo "${line}" | awk '{print $1}' | sed 's/(.*//')"
+      fi
+      if [[ -n "${src}" && -e "${src}" ]]; then
+        local dest_dir
+        dest_dir="${ROOT_DIR}$(dirname "${src}")"
+        mkdir -p "${dest_dir}"
+        cp -L "${src}" "${dest_dir}/"
+      fi
+    done < <(ldd "${bin_path}" || true)
+
+    if [[ -f "${ROOT_DIR}/usr/lib64/ld-linux-x86-64.so.2" && \
+      ! -e "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2" ]]; then
+      mkdir -p "${ROOT_DIR}/lib64"
+      ln -sf /usr/lib64/ld-linux-x86-64.so.2 "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2"
+    fi
+  fi
+
+  if file "${bin_path}" | grep -q "interpreter /lib/ld-musl-x86_64.so.1"; then
+    if [[ -f /usr/lib/musl/lib/libc.so ]]; then
+      mkdir -p "${ROOT_DIR}/lib"
+      install -m 0755 /usr/lib/musl/lib/libc.so "${ROOT_DIR}/lib/ld-musl-x86_64.so.1"
+    fi
+  fi
+}
+
+require_bin mkfs.ext4
+require_bin truncate
+require_bin file
+require_bin ldd
 
 mkdir -p "${ROOT_DIR}"
+mkdir -p "$(dirname "${ROOTFS_IMAGE}")"
 
-# Layout
 mkdir -p \
   "${ROOT_DIR}/bin" \
   "${ROOT_DIR}/sbin" \
@@ -33,10 +79,8 @@ mkdir -p \
   "${ROOT_DIR}/lib64" \
   "${ROOT_DIR}/lib/modules"
 
-# /init
 install -m 0755 rootfs/guest-skel/init "${ROOT_DIR}/init"
 
-# BusyBox
 BUSYBOX_BIN="${BUSYBOX_BIN:-}"
 if [[ -z "${BUSYBOX_BIN}" ]]; then
   if command -v busybox >/dev/null 2>&1; then
@@ -44,65 +88,42 @@ if [[ -z "${BUSYBOX_BIN}" ]]; then
   elif [[ -x /usr/bin/busybox ]]; then
     BUSYBOX_BIN="/usr/bin/busybox"
   else
-    echo "busybox not found. Install it (eg: sudo pacman -S busybox)" >&2
+    echo "busybox not found" >&2
     exit 1
   fi
 fi
 
 install -m 0755 "${BUSYBOX_BIN}" "${ROOT_DIR}/bin/busybox"
 
-# Common applet links
-for app in sh mount mkdir ln echo cat sleep ip ifconfig route udhcpc su ss modprobe insmod lsmod; do
+for app in sh mount mkdir ln echo cat sleep ip ifconfig route udhcpc su ss \
+  modprobe insmod lsmod ls; do
   ln -sf busybox "${ROOT_DIR}/bin/${app}"
 done
 
-# Build irowclaw
 pushd . >/dev/null
 cd "$(git rev-parse --show-toplevel)"
 
-IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-0}"
-
-if [[ "${IROWCLAW_USE_MUSL}" == "1" && ! -f "${IROWCLAW_BIN_REL}" ]]; then
-  if command -v musl-gcc >/dev/null 2>&1; then
-    echo "building irowclaw musl" >&2
-    rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
-    export CC_x86_64_unknown_linux_musl=musl-gcc
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
-    # Force a fully static, non-PIE binary for the minimal guest.
-    export RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-static -C link-arg=-no-pie'
-    cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
-  else
-    echo "musl-gcc not found, skipping musl build" >&2
-  fi
+if [[ "${IROWCLAW_USE_MUSL}" == "1" ]]; then
+  rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+  export RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-static -C link-arg=-no-pie'
+  cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
 fi
 
 IROWCLAW_BIN=""
 if [[ -f "${IROWCLAW_BIN_REL}" ]]; then
   IROWCLAW_BIN="${IROWCLAW_BIN_REL}"
-elif [[ -f "${IROWCLAW_BIN_ALT_REL}" ]]; then
-  echo "musl build not found, falling back to host target/release (likely dynamic)" >&2
+else
   cargo build -q -p irowclaw --release
   IROWCLAW_BIN="${IROWCLAW_BIN_ALT_REL}"
-else
-  echo "irowclaw binary not found and build failed" >&2
-  exit 1
 fi
 
 popd >/dev/null
 
 install -m 0755 "${IROWCLAW_BIN}" "${ROOT_DIR}/bin/irowclaw"
 
-# If this is a musl-linked binary, ensure the musl interpreter exists inside the rootfs.
-# Without it, execve returns ENOENT and /init will report "/bin/irowclaw: not found".
-if file "${ROOT_DIR}/bin/irowclaw" | grep -q "interpreter /lib/ld-musl-x86_64.so.1"; then
-  if [[ -f /usr/lib/musl/lib/libc.so ]]; then
-    mkdir -p "${ROOT_DIR}/lib"
-    install -m 0755 /usr/lib/musl/lib/libc.so "${ROOT_DIR}/lib/ld-musl-x86_64.so.1"
-  fi
-fi
+copy_binary_deps "${ROOT_DIR}/bin/busybox"
+copy_binary_deps "${ROOT_DIR}/bin/irowclaw"
 
-# Copy vsock-related kernel modules (best effort).
-# This helps when the host kernel has vsock as modules, and the guest rootfs is minimal.
 KVER="$(uname -r)"
 MOD_BASE="/usr/lib/modules/${KVER}"
 if [[ -d "${MOD_BASE}" ]]; then
@@ -127,33 +148,18 @@ if [[ -d "${MOD_BASE}" ]]; then
   fi
 fi
 
-# If dynamic, copy libs.
-# This is best-effort and intended for local dev.
-if ldd "${ROOT_DIR}/bin/irowclaw" 2>/dev/null | grep -q "=>"; then
-  echo "irowclaw appears dynamically linked, copying shared libs" >&2
+rm -f "${ROOTFS_IMAGE}"
+truncate -s "${ROOTFS_SIZE_MB}M" "${ROOTFS_IMAGE}"
+mkfs.ext4 -q -F -d "${ROOT_DIR}" -L ironclaw-rootfs "${ROOTFS_IMAGE}"
 
-  while read -r line; do
-    # Example lines:
-    #   libz.so.1 => /usr/lib/libz.so.1 (0x...)
-    #   /lib64/ld-linux-x86-64.so.2 (0x...)
-    src="$(echo "$line" | awk '{print $3}' | sed 's/(.*//')"
-    if [[ -z "${src}" || ! -e "${src}" ]]; then
-      # try direct path line
-      src="$(echo "$line" | awk '{print $1}' | sed 's/(.*//')"
-    fi
-    if [[ -n "${src}" && -e "${src}" ]]; then
-      dest_dir="${ROOT_DIR}$(dirname "${src}")"
-      mkdir -p "${dest_dir}"
-      cp -L "${src}" "${dest_dir}/"
-    fi
-  done < <(ldd "${ROOT_DIR}/bin/irowclaw" || true)
-
-  # Ensure the dynamic loader exists at the path encoded in the ELF interpreter.
-  # On Arch the file often lives under /usr/lib64 but the interpreter is /lib64/ld-linux-x86-64.so.2.
-  if [[ -f "${ROOT_DIR}/usr/lib64/ld-linux-x86-64.so.2" && ! -e "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2" ]]; then
-    mkdir -p "${ROOT_DIR}/lib64"
-    ln -sf /usr/lib64/ld-linux-x86-64.so.2 "${ROOT_DIR}/lib64/ld-linux-x86-64.so.2"
-  fi
+if ! debugfs -R "stat /init" "${ROOTFS_IMAGE}" >/dev/null 2>&1; then
+  echo "rootfs image validation failed: /init missing" >&2
+  exit 1
+fi
+if ! debugfs -R "stat /bin/irowclaw" "${ROOTFS_IMAGE}" >/dev/null 2>&1; then
+  echo "rootfs image validation failed: /bin/irowclaw missing" >&2
+  exit 1
 fi
 
 echo "rootfs dir ready: ${ROOT_DIR}" >&2
+echo "rootfs image ready: ${ROOTFS_IMAGE}" >&2

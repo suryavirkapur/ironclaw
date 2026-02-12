@@ -62,8 +62,15 @@ Rootfs notes:
 - The guest needs an executable `/init` and a guest binary at `/bin/irowclaw`.
   - See `rootfs/guest-skel/init` for a minimal init script that enables vsock.
 
+Smoke:
+
+- build guest rootfs dir + ext4 image:
+  - `scripts/build-guest-rootfs.sh`
+- run firecracker + host/guest vsock roundtrip smoke:
+  - `scripts/smoke-firecracker.sh`
+
 Current status:
 
 - VM start/stop is wired via the `znskr-firecracker` crate.
 - Host side vsock accept and guest side vsock connect are implemented.
-- Remaining: build a usable guest rootfs (ext4) that includes `/init` + `/bin/irowclaw`, so the guest actually connects.
+- guest rootfs build now emits `rootfs/build/guest-rootfs.ext4` with `/init` + `/bin/irowclaw`.
