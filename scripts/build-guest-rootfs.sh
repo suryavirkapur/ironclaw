@@ -105,7 +105,9 @@ cd "$(git rev-parse --show-toplevel)"
 
 if [[ "${IROWCLAW_USE_MUSL}" == "1" ]]; then
   rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
-  export RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-static -C link-arg=-no-pie'
+  # Build a fully static guest binary. Avoid forcing -no-pie here because some
+  # environments have shown early startup segfaults with non-PIE static executables.
+  export RUSTFLAGS='-C target-feature=+crt-static'
   cargo build -q -p irowclaw --release --target x86_64-unknown-linux-musl || true
 fi
 
