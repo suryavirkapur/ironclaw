@@ -9,12 +9,12 @@ index_file = "index.html"
 [storage]
 users_root = "data/users"
 
+execution_mode = "guest_tools"
+
 [llm]
 model = "gpt-5-mini"
 base_url = "https://api.openai.com/v1"
 api = "responses"
-
-execution_mode = "guest_tools"
 
 [firecracker]
 enabled = false
