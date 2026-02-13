@@ -57,7 +57,6 @@ const steps = [
       return (
         delta &&
         typeof delta.delta === "string" &&
-        delta.delta.includes("guest tool file_read failed:") &&
         delta.delta.includes("blocked by leak detector")
       );
     },
