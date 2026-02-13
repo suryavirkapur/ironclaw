@@ -12,9 +12,9 @@ index_file = "index.html"
 users_root = "data/users"
 
 [llm]
-model = "gpt-5-mini"
-base_url = "https://api.openai.com/v1"
-api = "responses"
+model = "minimax/minimax-m2.5"
+base_url = "https://openrouter.ai/api/v1"
+api = "chat_completions"
 
 [firecracker]
 enabled = false
