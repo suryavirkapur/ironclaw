@@ -362,7 +362,7 @@ async fn request_host_plan<T: Transport>(
         .await
         .map_err(|err| IrowclawError::new(format!("host plan send failed: {err}")))?;
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(10), transport.recv())
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), transport.recv())
         .await
         .map_err(|_| IrowclawError::new("host plan timed out"))?
         .map_err(|err| IrowclawError::new(format!("host plan recv failed: {err}")))?;

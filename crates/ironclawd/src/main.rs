@@ -1002,7 +1002,11 @@ async fn handle_telegram_text(
 
     if session.transport.is_none() {
         let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
-        let guest_allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+        let guest_allowed_tools = vec![
+            "file_read".to_string(),
+            "file_write".to_string(),
+            "bash".to_string(),
+        ];
         let cap_token = {
             use rand::RngCore;
             let mut bytes = [0u8; 32];
