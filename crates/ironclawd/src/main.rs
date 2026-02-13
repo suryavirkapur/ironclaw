@@ -551,11 +551,26 @@ async fn host_plan_tool_response(
         return tool_plan_to_json(&plan);
     }
 
-    let plan = state
+    let plan = match state
         .llm_client
         .plan_tool_or_answer(user_text, allowed_tools)
         .await
-        .map_err(|err| format!("host plan failed: {err}"))?;
+    {
+        Ok(plan) => plan,
+        Err(err) => {
+            // GuestTools mode should remain usable even when no LLM key is configured.
+            // Fall back to a deterministic stub answer instead of failing the whole guest loop.
+            let msg = err.to_string();
+            if msg.contains("missing openai_api_key") {
+                ToolPlan::Answer {
+                    text: format!("stub: {}", user_text.trim()),
+                }
+            } else {
+                return Err(format!("host plan failed: {err}"));
+            }
+        }
+    };
+
     tool_plan_to_json(&plan)
 }
 
