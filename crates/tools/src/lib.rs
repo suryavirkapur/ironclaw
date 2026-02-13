@@ -117,20 +117,57 @@ impl Tool for FileWriteTool {
 
 pub struct RestrictedBashTool {
     enabled: bool,
+    max_output_bytes: usize,
 }
 
 impl RestrictedBashTool {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            max_output_bytes: 32 * 1024,
+        }
     }
 }
 
 impl Tool for RestrictedBashTool {
-    fn run(&self, _input: &str) -> Result<ToolResult, ToolError> {
+    fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
         if !self.enabled {
             return Err(ToolError::new("bash tool disabled"));
         }
-        Err(ToolError::new("bash tool is not implemented"))
+
+        // Very small guardrails. This is still dangerous; enable explicitly.
+        let lower = input.to_lowercase();
+        for banned in [
+            "rm ", "sudo", "curl ", "wget ", "ssh ", "scp ", "nc ", "netcat",
+        ] {
+            if lower.contains(banned) {
+                return Err(ToolError::new(format!(
+                    "bash blocked by policy: contains '{banned}'"
+                )));
+            }
+        }
+
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(input)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|err| ToolError::new(format!("bash exec failed: {err}")))?;
+
+        let mut combined = Vec::new();
+        combined.extend_from_slice(&out.stdout);
+        combined.extend_from_slice(&out.stderr);
+        if combined.len() > self.max_output_bytes {
+            combined.truncate(self.max_output_bytes);
+            combined.extend_from_slice(b"\n...<truncated>\n");
+        }
+
+        let output = String::from_utf8_lossy(&combined).to_string();
+        Ok(ToolResult {
+            output,
+            ok: out.status.success(),
+        })
     }
 }
 

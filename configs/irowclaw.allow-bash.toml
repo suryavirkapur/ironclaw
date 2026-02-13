@@ -1,0 +1,13 @@
+default_agent = "default"
+
+[tools]
+allow_bash = true
+allow_file = true
+
+[indexing]
+max_chunk_bytes = 2048
+semantic_weight = 0.7
+lexical_weight = 0.3
+
+[scheduler]
+jobs_path = "/mnt/brain/cron/jobs.toml"
