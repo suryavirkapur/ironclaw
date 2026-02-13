@@ -118,13 +118,15 @@ impl Tool for FileWriteTool {
 pub struct RestrictedBashTool {
     enabled: bool,
     max_output_bytes: usize,
+    working_dir: PathBuf,
 }
 
 impl RestrictedBashTool {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, working_dir: PathBuf) -> Self {
         Self {
             enabled,
             max_output_bytes: 32 * 1024,
+            working_dir,
         }
     }
 }
@@ -150,6 +152,7 @@ impl Tool for RestrictedBashTool {
         let out = std::process::Command::new("bash")
             .arg("-lc")
             .arg(input)
+            .current_dir(&self.working_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()

@@ -18,7 +18,7 @@ use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
-use llm_client::{LlmClient, ToolPlan};
+use llm_client::{ConversationMessage, LlmClient, ToolPlan};
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::min;
@@ -30,6 +30,8 @@ use tokio::sync::watch;
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
+const TELEGRAM_TRANSCRIPT_MAX_TURNS: usize = 50;
+const TELEGRAM_RETRY_MAX_ATTEMPTS: usize = 2;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
@@ -357,6 +359,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             &tool_user_id,
                             &host_allowed_tools,
                             text.as_str(),
+                            None,
                         )
                         .await
                         {
@@ -424,6 +427,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                                     &state,
                                     &req.input,
                                     &host_allowed_tools,
+                                    None,
                                 )
                                 .await {
                                     Ok(out) => (true, out),
@@ -614,6 +618,7 @@ async fn host_plan_tool_response(
     state: &AppState,
     user_text: &str,
     allowed_tools: &[String],
+    history: Option<&[ConversationMessage]>,
 ) -> Result<String, String> {
     if let Some(plan) = deterministic_guest_tools_plan(user_text, allowed_tools) {
         return tool_plan_to_json(&plan);
@@ -621,7 +626,7 @@ async fn host_plan_tool_response(
 
     let plan = match state
         .llm_client
-        .plan_tool_or_answer(user_text, allowed_tools)
+        .plan_tool_or_answer(user_text, allowed_tools, history)
         .await
     {
         Ok(plan) => plan,
@@ -711,10 +716,11 @@ async fn run_host_turn(
     user_id: &str,
     allowed_tools: &[String],
     user_text: &str,
+    history: Option<&[ConversationMessage]>,
 ) -> Result<String, IronclawError> {
     let plan = state
         .llm_client
-        .plan_tool_or_answer(user_text, allowed_tools)
+        .plan_tool_or_answer(user_text, allowed_tools, history)
         .await
         .map_err(|err| IronclawError::new(format!("tool planning failed: {err}")))?;
 
@@ -739,7 +745,7 @@ async fn run_host_turn(
             );
             state
                 .llm_client
-                .finalize_with_tool_output(user_text, &tool, &input, ok, &output)
+                .finalize_with_tool_output(user_text, &tool, &input, ok, &output, history)
                 .await
                 .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))
         }
@@ -905,16 +911,83 @@ struct TelegramSession {
     session_id: String,
     msg_id: u64,
     transport: Option<Box<dyn common::transport::Transport>>,
+    transcript: TelegramTranscript,
+    transcript_path: PathBuf,
+    transport_failures: u32,
 }
 
 impl TelegramSession {
-    fn new(chat_id: i64) -> Self {
-        Self {
+    fn load(chat_id: i64, users_root: &StdPath) -> Result<Self, IronclawError> {
+        let session_id = format!("telegram-{chat_id}");
+        let transcript_path = telegram_transcript_path(users_root, &session_id);
+        let transcript = load_telegram_transcript(&transcript_path)?;
+        Ok(Self {
             chat_id,
             user_id: format!("telegram-{chat_id}"),
-            session_id: format!("telegram-{chat_id}"),
+            session_id,
             msg_id: 1,
             transport: None,
+            transcript,
+            transcript_path,
+            transport_failures: 0,
+        })
+    }
+
+    fn append_user_message(&mut self, text: &str, timestamp_ms: u64) -> Result<(), IronclawError> {
+        self.transcript.push("user", text, timestamp_ms);
+        save_telegram_transcript(&self.transcript_path, &self.transcript)
+    }
+
+    fn append_assistant_message(
+        &mut self,
+        text: &str,
+        timestamp_ms: u64,
+    ) -> Result<(), IronclawError> {
+        self.transcript.push("assistant", text, timestamp_ms);
+        save_telegram_transcript(&self.transcript_path, &self.transcript)
+    }
+
+    fn prompt_history(&self) -> Vec<ConversationMessage> {
+        self.transcript
+            .messages
+            .iter()
+            .map(|message| ConversationMessage {
+                role: message.role.clone(),
+                text: message.text.clone(),
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn transport_backoff(&self) -> std::time::Duration {
+        let shifted = self.transport_failures.min(6);
+        let delay_ms = 250u64.saturating_mul(1u64 << shifted);
+        std::time::Duration::from_millis(delay_ms)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TelegramTranscriptMessage {
+    role: String,
+    text: String,
+    timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct TelegramTranscript {
+    messages: Vec<TelegramTranscriptMessage>,
+}
+
+impl TelegramTranscript {
+    fn push(&mut self, role: &str, text: &str, timestamp_ms: u64) {
+        self.messages.push(TelegramTranscriptMessage {
+            role: role.to_string(),
+            text: text.to_string(),
+            timestamp_ms,
+        });
+        let max_messages = TELEGRAM_TRANSCRIPT_MAX_TURNS.saturating_mul(2);
+        if self.messages.len() > max_messages {
+            let trim = self.messages.len().saturating_sub(max_messages);
+            self.messages.drain(0..trim);
         }
     }
 }
@@ -962,13 +1035,22 @@ async fn run_telegram_loop(
                         tracing::warn!("telegram message denied from chat {}", message.chat.id);
                         continue;
                     }
-                    let session = sessions
-                        .entry(message.chat.id)
-                        .or_insert_with(|| TelegramSession::new(message.chat.id));
+                    if !sessions.contains_key(&message.chat.id) {
+                        let session = TelegramSession::load(
+                            message.chat.id,
+                            &state.host_config.storage.users_root,
+                        )?;
+                        sessions.insert(message.chat.id, session);
+                    }
+                    let Some(session) = sessions.get_mut(&message.chat.id) else {
+                        continue;
+                    };
                     if let Err(err) =
                         handle_telegram_text(&state, &client, session, text.as_str()).await
                     {
                         tracing::error!("telegram message handling failed: {err}");
+                        let _ = session
+                            .append_assistant_message("request failed", now_ms().unwrap_or(0));
                         let _ = client.send_message(session.chat_id, "request failed").await;
                     }
                 }
@@ -989,63 +1071,67 @@ async fn handle_telegram_text(
     session: &mut TelegramSession,
     text: &str,
 ) -> Result<(), IronclawError> {
+    let history = session.prompt_history();
+    session.append_user_message(text, now_ms().unwrap_or(0))?;
+
+    let mut attempt = 0usize;
+    let mut last_error = IronclawError::new("telegram request failed");
+    while attempt < TELEGRAM_RETRY_MAX_ATTEMPTS {
+        match handle_telegram_text_once(state, client, session, text, &history).await {
+            Ok(assistant_text) => {
+                session.append_assistant_message(&assistant_text, now_ms().unwrap_or(0))?;
+                session.transport_failures = 0;
+                return Ok(());
+            }
+            Err(err) => {
+                if !is_transport_failure(&err) || attempt + 1 >= TELEGRAM_RETRY_MAX_ATTEMPTS {
+                    return Err(err);
+                }
+                last_error = err;
+                session.transport_failures = session.transport_failures.saturating_add(1);
+                session.transport = None;
+                let _ = state.vm_manager.stop_vm(&session.user_id).await;
+                let delay = session.transport_backoff();
+                tracing::warn!(
+                    "telegram transport restart user_id={} backoff_ms={}",
+                    session.user_id,
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+        attempt = attempt.saturating_add(1);
+    }
+
+    Err(last_error)
+}
+
+async fn handle_telegram_text_once(
+    state: &AppState,
+    client: &TelegramClient,
+    session: &mut TelegramSession,
+    text: &str,
+    history: &[ConversationMessage],
+) -> Result<String, IronclawError> {
     let host_allowed_tools = vec![
         "bash".to_string(),
         "file_read".to_string(),
         "file_write".to_string(),
     ];
     if state.execution_mode == RuntimeExecutionMode::HostOnly {
-        let output = run_host_turn(state, &session.user_id, &host_allowed_tools, text).await?;
-        send_stream_to_telegram(client, session.chat_id, &output).await?;
-        return Ok(());
-    }
-
-    if session.transport.is_none() {
-        let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
-        let guest_allowed_tools = vec![
-            "file_read".to_string(),
-            "file_write".to_string(),
-            "bash".to_string(),
-        ];
-        let cap_token = {
-            use rand::RngCore;
-            let mut bytes = [0u8; 32];
-            rand::rng().fill_bytes(&mut bytes);
-            hex::encode(bytes)
-        };
-
-        let mut transport = vm_instance.transport;
-        if state.local_guest {
-            if let Some(guest_transport) = guest_transport {
-                let guest_user_id = session.user_id.clone();
-                let users_root = state.host_config.storage.users_root.clone();
-                let guest_config_path = (*state.guest_config_path).clone();
-                tokio::spawn(async move {
-                    let brain_root = users_root.join(&guest_user_id).join("guest");
-                    if let Err(err) = std::fs::create_dir_all(&brain_root) {
-                        tracing::warn!("create brain root failed: {err}");
-                    }
-                    std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
-                    if let Err(err) =
-                        irowclaw::runtime::run_with_transport(guest_transport, guest_config_path)
-                            .await
-                    {
-                        tracing::error!("guest runtime failed: {err}");
-                    }
-                });
-            }
-        }
-        send_guest_auth_challenge(
-            &mut transport,
+        let output = run_host_turn(
+            state,
             &session.user_id,
-            &session.session_id,
-            &cap_token,
-            &guest_allowed_tools,
-            state.execution_mode,
+            &host_allowed_tools,
+            text,
+            Some(history),
         )
         .await?;
-        session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
+        send_stream_to_telegram(client, session.chat_id, &output).await?;
+        return Ok(output);
     }
+
+    ensure_telegram_session_transport(state, session).await?;
 
     let payload = message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
         text: text.to_string(),
@@ -1076,6 +1162,7 @@ async fn handle_telegram_text(
     ];
 
     let mut streamed_any = false;
+    let mut output = String::new();
     loop {
         let maybe = transport
             .recv()
@@ -1086,7 +1173,9 @@ async fn handle_telegram_text(
         };
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
             let (ok, output) = if req.tool == "host_plan" {
-                match host_plan_tool_response(state, &req.input, &host_allowed_tools).await {
+                match host_plan_tool_response(state, &req.input, &host_allowed_tools, Some(history))
+                    .await
+                {
                     Ok(out) => (true, out),
                     Err(err) => (false, truncate_tool_output(&err)),
                 }
@@ -1120,6 +1209,7 @@ async fn handle_telegram_text(
         }
         if let Some(message_envelope::Payload::StreamDelta(delta)) = envelope.payload {
             if !delta.delta.is_empty() {
+                output.push_str(&delta.delta);
                 send_stream_to_telegram(client, session.chat_id, &delta.delta).await?;
                 streamed_any = true;
             }
@@ -1131,9 +1221,10 @@ async fn handle_telegram_text(
 
     if !streamed_any {
         send_stream_to_telegram(client, session.chat_id, "done").await?;
+        output.push_str("done");
     }
 
-    Ok(())
+    Ok(output)
 }
 
 async fn send_guest_auth_challenge(
@@ -1175,6 +1266,73 @@ async fn send_guest_auth_challenge(
     }
 }
 
+async fn ensure_telegram_session_transport(
+    state: &AppState,
+    session: &mut TelegramSession,
+) -> Result<(), IronclawError> {
+    if session.transport.is_some() {
+        return Ok(());
+    }
+
+    let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
+    let guest_allowed_tools = vec![
+        "file_read".to_string(),
+        "file_write".to_string(),
+        "bash".to_string(),
+    ];
+    let cap_token = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+
+    let mut transport = vm_instance.transport;
+    if state.local_guest {
+        if let Some(guest_transport) = guest_transport {
+            let guest_user_id = session.user_id.clone();
+            let users_root = state.host_config.storage.users_root.clone();
+            let guest_config_path = (*state.guest_config_path).clone();
+            tokio::spawn(async move {
+                let brain_root = users_root.join(&guest_user_id).join("guest");
+                if let Err(err) = std::fs::create_dir_all(&brain_root) {
+                    tracing::warn!("create brain root failed: {err}");
+                }
+                std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+                if let Err(err) =
+                    irowclaw::runtime::run_with_transport(guest_transport, guest_config_path).await
+                {
+                    tracing::error!("guest runtime failed: {err}");
+                }
+            });
+        }
+    }
+    send_guest_auth_challenge(
+        &mut transport,
+        &session.user_id,
+        &session.session_id,
+        &cap_token,
+        &guest_allowed_tools,
+        state.execution_mode,
+    )
+    .await?;
+    session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
+    Ok(())
+}
+
+fn is_transport_failure(err: &IronclawError) -> bool {
+    let msg = err.to_string();
+    msg.contains("send to guest failed")
+        || msg.contains("transport recv failed")
+        || msg.contains("guest transport closed")
+        || msg.contains("tool response send failed")
+        || msg.contains("auth challenge send failed")
+        || msg.contains("auth ack recv failed")
+        || msg.contains("auth ack timed out")
+        || msg.contains("invalid auth ack")
+        || msg.contains("vm start failed")
+}
+
 async fn send_stream_to_telegram(
     client: &TelegramClient,
     chat_id: i64,
@@ -1200,6 +1358,35 @@ fn split_telegram_chunks(text: &str, max_chars: usize) -> Vec<String> {
         index = end;
     }
     out
+}
+
+fn telegram_transcript_path(users_root: &StdPath, session_id: &str) -> PathBuf {
+    users_root.join(session_id).join("telegram.transcript.json")
+}
+
+fn load_telegram_transcript(path: &StdPath) -> Result<TelegramTranscript, IronclawError> {
+    if !path.exists() {
+        return Ok(TelegramTranscript::default());
+    }
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| IronclawError::new(format!("telegram transcript read failed: {err}")))?;
+    let transcript: TelegramTranscript = serde_json::from_str(&raw)
+        .map_err(|err| IronclawError::new(format!("telegram transcript decode failed: {err}")))?;
+    Ok(transcript)
+}
+
+fn save_telegram_transcript(
+    path: &StdPath,
+    transcript: &TelegramTranscript,
+) -> Result<(), IronclawError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| IronclawError::new(format!("telegram transcript dir failed: {err}")))?;
+    }
+    let data = serde_json::to_string_pretty(transcript)
+        .map_err(|err| IronclawError::new(format!("telegram transcript encode failed: {err}")))?;
+    std::fs::write(path, format!("{data}\n"))
+        .map_err(|err| IronclawError::new(format!("telegram transcript write failed: {err}")))
 }
 
 fn load_telegram_offset(path: &StdPath) -> Result<i64, IronclawError> {
@@ -1230,8 +1417,10 @@ fn save_telegram_offset(path: &StdPath, offset: i64) -> Result<(), IronclawError
 #[cfg(test)]
 mod tests {
     use super::{
-        deterministic_guest_tools_plan, load_telegram_offset, save_telegram_offset,
-        split_telegram_chunks, ToolPlan,
+        deterministic_guest_tools_plan, load_telegram_offset, load_telegram_transcript,
+        save_telegram_offset, save_telegram_transcript, split_telegram_chunks,
+        telegram_transcript_path, TelegramTranscript, TelegramTranscriptMessage, ToolPlan,
+        TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
 
     #[test]
@@ -1284,5 +1473,44 @@ mod tests {
         let loaded = load_telegram_offset(&path).expect("load offset");
         assert_eq!(loaded, 44);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn telegram_transcript_keeps_last_fifty_turns() {
+        let mut transcript = TelegramTranscript::default();
+        for idx in 0..60u64 {
+            transcript.push("user", &format!("u{idx}"), idx);
+            transcript.push("assistant", &format!("a{idx}"), idx);
+        }
+        let max_messages = TELEGRAM_TRANSCRIPT_MAX_TURNS * 2;
+        assert_eq!(transcript.messages.len(), max_messages);
+        assert_eq!(
+            transcript.messages.first().map(|m| m.text.clone()),
+            Some("u10".to_string())
+        );
+        assert_eq!(
+            transcript.messages.last().map(|m| m.text.clone()),
+            Some("a59".to_string())
+        );
+    }
+
+    #[test]
+    fn telegram_transcript_path_and_persistence_roundtrip() {
+        let root = std::env::temp_dir().join("ironclaw-transcript-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let path = telegram_transcript_path(&root, "telegram-7");
+        let transcript = TelegramTranscript {
+            messages: vec![TelegramTranscriptMessage {
+                role: "user".to_string(),
+                text: "hello".to_string(),
+                timestamp_ms: 1,
+            }],
+        };
+        let save = save_telegram_transcript(&path, &transcript);
+        assert!(save.is_ok());
+        let loaded = load_telegram_transcript(&path);
+        assert!(loaded.is_ok());
+        assert_eq!(loaded.unwrap_or_default().messages.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

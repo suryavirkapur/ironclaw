@@ -40,6 +40,12 @@ then open a websocket connection to:
 
 the host can also run a telegram dm channel via long polling.
 
+home directory semantics:
+
+- "home directory" means the guest vm home only, never the host home directory
+- guest tools operate under the guest brain root (`/mnt/brain` in vm mode)
+- in local guest mode this maps to `<users_root>/<session_id>/guest` on the host
+
 required env vars:
 
 - `TELEGRAM_BOT_TOKEN` (bot token from botfather)
@@ -68,6 +74,9 @@ test:
 - check host logs for `telegram loop started`
 - verify replies arrive in telegram
 - offset is persisted to `data/telegram.offset`
+- per-session transcript is persisted to
+  `data/users/telegram-<chat_id>/telegram.transcript.json` (or your configured `users_root`)
+- planning uses a rolling context window of the last 50 turns per telegram session
 
 ## config
 

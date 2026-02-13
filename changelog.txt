@@ -1,3 +1,18 @@
+0.4.1 2026-02-13
+- added persistent telegram session transcripts under users root at
+  `telegram-<chat_id>/telegram.transcript.json`
+- stored transcript messages as role/text/timestamp and trimmed to a rolling 50-turn window
+- added prompt history injection in host planning/finalization prompts before current user message
+- wired telegram transport resilience: detect transport/auth failures, stop vm, restart transport,
+  re-auth, and retry once with exponential backoff
+- applied the same telegram restart path to firecracker mode via shared `start_vm_pair` and
+  `vm_manager.stop_vm(user_id)`
+- constrained guest bash tool execution to guest workspace root to preserve guest-only home
+  semantics
+- added transcript ring-buffer and transcript persistence tests plus prompt-history formatting test
+- updated readme telegram quickstart with guest-only home directory, 50-turn context window, and
+  transcript storage location
+
 0.4.0 2026-02-13
 - added telegram channel mvp in `ironclawd` with long polling via reqwest and outbound
   sendmessage support

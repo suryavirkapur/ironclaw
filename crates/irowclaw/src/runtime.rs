@@ -50,10 +50,16 @@ impl Runtime {
             "file_read",
             Box::new(FileReadTool::new(workspace_root.clone())),
         );
-        tool_registry.register("file_write", Box::new(FileWriteTool::new(workspace_root)));
+        tool_registry.register(
+            "file_write",
+            Box::new(FileWriteTool::new(workspace_root.clone())),
+        );
         tool_registry.register(
             "bash",
-            Box::new(RestrictedBashTool::new(config.tools.allow_bash)),
+            Box::new(RestrictedBashTool::new(
+                config.tools.allow_bash,
+                workspace_root.clone(),
+            )),
         );
 
         Ok(Self {

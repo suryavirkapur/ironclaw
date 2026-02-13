@@ -8,6 +8,12 @@ pub struct LlmClient {
     http_client: reqwest::Client,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversationMessage {
+    pub role: String,
+    pub text: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("llm client error: {message}")]
 pub struct LlmClientError {
@@ -81,8 +87,9 @@ impl LlmClient {
         &self,
         user_text: &str,
         allowed_tools: &[String],
+        history: Option<&[ConversationMessage]>,
     ) -> Result<ToolPlan, LlmClientError> {
-        let prompt = build_tool_plan_prompt(user_text, allowed_tools);
+        let prompt = build_tool_plan_prompt(user_text, allowed_tools, history);
         let raw = self.complete(&prompt).await?;
         parse_tool_plan(&raw, allowed_tools)
     }
@@ -94,8 +101,10 @@ impl LlmClient {
         input: &str,
         tool_ok: bool,
         tool_output: &str,
+        history: Option<&[ConversationMessage]>,
     ) -> Result<String, LlmClientError> {
-        let prompt = build_tool_finalize_prompt(user_text, tool, input, tool_ok, tool_output);
+        let prompt =
+            build_tool_finalize_prompt(user_text, tool, input, tool_ok, tool_output, history);
         self.complete(&prompt).await
     }
 }
@@ -138,8 +147,13 @@ pub enum ToolPlan {
     Answer { text: String },
 }
 
-fn build_tool_plan_prompt(user_text: &str, allowed_tools: &[String]) -> String {
+fn build_tool_plan_prompt(
+    user_text: &str,
+    allowed_tools: &[String],
+    history: Option<&[ConversationMessage]>,
+) -> String {
     let tools = allowed_tools.join(", ");
+    let history_block = build_history_block(history);
     format!(
         "you are a host planner. choose exactly one action.\n\
          output valid json only.\n\
@@ -151,6 +165,7 @@ fn build_tool_plan_prompt(user_text: &str, allowed_tools: &[String]) -> String {
          - if a tool is needed, choose action tool.\n\
          - if no tool is needed, choose action answer.\n\
          - do not include markdown.\n\
+         {history_block}\
          user message:\n\
          {user_text}"
     )
@@ -162,11 +177,14 @@ fn build_tool_finalize_prompt(
     input: &str,
     tool_ok: bool,
     tool_output: &str,
+    history: Option<&[ConversationMessage]>,
 ) -> String {
     let status = if tool_ok { "ok" } else { "error" };
+    let history_block = build_history_block(history);
     format!(
         "you are a host assistant. write the final user-facing response.\n\
          use the tool result below.\n\
+         {history_block}\
          user message:\n\
          {user_text}\n\
          tool used: {tool}\n\
@@ -180,6 +198,26 @@ fn build_tool_finalize_prompt(
          - if tool failed, explain failure briefly and suggest next step.\n\
          - no markdown code fences unless the user requested them."
     )
+}
+
+fn build_history_block(history: Option<&[ConversationMessage]>) -> String {
+    let Some(history) = history else {
+        return String::new();
+    };
+    if history.is_empty() {
+        return String::new();
+    }
+
+    let mut block = String::from("conversation history:\n");
+    for message in history {
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
+        block.push_str(&format!("{role}: {}\n", message.text));
+    }
+    block
 }
 
 #[derive(Deserialize)]
@@ -200,7 +238,9 @@ pub fn parse_tool_plan(raw: &str, allowed_tools: &[String]) -> Result<ToolPlan, 
                 return Err(LlmClientError::new("tool plan missing tool"));
             }
             if !allowed_tools.iter().any(|name| name == &tool) {
-                return Err(LlmClientError::new(format!("tool not allowed in plan: {tool}")));
+                return Err(LlmClientError::new(format!(
+                    "tool not allowed in plan: {tool}"
+                )));
             }
 
             let input = input.trim().to_string();
@@ -321,7 +361,9 @@ struct ResponsesContentItem {
 
 #[cfg(test)]
 mod llm_client_test {
-    use super::{parse_llm_response, parse_tool_plan, ToolPlan};
+    use super::{
+        build_tool_plan_prompt, parse_llm_response, parse_tool_plan, ConversationMessage, ToolPlan,
+    };
     use common::config::HostLlmApi;
 
     #[test]
@@ -354,8 +396,7 @@ mod llm_client_test {
     #[test]
     fn parses_tool_plan_from_wrapped_text() {
         let allowed_tools = vec!["bash".to_string(), "file_read".to_string()];
-        let raw =
-            r#"plan follows: {"action":"tool","tool":"bash","input":"ls -la"} thanks"#;
+        let raw = r#"plan follows: {"action":"tool","tool":"bash","input":"ls -la"} thanks"#;
         let result = parse_tool_plan(raw, &allowed_tools);
         assert!(matches!(
             result,
@@ -377,5 +418,27 @@ mod llm_client_test {
         let raw = r#"{"action":"answer","text":"   "}"#;
         let result = parse_tool_plan(raw, &allowed_tools);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn planning_prompt_includes_history_before_user_message() {
+        let allowed_tools = vec!["bash".to_string()];
+        let history = vec![
+            ConversationMessage {
+                role: "user".to_string(),
+                text: "first".to_string(),
+            },
+            ConversationMessage {
+                role: "assistant".to_string(),
+                text: "second".to_string(),
+            },
+        ];
+        let prompt = build_tool_plan_prompt("current message", &allowed_tools, Some(&history));
+
+        let history_pos = prompt.find("conversation history:");
+        let current_pos = prompt.find("user message:\ncurrent message");
+        assert!(history_pos.is_some());
+        assert!(current_pos.is_some());
+        assert!(history_pos < current_pos);
     }
 }

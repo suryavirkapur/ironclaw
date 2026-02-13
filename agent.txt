@@ -5,23 +5,28 @@ current context:
   and then from host config values
 - only a single owner chat id is allowlisted; non-owner chats are ignored
 - telegram updates persist offset to `data/telegram.offset`
-- telegram messages route through existing host execution paths:
-  host_only uses host llm/tool loop, guest modes use vm transport and streamdelta relay
+- telegram transcripts persist per session id under users root at
+  `telegram-<chat_id>/telegram.transcript.json`
+- planning prompts now include last session history (rolling 50 turns) before current user input
+- telegram transport failures now trigger vm teardown + restart + re-auth with one retry/backoff
+- firecracker mode uses the same restart path through `start_vm_pair` + `vm_manager.stop_vm`
+- guest bash now runs with working directory rooted at guest workspace (`/mnt/brain/workspace`)
 - http server and telegram loop now share graceful shutdown signaling
 
 pending tasks:
 - run websocket smoke scripts on a host where tcp bind is permitted
 - run manual telegram dm e2e with a real bot token and owner chat id
-- confirm behavior in firecracker guest_tools mode with telegram enabled
+- confirm behavior in firecracker guest_tools mode with telegram enabled and restart retry path
 
 important decisions:
-- kept telegram integration minimal with in-memory session state only
+- moved telegram session context from in-memory only to persistent per-session transcript files
 - reused existing guest auth/toolcall/streamdelta flow instead of introducing a new protocol
 - persisted polling offset under repository data directory for restart continuity
 - used reqwest json calls directly to telegram bot api (`getUpdates`, `sendMessage`)
 
 architectural notes:
 - each chat id maps to one in-memory session (`user_id` and `session_id` as `telegram-<chat_id>`)
+- each session also has a persistent transcript file and prompt history projection for host planner
 - streamdelta output is chunked to 4096 chars before sendmessage requests
 - guest session transport is established lazily on first owner message
 - local guest mode still runs irowclaw in-process with the same transport handshake
