@@ -6,12 +6,13 @@ current context:
 - guest handles inbound toolcallrequest and returns toolcallresponse end-to-end
 - guest_tools mode asks host for tool-or-answer plan via internal host_plan tool call
 - guest_autonomous mode plans and executes locally without host llm planning
-- new smoke-guest-tools-ws scripts validate guest tool calls, policy block, and leak block paths
+- host now supports deterministic `TOOLTEST` planning in guest_tools mode without llm key
+- new guest_tools smoke path validates planner-driven file tool execution and safety blocks
 
 pending tasks:
 - run smoke-firecracker.sh on a host where firecracker api socket bind is permitted
 - run smoke-firecracker-ws.sh and smoke-guest-tools-ws.sh on a host where tcp bind is permitted
-- capture pass logs for both websocket smokes on a permissive environment
+- capture pass logs for both websocket smokes on a permissive environment after planner fallback
 
 important decisions:
 - llm network calls are host-only and keyed by openai_api_key env var
@@ -20,6 +21,7 @@ important decisions:
 - guest_tools uses host_plan internal tool response for planning while guest executes tools
 - guest_autonomous keeps host as websocket/protocol router only
 - firecracker websocket config now pins execution_mode to guest_tools for compatibility
+- guest_tools smoke uses TOOLTEST trigger messages for deterministic no-llm planning coverage
 
 architectural notes:
 - websocket payload stays messageenvelope json with payload.streamdelta for text output
@@ -27,7 +29,8 @@ architectural notes:
 - guest tool call trigger over websocket is available via `!toolcall <tool>\\n<input>`
 - host handles internal guest tool `host_plan` and returns json action schema
 - outbound guest tool and stream outputs pass through leak sanitizer before host relay
+- deterministic host planner handles TOOLTEST write/read directives before llm planner calls
 
 plan:
-- validate websocket smoke scripts on permissive host and archive logs
+- run both websocket smokes and verify deterministic guest_tools planner behavior without api key
 - evaluate optional restricted bash tool implementation behind default-off flag

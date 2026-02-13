@@ -6,18 +6,27 @@ const ws = new WebSocket(url);
 
 const steps = [
   {
-    send: "!toolcall file_write\nnotes/tool.txt\nhello-tool",
+    send: "TOOLTEST WRITE notes/tool.txt\nhello-tool",
     expect: (msg) => {
-      const resp = msg?.payload?.ToolCallResponse || msg?.payload?.toolCallResponse;
-      return resp && resp.ok === true && typeof resp.output === "string";
+      const delta = msg?.payload?.StreamDelta || msg?.payload?.streamDelta;
+      return (
+        delta &&
+        typeof delta.delta === "string" &&
+        delta.delta.includes("guest tool file_write:")
+      );
     },
     label: "tool write",
   },
   {
-    send: "!toolcall file_read\nnotes/tool.txt",
+    send: "TOOLTEST READ notes/tool.txt",
     expect: (msg) => {
-      const resp = msg?.payload?.ToolCallResponse || msg?.payload?.toolCallResponse;
-      return resp && resp.ok === true && (resp.output || "").includes("hello-tool");
+      const delta = msg?.payload?.StreamDelta || msg?.payload?.streamDelta;
+      return (
+        delta &&
+        typeof delta.delta === "string" &&
+        delta.delta.includes("guest tool file_read:") &&
+        delta.delta.includes("hello-tool")
+      );
     },
     label: "tool read",
   },
@@ -30,22 +39,26 @@ const steps = [
     label: "injection block",
   },
   {
-    send: "!toolcall file_write\nnotes/secret.txt\nfake_secret_12345",
+    send: "TOOLTEST WRITE notes/secret.txt\nfake_secret_12345",
     expect: (msg) => {
-      const resp = msg?.payload?.ToolCallResponse || msg?.payload?.toolCallResponse;
-      return resp && resp.ok === true;
+      const delta = msg?.payload?.StreamDelta || msg?.payload?.streamDelta;
+      return (
+        delta &&
+        typeof delta.delta === "string" &&
+        delta.delta.includes("guest tool file_write:")
+      );
     },
     label: "secret write",
   },
   {
-    send: "!toolcall file_read\nnotes/secret.txt",
+    send: "TOOLTEST READ notes/secret.txt",
     expect: (msg) => {
-      const resp = msg?.payload?.ToolCallResponse || msg?.payload?.toolCallResponse;
+      const delta = msg?.payload?.StreamDelta || msg?.payload?.streamDelta;
       return (
-        resp &&
-        resp.ok === false &&
-        typeof resp.output === "string" &&
-        resp.output.includes("blocked by leak detector")
+        delta &&
+        typeof delta.delta === "string" &&
+        delta.delta.includes("guest tool file_read failed:") &&
+        delta.delta.includes("blocked by leak detector")
       );
     },
     label: "leak block",

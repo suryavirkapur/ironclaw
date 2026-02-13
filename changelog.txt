@@ -1,3 +1,9 @@
+0.3.1 2026-02-13
+- added deterministic `TOOLTEST` host planner path for guest_tools mode without llm key dependency
+- added `configs/ironclawd.guest-tools.toml` for local guest_tools smoke execution
+- updated `smoke-guest-tools-ws` scripts to validate planner-driven guest file tools, policy block,
+  and leak detector block with clear pass logs
+
 0.3.0 2026-02-13
 - added execution mode config (`host_only`, `guest_tools`, `guest_autonomous`, `auto`)
 - extended auth challenge with execution mode for host-guest loop negotiation

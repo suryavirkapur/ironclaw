@@ -6,7 +6,7 @@ cd "${ROOT_DIR}"
 
 ADDR="${ADDR:-127.0.0.1:9938}"
 WS_URL="${WS_URL:-ws://${ADDR}/ws}"
-HOST_CONFIG="${HOST_CONFIG:-configs/ironclawd.guest-autonomous.toml}"
+HOST_CONFIG="${HOST_CONFIG:-configs/ironclawd.guest-tools.toml}"
 HOST_LOG="${HOST_LOG:-/tmp/ironclawd.guest-tools.log}"
 CLIENT_LOG="${CLIENT_LOG:-/tmp/ironclawd.guest-tools.client.log}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"

@@ -547,12 +547,65 @@ async fn host_plan_tool_response(
     user_text: &str,
     allowed_tools: &[String],
 ) -> Result<String, String> {
+    if let Some(plan) = deterministic_guest_tools_plan(user_text, allowed_tools) {
+        return tool_plan_to_json(&plan);
+    }
+
     let plan = state
         .llm_client
         .plan_tool_or_answer(user_text, allowed_tools)
         .await
         .map_err(|err| format!("host plan failed: {err}"))?;
     tool_plan_to_json(&plan)
+}
+
+fn deterministic_guest_tools_plan(user_text: &str, allowed_tools: &[String]) -> Option<ToolPlan> {
+    let text = user_text.trim_start();
+    let rest = text.strip_prefix("TOOLTEST ")?;
+
+    if let Some(write_rest) = rest.strip_prefix("WRITE ") {
+        if !allowed_tools.iter().any(|tool| tool == "file_write") {
+            return Some(ToolPlan::Answer {
+                text: "tooltest write unavailable: file_write is not allowed".to_string(),
+            });
+        }
+
+        let mut parts = write_rest.splitn(2, '\n');
+        let path = parts.next().unwrap_or("").trim();
+        if path.is_empty() {
+            return Some(ToolPlan::Answer {
+                text: "tooltest write failed: missing path".to_string(),
+            });
+        }
+        let contents = parts.next().unwrap_or("");
+        return Some(ToolPlan::Tool {
+            tool: "file_write".to_string(),
+            input: format!("{path}\n{contents}"),
+        });
+    }
+
+    if let Some(path) = rest.strip_prefix("READ ") {
+        if !allowed_tools.iter().any(|tool| tool == "file_read") {
+            return Some(ToolPlan::Answer {
+                text: "tooltest read unavailable: file_read is not allowed".to_string(),
+            });
+        }
+        let path = path.trim();
+        if path.is_empty() {
+            return Some(ToolPlan::Answer {
+                text: "tooltest read failed: missing path".to_string(),
+            });
+        }
+        return Some(ToolPlan::Tool {
+            tool: "file_read".to_string(),
+            input: path.to_string(),
+        });
+    }
+
+    Some(ToolPlan::Answer {
+        text: "tooltest supports TOOLTEST WRITE <path>\\n<contents> or TOOLTEST READ <path>"
+            .to_string(),
+    })
 }
 
 fn tool_plan_to_json(plan: &ToolPlan) -> Result<String, String> {
@@ -607,5 +660,42 @@ async fn run_host_turn(
                 .await
                 .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deterministic_guest_tools_plan, ToolPlan};
+
+    #[test]
+    fn tooltest_write_plans_file_write() {
+        let allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+        let plan = deterministic_guest_tools_plan(
+            "TOOLTEST WRITE notes/tool.txt\nhello-tool",
+            &allowed_tools,
+        );
+        assert!(matches!(
+            plan,
+            Some(ToolPlan::Tool { tool, input })
+            if tool == "file_write" && input == "notes/tool.txt\nhello-tool"
+        ));
+    }
+
+    #[test]
+    fn tooltest_read_plans_file_read() {
+        let allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+        let plan = deterministic_guest_tools_plan("TOOLTEST READ notes/tool.txt", &allowed_tools);
+        assert!(matches!(
+            plan,
+            Some(ToolPlan::Tool { tool, input })
+            if tool == "file_read" && input == "notes/tool.txt"
+        ));
+    }
+
+    #[test]
+    fn non_tooltest_input_uses_llm_path() {
+        let allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+        let plan = deterministic_guest_tools_plan("read notes/tool.txt", &allowed_tools);
+        assert!(plan.is_none());
     }
 }

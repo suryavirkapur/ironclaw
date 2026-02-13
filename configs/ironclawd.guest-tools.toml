@@ -1,0 +1,25 @@
+[server]
+bind = "127.0.0.1"
+port = 9938
+
+[ui]
+mount = "/ui"
+index_file = "index.html"
+
+[storage]
+users_root = "data/users"
+
+[llm]
+model = "gpt-5-mini"
+base_url = "https://api.openai.com/v1"
+api = "responses"
+
+execution_mode = "guest_tools"
+
+[firecracker]
+enabled = false
+kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
+rootfs_path = "rootfs/build/guest-rootfs.ext4"
+api_socket_dir = "/tmp/ironclaw-fc"
+vsock_uds_dir = "/tmp/ironclaw/vsock"
+vsock_port = 5000
