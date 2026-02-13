@@ -8,6 +8,21 @@ pub struct HostConfig {
     pub firecracker: HostFirecrackerConfig,
     pub storage: HostStorageConfig,
     pub llm: HostLlmConfig,
+    #[serde(default = "default_execution_mode")]
+    pub execution_mode: HostExecutionMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostExecutionMode {
+    Auto,
+    HostOnly,
+    GuestTools,
+    GuestAutonomous,
+}
+
+fn default_execution_mode() -> HostExecutionMode {
+    HostExecutionMode::Auto
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -94,6 +109,7 @@ impl HostConfig {
                 base_url: "https://api.openai.com/v1".to_string(),
                 api: HostLlmApi::Responses,
             },
+            execution_mode: HostExecutionMode::Auto,
         }
     }
 }

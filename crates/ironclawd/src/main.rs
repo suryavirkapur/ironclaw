@@ -10,7 +10,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use common::config::HostConfig;
+use common::config::{HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
@@ -55,6 +55,7 @@ struct AppState {
     guest_config_path: Arc<PathBuf>,
     local_guest: bool,
     stub_vm_manager: Option<Arc<StubVmManager>>,
+    execution_mode: RuntimeExecutionMode,
 }
 
 impl AppState {
@@ -96,6 +97,7 @@ impl AppState {
             let vm_manager: Arc<dyn VmManager> = stub_vm_manager.clone();
             (vm_manager, Some(stub_vm_manager))
         };
+        let execution_mode = RuntimeExecutionMode::from_config(&config);
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -103,7 +105,40 @@ impl AppState {
             guest_config_path,
             local_guest,
             stub_vm_manager,
+            execution_mode,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeExecutionMode {
+    HostOnly,
+    GuestTools,
+    GuestAutonomous,
+}
+
+impl RuntimeExecutionMode {
+    fn from_config(config: &HostConfig) -> Self {
+        match config.execution_mode {
+            HostExecutionMode::HostOnly => Self::HostOnly,
+            HostExecutionMode::GuestTools => Self::GuestTools,
+            HostExecutionMode::GuestAutonomous => Self::GuestAutonomous,
+            HostExecutionMode::Auto => {
+                if config.firecracker.enabled {
+                    Self::GuestTools
+                } else {
+                    Self::HostOnly
+                }
+            }
+        }
+    }
+
+    fn to_wire(self) -> &'static str {
+        match self {
+            Self::HostOnly => "host_only",
+            Self::GuestTools => "guest_tools",
+            Self::GuestAutonomous => "guest_autonomous",
+        }
     }
 }
 
@@ -146,12 +181,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
         }
     };
 
-    // Auth + tool policy (host-only enforcement)
-    let allowed_tools = vec![
+    // host tools used only in host-only mode and explicit host fallbacks.
+    let host_allowed_tools = vec![
         "bash".to_string(),
         "file_read".to_string(),
         "file_write".to_string(),
     ];
+    let guest_allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
 
     let cap_token = {
         use rand::RngCore;
@@ -194,7 +230,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             cap_token: cap_token.clone(),
             payload: Some(message_envelope::Payload::AuthChallenge(AuthChallenge {
                 cap_token: cap_token.clone(),
-                allowed_tools: allowed_tools.clone(),
+                allowed_tools: guest_allowed_tools.clone(),
+                execution_mode: state.execution_mode.to_wire().to_string(),
             })),
         };
         if let Err(err) = transport.send(challenge).await {
@@ -226,7 +263,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
 
     let (mut sender, mut receiver) = socket.split();
 
-    // Tool policy.
+    // host tool policy.
     let tool_user_id = user_id.clone();
 
     // Single-loop bridge.
@@ -246,29 +283,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             0
                         }
                     };
-                    if state.host_config.firecracker.enabled {
-                        let envelope = MessageEnvelope {
-                            user_id: user_id.clone(),
-                            session_id: session_id.clone(),
-                            msg_id,
-                            timestamp_ms,
-                            cap_token: String::new(),
-                            payload: Some(message_envelope::Payload::UserMessage(
-                                common::proto::ironclaw::UserMessage {
-                                    text: text.to_string(),
-                                },
-                            )),
-                        };
-                        msg_id += 1;
-                        if let Err(err) = transport.send(envelope).await {
-                            tracing::error!("send to guest failed: {err}");
-                            break;
-                        }
-                    } else {
+                    if state.execution_mode == RuntimeExecutionMode::HostOnly {
                         let response_text = match run_host_turn(
                             &state,
                             &tool_user_id,
-                            &allowed_tools,
+                            &host_allowed_tools,
                             text.as_str(),
                         )
                         .await
@@ -303,6 +322,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
                         }
+                    } else {
+                        let (payload, outbound_msg_id) = ws_text_to_guest_payload(
+                            text.as_str(),
+                            msg_id,
+                        );
+                        let envelope = MessageEnvelope {
+                            user_id: user_id.clone(),
+                            session_id: session_id.clone(),
+                            msg_id,
+                            timestamp_ms,
+                            cap_token: String::new(),
+                            payload: Some(payload),
+                        };
+                        msg_id = outbound_msg_id;
+                        if let Err(err) = transport.send(envelope).await {
+                            tracing::error!("send to guest failed: {err}");
+                            break;
+                        }
                     }
                 }
             }
@@ -314,12 +351,28 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         if let Some(message_envelope::Payload::ToolCallRequest(req)) =
                             envelope.payload.clone()
                         {
-                            let result =
-                                run_host_tool(&allowed_tools, &tool_user_id, &req.tool, &req.input)
-                                    .await;
-                            let (ok, output) = match result {
-                                Ok(out) => (true, truncate_tool_output(&out)),
-                                Err(err) => (false, truncate_tool_output(&err)),
+                            let (ok, output) = if req.tool == "host_plan" {
+                                match host_plan_tool_response(
+                                    &state,
+                                    &req.input,
+                                    &host_allowed_tools,
+                                )
+                                .await {
+                                    Ok(out) => (true, out),
+                                    Err(err) => (false, truncate_tool_output(&err)),
+                                }
+                            } else {
+                                let result = run_host_tool(
+                                    &host_allowed_tools,
+                                    &tool_user_id,
+                                    &req.tool,
+                                    &req.input,
+                                )
+                                .await;
+                                match result {
+                                    Ok(out) => (true, truncate_tool_output(&out)),
+                                    Err(err) => (false, truncate_tool_output(&err)),
+                                }
                             };
 
                             let resp = MessageEnvelope {
@@ -460,6 +513,61 @@ fn now_ms() -> Result<u64, IronclawError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|err| IronclawError::new(format!("time error: {err}")))
         .map(|duration| duration.as_millis() as u64)
+}
+
+fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::Payload, u64) {
+    if let Some(rest) = text.strip_prefix("!toolcall ") {
+        let mut parts = rest.splitn(2, '\n');
+        let tool = parts.next().unwrap_or("").trim().to_string();
+        let input = parts.next().unwrap_or("").to_string();
+        if !tool.is_empty() {
+            return (
+                message_envelope::Payload::ToolCallRequest(
+                    common::proto::ironclaw::ToolCallRequest {
+                        call_id: next_msg_id,
+                        tool,
+                        input,
+                    },
+                ),
+                next_msg_id.saturating_add(1),
+            );
+        }
+    }
+
+    (
+        message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
+            text: text.to_string(),
+        }),
+        next_msg_id.saturating_add(1),
+    )
+}
+
+async fn host_plan_tool_response(
+    state: &AppState,
+    user_text: &str,
+    allowed_tools: &[String],
+) -> Result<String, String> {
+    let plan = state
+        .llm_client
+        .plan_tool_or_answer(user_text, allowed_tools)
+        .await
+        .map_err(|err| format!("host plan failed: {err}"))?;
+    tool_plan_to_json(&plan)
+}
+
+fn tool_plan_to_json(plan: &ToolPlan) -> Result<String, String> {
+    let value = match plan {
+        ToolPlan::Answer { text } => serde_json::json!({
+            "action": "answer",
+            "text": text,
+        }),
+        ToolPlan::Tool { tool, input } => serde_json::json!({
+            "action": "tool",
+            "tool": tool,
+            "input": input,
+        }),
+    };
+    Ok(value.to_string())
 }
 
 async fn run_host_turn(

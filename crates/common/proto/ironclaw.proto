@@ -31,6 +31,7 @@ message MessageEnvelope {
 message AuthChallenge {
   string cap_token = 1;
   repeated string allowed_tools = 2;
+  string execution_mode = 3;
 }
 
 message AuthAck {

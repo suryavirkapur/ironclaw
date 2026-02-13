@@ -41,6 +41,7 @@ impl<T> AuthTransport<T> {
             payload: Some(message_envelope::Payload::AuthChallenge(AuthChallenge {
                 cap_token,
                 allowed_tools,
+                execution_mode: String::new(),
             })),
         }
     }

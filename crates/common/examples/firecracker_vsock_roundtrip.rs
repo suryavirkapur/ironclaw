@@ -48,6 +48,7 @@ async fn main() -> Result<(), String> {
         payload: Some(message_envelope::Payload::AuthChallenge(AuthChallenge {
             cap_token: cap_token.clone(),
             allowed_tools: vec![],
+            execution_mode: "host_only".to_string(),
         })),
     };
 
