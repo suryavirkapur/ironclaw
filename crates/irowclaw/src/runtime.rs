@@ -54,12 +54,11 @@ impl Runtime {
             "file_write",
             Box::new(FileWriteTool::new(workspace_root.clone())),
         );
+        // Bash availability must be controlled by the host-provided allowlist
+        // (AuthChallenge.allowed_tools). The tool itself is always registered.
         tool_registry.register(
             "bash",
-            Box::new(RestrictedBashTool::new(
-                config.tools.allow_bash,
-                workspace_root.clone(),
-            )),
+            Box::new(RestrictedBashTool::new(true, workspace_root.clone())),
         );
 
         Ok(Self {
