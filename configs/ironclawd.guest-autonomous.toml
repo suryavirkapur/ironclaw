@@ -1,3 +1,5 @@
+execution_mode = "guest_autonomous"
+
 [server]
 bind = "127.0.0.1"
 port = 9938
@@ -8,8 +10,6 @@ index_file = "index.html"
 
 [storage]
 users_root = "data/users"
-
-execution_mode = "guest_autonomous"
 
 [llm]
 model = "gpt-5-mini"
