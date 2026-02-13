@@ -1,3 +1,19 @@
+0.4.0 2026-02-13
+- added telegram channel mvp in `ironclawd` with long polling via reqwest and outbound
+  sendmessage support
+- added owner allowlist enforcement via `OWNER_TELEGRAM_CHAT_ID` or
+  `[telegram].owner_chat_id`
+- added telegram offset persistence at `data/telegram.offset` with load/save helpers and unit
+  coverage
+- added `--telegram` startup flag and host config `[telegram]` section for token/chat/timeout
+  settings
+- wired telegram inbound text into existing host-only or guest transport flow with per-chat
+  session reuse
+- added telegram stream chunking for telegram max message size handling
+- added graceful shutdown wiring for http server + telegram loop with shared stop signal
+- documented telegram quickstart and test steps in readme
+- enabled tokio `signal` feature for ctrl-c shutdown handling
+
 0.3.1 2026-02-13
 - added deterministic `TOOLTEST` host planner path for guest_tools mode without llm key dependency
 - added `configs/ironclawd.guest-tools.toml` for local guest_tools smoke execution

@@ -36,6 +36,39 @@ then open a websocket connection to:
 
 (port and bind come from the host config.)
 
+## telegram mvp quickstart
+
+the host can also run a telegram dm channel via long polling.
+
+required env vars:
+
+- `TELEGRAM_BOT_TOKEN` (bot token from botfather)
+- `OWNER_TELEGRAM_CHAT_ID` (single allowlisted chat id for mvp)
+
+optional config values (in `~/.config/ironclaw/ironclawd.toml`):
+
+```toml
+[telegram]
+enabled = true
+bot_token = "123456:example"
+owner_chat_id = 123456789
+poll_timeout_seconds = 30
+```
+
+run:
+
+```bash
+TELEGRAM_BOT_TOKEN=... OWNER_TELEGRAM_CHAT_ID=... \
+cargo run -p ironclawd -- --telegram
+```
+
+test:
+
+- send a dm to your bot from the owner chat id
+- check host logs for `telegram loop started`
+- verify replies arrive in telegram
+- offset is persisted to `data/telegram.offset`
+
 ## config
 
 host config path resolution:

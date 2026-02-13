@@ -16,7 +16,14 @@ reqwest = { version = "*", default-features = false, features = ["json", "rustls
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread", "time", "process", "fs"] }
+tokio = { version = "*", features = [
+  "macros",
+  "rt-multi-thread",
+  "time",
+  "process",
+  "fs",
+  "signal",
+] }
 toml = "*"
 tracing = "*"
 tracing-subscriber = "*"

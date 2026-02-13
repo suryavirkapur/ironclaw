@@ -20,31 +20,99 @@ use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
 use llm_client::{LlmClient, ToolPlan};
 use serde::Deserialize;
+use serde::Serialize;
+use std::cmp::min;
+use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-// mutex no longer used
+use tokio::sync::watch;
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
+const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
     let config = load_host_config()?;
+    let run_telegram = should_enable_telegram(&config);
+    let telegram_settings = if run_telegram {
+        Some(TelegramSettings::from_config(&config)?)
+    } else {
+        None
+    };
     let addr = format!("{}:{}", config.server.bind, config.server.port);
     let state = AppState::new(config)?;
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/ui", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))
-        .with_state(state);
+        .with_state(state.clone());
 
     tracing_subscriber::fmt::init();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|err| IronclawError::new(format!("bind failed: {err}")))?;
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| IronclawError::new(format!("server failed: {err}")))
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let shutdown_server_rx = shutdown_rx.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut rx = shutdown_server_rx;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                loop {
+                    if *rx.borrow() {
+                        break;
+                    }
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await
+            .map_err(|err| IronclawError::new(format!("server failed: {err}")))
+    });
+
+    let telegram_task = if let Some(settings) = telegram_settings {
+        let telegram_state = state.clone();
+        let rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            run_telegram_loop(telegram_state, settings, rx).await
+        }))
+    } else {
+        None
+    };
+
+    tokio::select! {
+        result = server_task => {
+            let _ = shutdown_tx.send(true);
+            match result {
+                Ok(value) => value,
+                Err(err) => Err(IronclawError::new(format!("server task join failed: {err}"))),
+            }
+        }
+        result = async {
+            if let Some(task) = telegram_task {
+                match task.await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        Err(IronclawError::new(format!(
+                            "telegram task join failed: {err}"
+                        )))
+                    }
+                }
+            } else {
+                std::future::pending::<Result<(), IronclawError>>().await
+            }
+        } => {
+            let _ = shutdown_tx.send(true);
+            result
+        }
+        signal = tokio::signal::ctrl_c() => {
+            let _ = signal;
+            let _ = shutdown_tx.send(true);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -678,9 +746,489 @@ async fn run_host_turn(
     }
 }
 
+fn should_enable_telegram(config: &HostConfig) -> bool {
+    if std::env::args().any(|arg| arg == "--telegram") {
+        return true;
+    }
+    config.telegram.enabled
+}
+
+#[derive(Clone)]
+struct TelegramSettings {
+    bot_token: String,
+    owner_chat_id: i64,
+    poll_timeout_seconds: u64,
+    offset_file: PathBuf,
+}
+
+impl TelegramSettings {
+    fn from_config(config: &HostConfig) -> Result<Self, IronclawError> {
+        let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+            .ok()
+            .or_else(|| config.telegram.bot_token.clone())
+            .ok_or_else(|| IronclawError::new("telegram enabled but bot token is missing"))?;
+        let owner_chat_id = std::env::var("OWNER_TELEGRAM_CHAT_ID")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .or(config.telegram.owner_chat_id)
+            .ok_or_else(|| {
+                IronclawError::new("telegram enabled but owner telegram chat id is missing")
+            })?;
+        let poll_timeout_seconds = if config.telegram.poll_timeout_seconds == 0 {
+            30
+        } else {
+            config.telegram.poll_timeout_seconds
+        };
+        Ok(Self {
+            bot_token,
+            owner_chat_id,
+            poll_timeout_seconds,
+            offset_file: PathBuf::from("data/telegram.offset"),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct TelegramClient {
+    bot_token: String,
+    client: reqwest::Client,
+}
+
+#[derive(Deserialize)]
+struct TelegramApiResponse<T> {
+    ok: bool,
+    result: T,
+}
+
+#[derive(Clone, Deserialize)]
+struct TelegramUpdate {
+    update_id: i64,
+    message: Option<TelegramMessage>,
+}
+
+#[derive(Clone, Deserialize)]
+struct TelegramMessage {
+    text: Option<String>,
+    chat: TelegramChat,
+}
+
+#[derive(Clone, Deserialize)]
+struct TelegramChat {
+    id: i64,
+}
+
+#[derive(Serialize)]
+struct TelegramGetUpdatesRequest<'a> {
+    offset: i64,
+    timeout: u64,
+    allowed_updates: &'a [&'a str],
+}
+
+#[derive(Serialize)]
+struct TelegramSendMessageRequest<'a> {
+    chat_id: i64,
+    text: &'a str,
+}
+
+impl TelegramClient {
+    fn new(bot_token: String) -> Self {
+        Self {
+            bot_token,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    async fn get_updates(
+        &self,
+        offset: i64,
+        timeout: u64,
+    ) -> Result<Vec<TelegramUpdate>, IronclawError> {
+        let request = TelegramGetUpdatesRequest {
+            offset,
+            timeout,
+            allowed_updates: &["message"],
+        };
+        let response = self
+            .client
+            .post(self.url("getUpdates"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                IronclawError::new(format!("telegram getupdates request failed: {err}"))
+            })?;
+        let response = response
+            .error_for_status()
+            .map_err(|err| IronclawError::new(format!("telegram getupdates failed: {err}")))?;
+        let body: TelegramApiResponse<Vec<TelegramUpdate>> =
+            response.json().await.map_err(|err| {
+                IronclawError::new(format!("telegram getupdates decode failed: {err}"))
+            })?;
+        if !body.ok {
+            return Err(IronclawError::new("telegram getupdates returned not ok"));
+        }
+        Ok(body.result)
+    }
+
+    async fn send_message(&self, chat_id: i64, text: &str) -> Result<(), IronclawError> {
+        let request = TelegramSendMessageRequest { chat_id, text };
+        let response = self
+            .client
+            .post(self.url("sendMessage"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                IronclawError::new(format!("telegram sendmessage request failed: {err}"))
+            })?;
+        let response = response
+            .error_for_status()
+            .map_err(|err| IronclawError::new(format!("telegram sendmessage failed: {err}")))?;
+        let body: TelegramApiResponse<serde_json::Value> =
+            response.json().await.map_err(|err| {
+                IronclawError::new(format!("telegram sendmessage decode failed: {err}"))
+            })?;
+        if !body.ok {
+            return Err(IronclawError::new("telegram sendmessage returned not ok"));
+        }
+        Ok(())
+    }
+
+    fn url(&self, method: &str) -> String {
+        format!("https://api.telegram.org/bot{}/{}", self.bot_token, method)
+    }
+}
+
+struct TelegramSession {
+    chat_id: i64,
+    user_id: String,
+    session_id: String,
+    msg_id: u64,
+    transport: Option<Box<dyn common::transport::Transport>>,
+}
+
+impl TelegramSession {
+    fn new(chat_id: i64) -> Self {
+        Self {
+            chat_id,
+            user_id: format!("telegram-{chat_id}"),
+            session_id: format!("telegram-{chat_id}"),
+            msg_id: 1,
+            transport: None,
+        }
+    }
+}
+
+async fn run_telegram_loop(
+    state: AppState,
+    settings: TelegramSettings,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), IronclawError> {
+    tracing::info!(
+        "telegram loop started owner_chat_id={} offset_file={}",
+        settings.owner_chat_id,
+        settings.offset_file.display()
+    );
+    let client = TelegramClient::new(settings.bot_token.clone());
+    let mut offset = load_telegram_offset(&settings.offset_file)?;
+    let mut sessions = HashMap::<i64, TelegramSession>::new();
+
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        let updates = tokio::select! {
+            value = client.get_updates(offset, settings.poll_timeout_seconds) => value,
+            changed = shutdown.changed() => {
+                let _ = changed;
+                continue;
+            }
+        };
+
+        match updates {
+            Ok(list) => {
+                for update in list {
+                    offset = min(i64::MAX - 1, update.update_id.saturating_add(1));
+                    save_telegram_offset(&settings.offset_file, offset)?;
+
+                    let Some(message) = update.message else {
+                        continue;
+                    };
+                    let Some(text) = message.text else {
+                        continue;
+                    };
+                    if message.chat.id != settings.owner_chat_id {
+                        tracing::warn!("telegram message denied from chat {}", message.chat.id);
+                        continue;
+                    }
+                    let session = sessions
+                        .entry(message.chat.id)
+                        .or_insert_with(|| TelegramSession::new(message.chat.id));
+                    if let Err(err) =
+                        handle_telegram_text(&state, &client, session, text.as_str()).await
+                    {
+                        tracing::error!("telegram message handling failed: {err}");
+                        let _ = client.send_message(session.chat_id, "request failed").await;
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!("telegram polling failed: {err}");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_telegram_text(
+    state: &AppState,
+    client: &TelegramClient,
+    session: &mut TelegramSession,
+    text: &str,
+) -> Result<(), IronclawError> {
+    let host_allowed_tools = vec![
+        "bash".to_string(),
+        "file_read".to_string(),
+        "file_write".to_string(),
+    ];
+    if state.execution_mode == RuntimeExecutionMode::HostOnly {
+        let output = run_host_turn(state, &session.user_id, &host_allowed_tools, text).await?;
+        send_stream_to_telegram(client, session.chat_id, &output).await?;
+        return Ok(());
+    }
+
+    if session.transport.is_none() {
+        let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
+        let guest_allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+        let cap_token = {
+            use rand::RngCore;
+            let mut bytes = [0u8; 32];
+            rand::rng().fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        };
+
+        let mut transport = vm_instance.transport;
+        if state.local_guest {
+            if let Some(guest_transport) = guest_transport {
+                let guest_user_id = session.user_id.clone();
+                let users_root = state.host_config.storage.users_root.clone();
+                let guest_config_path = (*state.guest_config_path).clone();
+                tokio::spawn(async move {
+                    let brain_root = users_root.join(&guest_user_id).join("guest");
+                    if let Err(err) = std::fs::create_dir_all(&brain_root) {
+                        tracing::warn!("create brain root failed: {err}");
+                    }
+                    std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+                    if let Err(err) =
+                        irowclaw::runtime::run_with_transport(guest_transport, guest_config_path)
+                            .await
+                    {
+                        tracing::error!("guest runtime failed: {err}");
+                    }
+                });
+            }
+        }
+        send_guest_auth_challenge(
+            &mut transport,
+            &session.user_id,
+            &session.session_id,
+            &cap_token,
+            &guest_allowed_tools,
+            state.execution_mode,
+        )
+        .await?;
+        session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
+    }
+
+    let payload = message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
+        text: text.to_string(),
+    });
+    let timestamp_ms = now_ms().unwrap_or(0);
+    let envelope = MessageEnvelope {
+        user_id: session.user_id.clone(),
+        session_id: session.session_id.clone(),
+        msg_id: session.msg_id,
+        timestamp_ms,
+        cap_token: String::new(),
+        payload: Some(payload),
+    };
+    session.msg_id = session.msg_id.saturating_add(1);
+    let transport = session
+        .transport
+        .as_mut()
+        .ok_or_else(|| IronclawError::new("missing telegram session transport"))?;
+    transport
+        .send(envelope)
+        .await
+        .map_err(|err| IronclawError::new(format!("send to guest failed: {err}")))?;
+
+    let host_allowed_tools = vec![
+        "bash".to_string(),
+        "file_read".to_string(),
+        "file_write".to_string(),
+    ];
+
+    let mut streamed_any = false;
+    loop {
+        let maybe = transport
+            .recv()
+            .await
+            .map_err(|err| IronclawError::new(format!("transport recv failed: {err}")))?;
+        let Some(envelope) = maybe else {
+            return Err(IronclawError::new("guest transport closed"));
+        };
+        if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
+            let (ok, output) = if req.tool == "host_plan" {
+                match host_plan_tool_response(state, &req.input, &host_allowed_tools).await {
+                    Ok(out) => (true, out),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            } else {
+                match run_host_tool(&host_allowed_tools, &session.user_id, &req.tool, &req.input)
+                    .await
+                {
+                    Ok(out) => (true, truncate_tool_output(&out)),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            };
+            let resp = MessageEnvelope {
+                user_id: envelope.user_id,
+                session_id: envelope.session_id,
+                msg_id: envelope.msg_id,
+                timestamp_ms: envelope.timestamp_ms,
+                cap_token: String::new(),
+                payload: Some(message_envelope::Payload::ToolCallResponse(
+                    common::proto::ironclaw::ToolCallResponse {
+                        call_id: req.call_id,
+                        ok,
+                        output,
+                    },
+                )),
+            };
+            transport
+                .send(resp)
+                .await
+                .map_err(|err| IronclawError::new(format!("tool response send failed: {err}")))?;
+            continue;
+        }
+        if let Some(message_envelope::Payload::StreamDelta(delta)) = envelope.payload {
+            if !delta.delta.is_empty() {
+                send_stream_to_telegram(client, session.chat_id, &delta.delta).await?;
+                streamed_any = true;
+            }
+            if delta.done {
+                break;
+            }
+        }
+    }
+
+    if !streamed_any {
+        send_stream_to_telegram(client, session.chat_id, "done").await?;
+    }
+
+    Ok(())
+}
+
+async fn send_guest_auth_challenge(
+    transport: &mut Box<dyn common::transport::Transport>,
+    user_id: &str,
+    session_id: &str,
+    cap_token: &str,
+    guest_allowed_tools: &[String],
+    execution_mode: RuntimeExecutionMode,
+) -> Result<(), IronclawError> {
+    let challenge = MessageEnvelope {
+        user_id: user_id.to_string(),
+        session_id: session_id.to_string(),
+        msg_id: 0,
+        timestamp_ms: now_ms().unwrap_or(0),
+        cap_token: cap_token.to_string(),
+        payload: Some(message_envelope::Payload::AuthChallenge(
+            common::proto::ironclaw::AuthChallenge {
+                cap_token: cap_token.to_string(),
+                allowed_tools: guest_allowed_tools.to_vec(),
+                execution_mode: execution_mode.to_wire().to_string(),
+            },
+        )),
+    };
+    transport
+        .send(challenge)
+        .await
+        .map_err(|err| IronclawError::new(format!("auth challenge send failed: {err}")))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), transport.recv()).await {
+        Ok(Ok(Some(msg))) => match msg.payload {
+            Some(message_envelope::Payload::AuthAck(ack)) if ack.cap_token == cap_token => Ok(()),
+            _ => Err(IronclawError::new("invalid auth ack")),
+        },
+        Ok(Ok(None)) => Err(IronclawError::new(
+            "guest closed while waiting for auth ack",
+        )),
+        Ok(Err(err)) => Err(IronclawError::new(format!("auth ack recv failed: {err}"))),
+        Err(_) => Err(IronclawError::new("auth ack timed out")),
+    }
+}
+
+async fn send_stream_to_telegram(
+    client: &TelegramClient,
+    chat_id: i64,
+    text: &str,
+) -> Result<(), IronclawError> {
+    let normalized = if text.trim().is_empty() { " " } else { text };
+    for chunk in split_telegram_chunks(normalized, TELEGRAM_CHUNK_MAX_CHARS) {
+        client.send_message(chat_id, &chunk).await?;
+    }
+    Ok(())
+}
+
+fn split_telegram_chunks(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let end = min(chars.len(), index.saturating_add(max_chars));
+        out.push(chars[index..end].iter().collect::<String>());
+        index = end;
+    }
+    out
+}
+
+fn load_telegram_offset(path: &StdPath) -> Result<i64, IronclawError> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let value = std::fs::read_to_string(path)
+        .map_err(|err| IronclawError::new(format!("telegram offset read failed: {err}")))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed
+        .parse::<i64>()
+        .map_err(|err| IronclawError::new(format!("telegram offset parse failed: {err}")))
+}
+
+fn save_telegram_offset(path: &StdPath, offset: i64) -> Result<(), IronclawError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            IronclawError::new(format!("telegram offset dir create failed: {err}"))
+        })?;
+    }
+    std::fs::write(path, format!("{offset}\n"))
+        .map_err(|err| IronclawError::new(format!("telegram offset write failed: {err}")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{deterministic_guest_tools_plan, ToolPlan};
+    use super::{
+        deterministic_guest_tools_plan, load_telegram_offset, save_telegram_offset,
+        split_telegram_chunks, ToolPlan,
+    };
 
     #[test]
     fn tooltest_write_plans_file_write() {
@@ -712,5 +1260,25 @@ mod tests {
         let allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
         let plan = deterministic_guest_tools_plan("read notes/tool.txt", &allowed_tools);
         assert!(plan.is_none());
+    }
+
+    #[test]
+    fn telegram_chunks_split_large_text() {
+        let text = "x".repeat(9000);
+        let chunks = split_telegram_chunks(&text, 4096);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chars().count(), 4096);
+        assert_eq!(chunks[1].chars().count(), 4096);
+        assert_eq!(chunks[2].chars().count(), 808);
+    }
+
+    #[test]
+    fn telegram_offset_roundtrip() {
+        let path = std::env::temp_dir().join("ironclaw-telegram-offset-test.txt");
+        let _ = std::fs::remove_file(&path);
+        save_telegram_offset(&path, 44).expect("save offset");
+        let loaded = load_telegram_offset(&path).expect("load offset");
+        assert_eq!(loaded, 44);
+        let _ = std::fs::remove_file(&path);
     }
 }

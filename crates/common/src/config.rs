@@ -8,6 +8,8 @@ pub struct HostConfig {
     pub firecracker: HostFirecrackerConfig,
     pub storage: HostStorageConfig,
     pub llm: HostLlmConfig,
+    #[serde(default)]
+    pub telegram: HostTelegramConfig,
     #[serde(default = "default_execution_mode")]
     pub execution_mode: HostExecutionMode,
 }
@@ -84,6 +86,33 @@ pub struct HostStorageConfig {
     pub users_root: PathBuf,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostTelegramConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    #[serde(default)]
+    pub owner_chat_id: Option<i64>,
+    #[serde(default = "default_telegram_poll_timeout_seconds")]
+    pub poll_timeout_seconds: u64,
+}
+
+fn default_telegram_poll_timeout_seconds() -> u64 {
+    30
+}
+
+impl Default for HostTelegramConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: None,
+            owner_chat_id: None,
+            poll_timeout_seconds: default_telegram_poll_timeout_seconds(),
+        }
+    }
+}
+
 impl HostConfig {
     pub fn default_for_local(users_root: PathBuf) -> Self {
         Self {
@@ -109,6 +138,7 @@ impl HostConfig {
                 base_url: "https://api.openai.com/v1".to_string(),
                 api: HostLlmApi::Responses,
             },
+            telegram: HostTelegramConfig::default(),
             execution_mode: HostExecutionMode::Auto,
         }
     }
