@@ -652,6 +652,34 @@ async fn host_plan_tool_response(
 }
 
 fn deterministic_guest_tools_plan(user_text: &str, allowed_tools: &[String]) -> Option<ToolPlan> {
+    let text = user_text.trim();
+
+    // Heuristic: when the user explicitly asks to run a shell command, force bash.
+    // This avoids the planner "answering" instead of executing.
+    if let Some(cmd) = text.strip_prefix("run ") {
+        if allowed_tools.iter().any(|tool| tool == "bash") {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                return Some(ToolPlan::Tool {
+                    tool: "bash".to_string(),
+                    input: cmd.to_string(),
+                });
+            }
+        }
+    }
+
+    // Also handle common direct shell commands.
+    for prefix in ["cat ", "ls", "pwd", "whoami", "uname"] {
+        if text.starts_with(prefix) {
+            if allowed_tools.iter().any(|tool| tool == "bash") {
+                return Some(ToolPlan::Tool {
+                    tool: "bash".to_string(),
+                    input: text.to_string(),
+                });
+            }
+        }
+    }
+
     let text = user_text.trim_start();
     let rest = text.strip_prefix("TOOLTEST ")?;
 
