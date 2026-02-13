@@ -1,27 +1,33 @@
 current context:
-- firecracker guest rootfs build produces rootfs/build/guest-root and guest-rootfs.ext4
-- websocket handler now forwards user text to guest transport when firecracker mode is enabled
-- new smoke-firecracker-ws script validates websocket -> host -> guest(vsock) -> websocket
-- ws smoke client asserts unique marker is returned by guest-derived streamdelta payload
+- execution mode routing supports host_only, guest_tools, guest_autonomous, and auto
+- guest auth challenge now carries execution_mode and tool allowlist for runtime behavior
+- irowclaw now enforces safety checks for prompt injection, policy decisions, and leak patterns
+- guest tool registry executes allowlisted file_read and file_write under /mnt/brain/workspace
+- guest handles inbound toolcallrequest and returns toolcallresponse end-to-end
+- guest_tools mode asks host for tool-or-answer plan via internal host_plan tool call
+- guest_autonomous mode plans and executes locally without host llm planning
+- new smoke-guest-tools-ws scripts validate guest tool calls, policy block, and leak block paths
 
 pending tasks:
-- run smoke-firecracker-ws twice on a host with kvm/firecracker and capture output
-- push step 4 commit to origin/master after local validation
+- run smoke-firecracker.sh on a host where firecracker api socket bind is permitted
+- run smoke-firecracker-ws.sh and smoke-guest-tools-ws.sh on a host where tcp bind is permitted
+- capture pass logs for both websocket smokes on a permissive environment
 
 important decisions:
 - llm network calls are host-only and keyed by openai_api_key env var
-- guest must never call llm endpoints
+- guest never calls external llm endpoints directly
 - default host llm api is responses at https://api.openai.com/v1 with model gpt-5-mini
-- firecracker rootfs default path in config is now ext4 image for direct boot
-- firecracker websocket path bypasses host llm turn and sends protobuf usermessage to guest
+- guest_tools uses host_plan internal tool response for planning while guest executes tools
+- guest_autonomous keeps host as websocket/protocol router only
+- firecracker websocket config now pins execution_mode to guest_tools for compatibility
 
 architectural notes:
 - websocket payload stays messageenvelope json with payload.streamdelta for text output
 - host keeps vm start and authenticated transport setup intact before ws bridge loop
-- firecracker websocket replies are forwarded from transport.recv back to websocket client
-- host tool request handling from guest remains wired but tool use is not initiated in step 1
-- firecracker smoke path is now independent of websocket tcp bind requirements
+- guest tool call trigger over websocket is available via `!toolcall <tool>\\n<input>`
+- host handles internal guest tool `host_plan` and returns json action schema
+- outbound guest tool and stream outputs pass through leak sanitizer before host relay
 
 plan:
-- execute smoke-firecracker-ws twice and verify pass logs with guest-derived marker echo
-- if runtime flakes, tune retry/backoff and error surfacing in smoke script
+- validate websocket smoke scripts on permissive host and archive logs
+- evaluate optional restricted bash tool implementation behind default-off flag

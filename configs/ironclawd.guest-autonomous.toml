@@ -14,10 +14,10 @@ model = "gpt-5-mini"
 base_url = "https://api.openai.com/v1"
 api = "responses"
 
-execution_mode = "guest_tools"
+execution_mode = "guest_autonomous"
 
 [firecracker]
-enabled = true
+enabled = false
 kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
 rootfs_path = "rootfs/build/guest-rootfs.ext4"
 api_socket_dir = "/tmp/ironclaw-fc"

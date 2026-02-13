@@ -1,3 +1,19 @@
+0.3.0 2026-02-13
+- added execution mode config (`host_only`, `guest_tools`, `guest_autonomous`, `auto`)
+- extended auth challenge with execution mode for host-guest loop negotiation
+- implemented guest safety layer for prompt injection heuristics, policy decisions, and leak checks
+- added guest tool registry with allowlist enforcement in `crates/tools`
+- implemented real guest `file_read` and `file_write` tools rooted under guest workspace
+- wired guest-side `ToolCallRequest` handling to execute tools and return `ToolCallResponse`
+- added guest loop support for host-planned mode (`host_plan` internal tool) and autonomous mode
+- updated host websocket routing for mode-aware behavior and added `!toolcall <tool>\\n<input>` path
+- added unit and protocol integration tests for safety and guest tool execution
+- added `scripts/smoke-guest-tools-ws.sh` and `scripts/smoke-guest-tools-ws.mjs`
+- documented new execution modes and smoke command usage in readme
+- added local guest autonomous host config `configs/ironclawd.guest-autonomous.toml`
+- updated firecracker ws config to use `execution_mode = \"guest_tools\"`
+- kept step 4 firecracker websocket smoke script compatibility behavior
+
 0.2.2 2026-02-12
 - wired websocket user messages to guest transport when firecracker mode is enabled
 - added scripts/smoke-firecracker-ws.sh for one-command websocket end-to-end firecracker smoke
