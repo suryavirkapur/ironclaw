@@ -149,7 +149,9 @@ impl Tool for RestrictedBashTool {
             }
         }
 
-        let out = std::process::Command::new("bash")
+        // Firecracker guest rootfs uses busybox; bash may not exist.
+        // Use sh for portability.
+        let out = std::process::Command::new("sh")
             .arg("-lc")
             .arg(input)
             .current_dir(&self.working_dir)
