@@ -1,7 +1,10 @@
 use common::config::{GuestConfig, JobsConfig};
 use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use common::transport::Transport;
-use memory::{hybrid_fusion, index_chunks, initialize_schema, lexical_search, Chunk};
+use memory::{
+    forget_memories_by_query, forget_memory_by_id, hybrid_fusion, index_chunks, initialize_schema,
+    lexical_search, list_pinned_memories, redact_secrets, upsert_memory, Chunk, NewMemory,
+};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -148,6 +151,74 @@ impl Runtime {
 
         result
     }
+
+    fn execute_memory_command(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, IrowclawError> {
+        let trimmed = text.trim();
+        if let Some(rest) = trimmed.strip_prefix("remember ") {
+            let remember_text = rest.trim();
+            if remember_text.is_empty() {
+                return Ok(Some("remember requires text".to_string()));
+            }
+            let now = now_ms()?;
+            let memory_id = upsert_memory(
+                &self.db,
+                now,
+                &NewMemory {
+                    user_id: user_id.to_string(),
+                    importance: 90,
+                    pinned: true,
+                    kind: "manual".to_string(),
+                    text: redact_secrets(remember_text),
+                    tags_json: "[\"manual\",\"pinned\"]".to_string(),
+                    source_json: serde_json::json!({
+                        "source": "guest_command",
+                        "session_id": session_id,
+                    })
+                    .to_string(),
+                },
+            )
+            .map_err(|err| IrowclawError::new(format!("remember failed: {err}")))?;
+            return Ok(Some(format!("remembered pinned memory id={memory_id}")));
+        }
+
+        if trimmed == "pins" {
+            let pinned = list_pinned_memories(&self.db, user_id, 25)
+                .map_err(|err| IrowclawError::new(format!("pins failed: {err}")))?;
+            if pinned.is_empty() {
+                return Ok(Some("no pinned memories".to_string()));
+            }
+            let mut lines = Vec::new();
+            for item in pinned {
+                lines.push(format!("{}: {}", item.id, item.text));
+            }
+            return Ok(Some(lines.join("\n")));
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("forget ") {
+            let target = rest.trim();
+            if target.is_empty() {
+                return Ok(Some("forget requires id or query".to_string()));
+            }
+            if let Ok(id) = target.parse::<i64>() {
+                let removed = forget_memory_by_id(&self.db, user_id, id)
+                    .map_err(|err| IrowclawError::new(format!("forget failed: {err}")))?;
+                if removed {
+                    return Ok(Some(format!("forgot memory id={id}")));
+                }
+                return Ok(Some(format!("no memory matched id={id}")));
+            }
+            let removed = forget_memories_by_query(&self.db, user_id, target, 10)
+                .map_err(|err| IrowclawError::new(format!("forget failed: {err}")))?;
+            return Ok(Some(format!("forgot {removed} memories")));
+        }
+
+        Ok(None)
+    }
 }
 
 pub async fn run_with_transport<T: Transport + 'static>(
@@ -203,7 +274,11 @@ pub async fn run_with_transport<T: Transport + 'static>(
             Some(message_envelope::Payload::UserMessage(um)) => {
                 let text = um.text.trim().to_string();
 
-                if runtime.safety.scan_prompt_injection(&text).is_some() {
+                if let Some(command_output) =
+                    runtime.execute_memory_command(&message.user_id, &message.session_id, &text)?
+                {
+                    build_user_reply(&message, &cap_token, &command_output, &runtime)?
+                } else if runtime.safety.scan_prompt_injection(&text).is_some() {
                     build_user_reply(
                         &message,
                         &cap_token,

@@ -87,9 +87,10 @@ impl LlmClient {
         &self,
         user_text: &str,
         allowed_tools: &[String],
+        memory_block: Option<&str>,
         history: Option<&[ConversationMessage]>,
     ) -> Result<ToolPlan, LlmClientError> {
-        let prompt = build_tool_plan_prompt(user_text, allowed_tools, history);
+        let prompt = build_tool_plan_prompt(user_text, allowed_tools, memory_block, history);
         let raw = self.complete(&prompt).await?;
         parse_tool_plan(&raw, allowed_tools)
     }
@@ -101,10 +102,18 @@ impl LlmClient {
         input: &str,
         tool_ok: bool,
         tool_output: &str,
+        memory_block: Option<&str>,
         history: Option<&[ConversationMessage]>,
     ) -> Result<String, LlmClientError> {
-        let prompt =
-            build_tool_finalize_prompt(user_text, tool, input, tool_ok, tool_output, history);
+        let prompt = build_tool_finalize_prompt(
+            user_text,
+            tool,
+            input,
+            tool_ok,
+            tool_output,
+            memory_block,
+            history,
+        );
         self.complete(&prompt).await
     }
 }
@@ -150,9 +159,11 @@ pub enum ToolPlan {
 fn build_tool_plan_prompt(
     user_text: &str,
     allowed_tools: &[String],
+    memory_block: Option<&str>,
     history: Option<&[ConversationMessage]>,
 ) -> String {
     let tools = allowed_tools.join(", ");
+    let memory = build_memory_block(memory_block);
     let history_block = build_history_block(history);
     format!(
         "you are a host planner. choose exactly one action.\n\
@@ -165,6 +176,7 @@ fn build_tool_plan_prompt(
          - if a tool is needed, choose action tool.\n\
          - if no tool is needed, choose action answer.\n\
          - do not include markdown.\n\
+         {memory}\
          {history_block}\
          user message:\n\
          {user_text}"
@@ -177,13 +189,16 @@ fn build_tool_finalize_prompt(
     input: &str,
     tool_ok: bool,
     tool_output: &str,
+    memory_block: Option<&str>,
     history: Option<&[ConversationMessage]>,
 ) -> String {
     let status = if tool_ok { "ok" } else { "error" };
+    let memory = build_memory_block(memory_block);
     let history_block = build_history_block(history);
     format!(
         "you are a host assistant. write the final user-facing response.\n\
          use the tool result below.\n\
+         {memory}\
          {history_block}\
          user message:\n\
          {user_text}\n\
@@ -218,6 +233,16 @@ fn build_history_block(history: Option<&[ConversationMessage]>) -> String {
         block.push_str(&format!("{role}: {}\n", message.text));
     }
     block
+}
+
+fn build_memory_block(memory_block: Option<&str>) -> String {
+    let Some(memory_block) = memory_block else {
+        return String::new();
+    };
+    if memory_block.trim().is_empty() {
+        return String::new();
+    }
+    format!("{memory_block}\n")
 }
 
 #[derive(Deserialize)]
@@ -433,12 +458,37 @@ mod llm_client_test {
                 text: "second".to_string(),
             },
         ];
-        let prompt = build_tool_plan_prompt("current message", &allowed_tools, Some(&history));
+        let prompt =
+            build_tool_plan_prompt("current message", &allowed_tools, None, Some(&history));
 
         let history_pos = prompt.find("conversation history:");
         let current_pos = prompt.find("user message:\ncurrent message");
         assert!(history_pos.is_some());
         assert!(current_pos.is_some());
+        assert!(history_pos < current_pos);
+    }
+
+    #[test]
+    fn planning_prompt_places_memory_before_history() {
+        let allowed_tools = vec!["bash".to_string()];
+        let history = vec![ConversationMessage {
+            role: "user".to_string(),
+            text: "recent message".to_string(),
+        }];
+        let prompt = build_tool_plan_prompt(
+            "current message",
+            &allowed_tools,
+            Some("memory context:\n- id=1 text=prefers rust"),
+            Some(&history),
+        );
+
+        let memory_pos = prompt.find("memory context:");
+        let history_pos = prompt.find("conversation history:");
+        let current_pos = prompt.find("user message:\ncurrent message");
+        assert!(memory_pos.is_some());
+        assert!(history_pos.is_some());
+        assert!(current_pos.is_some());
+        assert!(memory_pos < history_pos);
         assert!(history_pos < current_pos);
     }
 }

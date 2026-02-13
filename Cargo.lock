@@ -844,9 +844,11 @@ dependencies = [
  "hex",
  "include_dir",
  "irowclaw",
+ "memory",
  "mime_guess",
  "rand",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1007,6 +1009,7 @@ name = "memory"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
 ]

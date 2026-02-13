@@ -77,6 +77,16 @@
 - updated firecracker config rootfs path default to rootfs/build/guest-rootfs.ext4
 - improved smoke failure diagnostics by tailing firecracker console log
 
+0.2.1 2026-02-13
+- added shared long-term memory schema in sqlite (`memories`, `summaries`, `memories_fts`)
+- added fts5 retrieval + reranking (recency, importance, pinned) with planner memory block budget
+- wired host planner prompts to inject memory block before conversation history and user message
+- added background session summarization cadence (every 20 user messages) with durable fact distill
+- added memory redaction for key-like strings before persistence
+- added guest memory commands: `remember <text>`, `pins`, `forget <id or query>`
+- mapped telegram session memory key to global `owner` user id (session still chat-scoped)
+- added unit tests for summary cadence, pinned fts retrieval, and key-like redaction
+
 0.2.0 2026-02-11
 - added host-only tool planning loop with json plan schema (`tool` or `answer`)
 - added plan parsing + validation in llm client with parser unit coverage

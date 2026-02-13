@@ -19,6 +19,12 @@ use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
 use llm_client::{ConversationMessage, LlmClient, ToolPlan};
+use memory::{
+    build_memory_block, forget_memories_by_query, forget_memory_by_id, initialize_schema,
+    list_pinned_memories, maybe_summarize_session, redact_secrets, retrieve_memories,
+    upsert_memory, NewMemory,
+};
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::min;
@@ -32,6 +38,8 @@ static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
 const TELEGRAM_TRANSCRIPT_MAX_TURNS: usize = 50;
 const TELEGRAM_RETRY_MAX_ATTEMPTS: usize = 2;
+const MEMORY_RETRIEVAL_LIMIT: usize = 10;
+const MEMORY_PROMPT_BUDGET_CHARS: usize = 3200;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
@@ -429,6 +437,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             let (ok, output) = if req.tool == "host_plan" {
                                 match host_plan_tool_response(
                                     &state,
+                                    &tool_user_id,
                                     &req.input,
                                     &host_allowed_tools,
                                     None,
@@ -584,6 +593,135 @@ fn brain_ext4_path(root: &StdPath, user_id: &str) -> Result<PathBuf, IronclawErr
     Ok(user_dir.join("brain.ext4"))
 }
 
+fn brain_db_path(root: &StdPath, user_id: &str) -> Result<PathBuf, IronclawError> {
+    let db_dir = root.join(user_id).join("guest").join("db");
+    std::fs::create_dir_all(&db_dir)
+        .map_err(|err| IronclawError::new(format!("create memory db dir failed: {err}")))?;
+    Ok(db_dir.join("ironclaw.db"))
+}
+
+fn open_memory_db(state: &AppState, user_id: &str) -> Result<Connection, IronclawError> {
+    let db_path = brain_db_path(&state.host_config.storage.users_root, user_id)?;
+    let conn = Connection::open(db_path)
+        .map_err(|err| IronclawError::new(format!("memory db open failed: {err}")))?;
+    initialize_schema(&conn)
+        .map_err(|err| IronclawError::new(format!("memory db schema failed: {err}")))?;
+    Ok(conn)
+}
+
+fn load_memory_block(
+    state: &AppState,
+    user_id: &str,
+    query: &str,
+    budget_chars: usize,
+) -> Result<String, IronclawError> {
+    let conn = open_memory_db(state, user_id)?;
+    let now = now_ms().unwrap_or(0);
+    let memories = retrieve_memories(&conn, user_id, query, MEMORY_RETRIEVAL_LIMIT, now)
+        .map_err(|err| IronclawError::new(format!("memory retrieve failed: {err}")))?;
+    Ok(build_memory_block(&memories, budget_chars))
+}
+
+fn summarize_telegram_session_memory(
+    state: &AppState,
+    session: &TelegramSession,
+) -> Result<(), IronclawError> {
+    let conn = open_memory_db(state, &session.user_id)?;
+    let user_messages = session.user_messages();
+    let _ = maybe_summarize_session(
+        &conn,
+        &session.user_id,
+        &session.session_id,
+        &user_messages,
+        now_ms().unwrap_or(0),
+    )
+    .map_err(|err| IronclawError::new(format!("memory summarize failed: {err}")))?;
+    Ok(())
+}
+
+enum MemoryCommand {
+    Remember(String),
+    Pins,
+    Forget(String),
+}
+
+fn parse_memory_command(input: &str) -> Option<MemoryCommand> {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix("remember ") {
+        if !rest.trim().is_empty() {
+            return Some(MemoryCommand::Remember(rest.trim().to_string()));
+        }
+    }
+    if trimmed == "pins" {
+        return Some(MemoryCommand::Pins);
+    }
+    if let Some(rest) = trimmed.strip_prefix("forget ") {
+        if !rest.trim().is_empty() {
+            return Some(MemoryCommand::Forget(rest.trim().to_string()));
+        }
+    }
+    None
+}
+
+fn execute_memory_command(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+    command: MemoryCommand,
+) -> Result<String, IronclawError> {
+    let conn = open_memory_db(state, user_id)?;
+    match command {
+        MemoryCommand::Remember(text) => {
+            let memory_id = upsert_memory(
+                &conn,
+                now_ms().unwrap_or(0),
+                &NewMemory {
+                    user_id: user_id.to_string(),
+                    importance: 90,
+                    pinned: true,
+                    kind: "manual".to_string(),
+                    text: redact_secrets(&text),
+                    tags_json: "[\"manual\",\"pinned\"]".to_string(),
+                    source_json: serde_json::json!({
+                        "source": "telegram_command",
+                        "session_id": session_id,
+                    })
+                    .to_string(),
+                },
+            )
+            .map_err(|err| IronclawError::new(format!("remember failed: {err}")))?;
+            Ok(format!("remembered pinned memory id={memory_id}"))
+        }
+        MemoryCommand::Pins => {
+            let items = list_pinned_memories(&conn, user_id, 25)
+                .map_err(|err| IronclawError::new(format!("pins failed: {err}")))?;
+            if items.is_empty() {
+                return Ok("no pinned memories".to_string());
+            }
+            let mut lines = Vec::new();
+            for item in items {
+                lines.push(format!("{}: {}", item.id, item.text));
+            }
+            Ok(lines.join("\n"))
+        }
+        MemoryCommand::Forget(target) => {
+            if let Ok(id) = target.parse::<i64>() {
+                let removed = forget_memory_by_id(&conn, user_id, id)
+                    .map_err(|err| IronclawError::new(format!("forget failed: {err}")))?;
+                if removed {
+                    Ok(format!("forgot memory id={id}"))
+                } else {
+                    Ok(format!("no memory matched id={id}"))
+                }
+            } else {
+                let removed = forget_memories_by_query(&conn, user_id, &target, 10)
+                    .map_err(|err| IronclawError::new(format!("forget failed: {err}")))?;
+                Ok(format!("forgot {removed} memories"))
+            }
+        }
+    }
+}
+
 fn now_ms() -> Result<u64, IronclawError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -620,6 +758,7 @@ fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::
 
 async fn host_plan_tool_response(
     state: &AppState,
+    user_id: &str,
     user_text: &str,
     allowed_tools: &[String],
     history: Option<&[ConversationMessage]>,
@@ -628,9 +767,17 @@ async fn host_plan_tool_response(
         return tool_plan_to_json(&plan);
     }
 
+    let memory_block = load_memory_block(state, user_id, user_text, MEMORY_PROMPT_BUDGET_CHARS)
+        .map_err(|err| format!("memory retrieval failed: {err}"))?;
+
     let plan = match state
         .llm_client
-        .plan_tool_or_answer(user_text, allowed_tools, history)
+        .plan_tool_or_answer(
+            user_text,
+            allowed_tools,
+            Some(memory_block.as_str()),
+            history,
+        )
         .await
     {
         Ok(plan) => plan,
@@ -750,9 +897,15 @@ async fn run_host_turn(
     user_text: &str,
     history: Option<&[ConversationMessage]>,
 ) -> Result<String, IronclawError> {
+    let memory_block = load_memory_block(state, user_id, user_text, MEMORY_PROMPT_BUDGET_CHARS)?;
     let plan = state
         .llm_client
-        .plan_tool_or_answer(user_text, allowed_tools, history)
+        .plan_tool_or_answer(
+            user_text,
+            allowed_tools,
+            Some(memory_block.as_str()),
+            history,
+        )
         .await
         .map_err(|err| IronclawError::new(format!("tool planning failed: {err}")))?;
 
@@ -777,7 +930,15 @@ async fn run_host_turn(
             );
             state
                 .llm_client
-                .finalize_with_tool_output(user_text, &tool, &input, ok, &output, history)
+                .finalize_with_tool_output(
+                    user_text,
+                    &tool,
+                    &input,
+                    ok,
+                    &output,
+                    Some(memory_block.as_str()),
+                    history,
+                )
                 .await
                 .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))
         }
@@ -956,7 +1117,7 @@ impl TelegramSession {
         let transcript = load_telegram_transcript(&transcript_path)?;
         Ok(Self {
             chat_id,
-            user_id: format!("telegram-{chat_id}"),
+            user_id: "owner".to_string(),
             session_id,
             msg_id: 1,
             transport: None,
@@ -990,6 +1151,15 @@ impl TelegramSession {
                 text: message.text.clone(),
             })
             .collect::<Vec<_>>()
+    }
+
+    fn user_messages(&self) -> Vec<String> {
+        self.transcript
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.text.clone())
+            .collect()
     }
 
     fn transport_backoff(&self) -> std::time::Duration {
@@ -1114,6 +1284,16 @@ async fn handle_telegram_text(
 
     let history = session.prompt_history();
     session.append_user_message(text, now_ms().unwrap_or(0))?;
+    if let Err(err) = summarize_telegram_session_memory(state, session) {
+        tracing::warn!("memory summarize failed: {err}");
+    }
+
+    if let Some(command) = parse_memory_command(text) {
+        let output = execute_memory_command(state, &session.user_id, &session.session_id, command)?;
+        send_stream_to_telegram(client, session.chat_id, &output).await?;
+        session.append_assistant_message(&output, now_ms().unwrap_or(0))?;
+        return Ok(());
+    }
 
     let mut attempt = 0usize;
     let mut last_error = IronclawError::new("telegram request failed");
@@ -1213,8 +1393,14 @@ async fn handle_telegram_text_once(
         };
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
             let (ok, output) = if req.tool == "host_plan" {
-                match host_plan_tool_response(state, &req.input, &host_allowed_tools, Some(history))
-                    .await
+                match host_plan_tool_response(
+                    state,
+                    &session.user_id,
+                    &req.input,
+                    &host_allowed_tools,
+                    Some(history),
+                )
+                .await
                 {
                     Ok(out) => (true, out),
                     Err(err) => (false, truncate_tool_output(&err)),

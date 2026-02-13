@@ -1,41 +1,32 @@
 current context:
-- ironclawd now supports an optional telegram channel mvp using long polling
-- telegram mode can be enabled with `--telegram` or `[telegram].enabled = true`
-- telegram credentials resolve from env first (`TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_CHAT_ID`)
-  and then from host config values
-- only a single owner chat id is allowlisted; non-owner chats are ignored
-- telegram updates persist offset to `data/telegram.offset`
-- telegram transcripts persist per session id under users root at
-  `telegram-<chat_id>/telegram.transcript.json`
-- planning prompts now include last session history (rolling 50 turns) before current user input
-- telegram transport failures now trigger vm teardown + restart + re-auth with one retry/backoff
-- firecracker mode uses the same restart path through `start_vm_pair` + `vm_manager.stop_vm`
-- telegram guest execution (`guest_tools`/`guest_autonomous`) now hard-requires firecracker;
-  local guest fallback is blocked with `Firecracker required for Telegram tool execution`
-- telegram now emits a first-message runtime banner per session:
-  `running in firecracker vm` or `tools disabled: firecracker not enabled`
-- bash is now runtime-gated: never in local_guest mode, only in firecracker when
-  guest config `tools.allow_bash = true`
-- http server and telegram loop now share graceful shutdown signaling
+- shared long-term memory is now backed by sqlite tables in the guest brain db path
+  (`memories`, `summaries`, `memories_fts`)
+- host planning now injects a memory block before conversation history and current user message
+- memory retrieval uses fts5 candidate search with reranking by recency, importance, and pinned status
+- telegram memory identity is global (`owner`) instead of chat-scoped user ids
+- telegram transcripts still keep rolling 50-turn local history per chat session
+- background summarization now runs every 20 user messages per session and writes to `summaries`
+- summary distillation auto-upserts 1-3 durable fact memories when cadence triggers
+- memory persistence redacts key-like secrets before storage
+- guest runtime supports memory commands: `remember <text>`, `pins`, `forget <id or query>`
 
 pending tasks:
 - run websocket smoke scripts on a host where tcp bind is permitted
-- run manual telegram dm e2e with a real bot token and owner chat id
-- confirm behavior in firecracker guest_tools mode with telegram enabled and runtime banner path
+- run manual telegram dm e2e with real bot credentials in firecracker mode
+- validate shared user identity behavior once whatsapp channel is added
 
 important decisions:
-- moved telegram session context from in-memory only to persistent per-session transcript files
-- reused existing guest auth/toolcall/streamdelta flow instead of introducing a new protocol
-- persisted polling offset under repository data directory for restart continuity
-- used reqwest json calls directly to telegram bot api (`getUpdates`, `sendMessage`)
-- enforced vm-only telegram tools by rejecting non-firecracker guest execution paths at runtime
+- used existing sqlite guest brain db layout and extended schema instead of a separate memory store
+- implemented no-embedding design using only fts5 + deterministic rerank
+- kept memory command surface minimal and channel-agnostic
+- used summary cadence keyed by session turn range (`<session>:<start>-<end>`) to avoid duplicates
 
 architectural notes:
-- each chat id maps to one in-memory session (`user_id` and `session_id` as `telegram-<chat_id>`)
-- each session also has a persistent transcript file and prompt history projection for host planner
-- streamdelta output is chunked to 4096 chars before sendmessage requests
-- guest session transport is established lazily on first owner message
-- local guest mode still exists for websocket paths, but telegram guest tool path does not use it
+- memory prompt budget is clamped to ~2k-4k chars (target 3200)
+- planner prompt ordering is now: memory block, conversation history, current message
+- memory fts index is rebuilt on memory writes/forgets to keep content-linked fts in sync
+- telegram owner channel now writes memories under `users_root/owner/guest/db/ironclaw.db`
 
 plan:
-- if needed, add webhook mode after polling mvp is validated in production-like testing
+- add channel adapters to emit the same global owner user id for future whatsapp integration
+- tune fact distillation heuristics with real transcript samples if false positives appear

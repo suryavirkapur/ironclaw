@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 rusqlite = { version = "*", features = ["bundled", "load_extension"] }
+serde_json = "*"
 sha2 = "*"
 thiserror = "*"
