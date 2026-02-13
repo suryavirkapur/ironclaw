@@ -42,9 +42,11 @@ the host can also run a telegram dm channel via long polling.
 
 home directory semantics:
 
-- "home directory" means the guest vm home only, never the host home directory
-- guest tools operate under the guest brain root (`/mnt/brain` in vm mode)
-- in local guest mode this maps to `<users_root>/<session_id>/guest` on the host
+- telegram tool execution is vm-only; firecracker is required for isolated guest tools
+- if firecracker is not enabled, telegram guest tool execution is disabled
+- on first message per telegram session, runtime banner reports:
+  - `running in firecracker vm`, or
+  - `tools disabled: firecracker not enabled`
 
 required env vars:
 
@@ -66,6 +68,25 @@ run:
 ```bash
 TELEGRAM_BOT_TOKEN=... OWNER_TELEGRAM_CHAT_ID=... \
 cargo run -p ironclawd -- --telegram
+```
+
+to enable isolated telegram tools, set firecracker + guest mode in
+`~/.config/ironclaw/ironclawd.toml` and run with the firecracker feature:
+
+```toml
+execution_mode = "guest_tools"
+
+[firecracker]
+enabled = true
+kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
+rootfs_path = "rootfs/build/guest-rootfs.ext4"
+api_socket_dir = "/tmp/ironclaw-fc"
+vsock_uds_dir = "/tmp/ironclaw/vsock"
+vsock_port = 5000
+```
+
+```bash
+cargo run -p ironclawd --features firecracker -- --telegram
 ```
 
 test:

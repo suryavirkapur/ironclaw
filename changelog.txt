@@ -1,3 +1,14 @@
+0.4.2 2026-02-13
+- enforced telegram guest tool isolation: `guest_tools` and `guest_autonomous` now require
+  firecracker runtime and return `Firecracker required for Telegram tool execution` otherwise
+- disabled telegram local guest fallback path to prevent in-process `irowclaw` runtime spawn
+- added telegram runtime banner on first message per session:
+  `running in firecracker vm` or `tools disabled: firecracker not enabled`
+- added runtime-gated tool allowlist helper: bash is never offered in local_guest mode
+- gated bash exposure in firecracker mode on explicit guest config `tools.allow_bash = true`
+- added telegram/firecracker guard tests for local guest rejection and bash allowlist regression
+- updated readme telegram quickstart with firecracker isolation requirement and enablement steps
+
 0.4.1 2026-02-13
 - added persistent telegram session transcripts under users root at
   `telegram-<chat_id>/telegram.transcript.json`

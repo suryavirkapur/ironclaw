@@ -10,7 +10,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use common::config::{HostConfig, HostExecutionMode};
+use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
@@ -126,6 +126,7 @@ struct AppState {
     local_guest: bool,
     stub_vm_manager: Option<Arc<StubVmManager>>,
     execution_mode: RuntimeExecutionMode,
+    guest_allow_bash: bool,
 }
 
 impl AppState {
@@ -134,9 +135,15 @@ impl AppState {
             LlmClient::new(config.llm.clone())
                 .map_err(|err| IronclawError::new(format!("llm client init failed: {err}")))?,
         );
-        let local_guest = !config.firecracker.enabled;
+        let firecracker_runtime_enabled =
+            config.firecracker.enabled && cfg!(feature = "firecracker");
+        if config.firecracker.enabled && !cfg!(feature = "firecracker") {
+            eprintln!("firecracker requested but feature is disabled; falling back to local guest");
+        }
+        let local_guest = !firecracker_runtime_enabled;
         let guest_config_path = Arc::new(guest_config_path());
-        let (vm_manager, stub_vm_manager) = if config.firecracker.enabled {
+        let guest_allow_bash = load_guest_allow_bash(&guest_config_path);
+        let (vm_manager, stub_vm_manager) = if firecracker_runtime_enabled {
             #[cfg(feature = "firecracker")]
             {
                 let manager = FirecrackerManager::new(FirecrackerManagerConfig {
@@ -158,9 +165,9 @@ impl AppState {
             }
             #[cfg(not(feature = "firecracker"))]
             {
-                return Err(IronclawError::new(
-                    "firecracker enabled but feature is disabled",
-                ));
+                let stub_vm_manager = Arc::new(StubVmManager::new(32));
+                let vm_manager: Arc<dyn VmManager> = stub_vm_manager.clone();
+                (vm_manager, Some(stub_vm_manager))
             }
         } else {
             let stub_vm_manager = Arc::new(StubVmManager::new(32));
@@ -176,6 +183,7 @@ impl AppState {
             local_guest,
             stub_vm_manager,
             execution_mode,
+            guest_allow_bash,
         })
     }
 }
@@ -252,12 +260,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     };
 
     // host tools used only in host-only mode and explicit host fallbacks.
-    let host_allowed_tools = vec![
-        "bash".to_string(),
-        "file_read".to_string(),
-        "file_write".to_string(),
-    ];
-    let guest_allowed_tools = vec!["file_read".to_string(), "file_write".to_string()];
+    let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
+    let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
 
     let cap_token = {
         use rand::RngCore;
@@ -914,6 +918,7 @@ struct TelegramSession {
     transcript: TelegramTranscript,
     transcript_path: PathBuf,
     transport_failures: u32,
+    runtime_banner_sent: bool,
 }
 
 impl TelegramSession {
@@ -930,6 +935,7 @@ impl TelegramSession {
             transcript,
             transcript_path,
             transport_failures: 0,
+            runtime_banner_sent: false,
         })
     }
 
@@ -1071,6 +1077,13 @@ async fn handle_telegram_text(
     session: &mut TelegramSession,
     text: &str,
 ) -> Result<(), IronclawError> {
+    if !session.runtime_banner_sent {
+        let banner = telegram_runtime_banner(state.local_guest);
+        send_stream_to_telegram(client, session.chat_id, banner).await?;
+        session.append_assistant_message(banner, now_ms().unwrap_or(0))?;
+        session.runtime_banner_sent = true;
+    }
+
     let history = session.prompt_history();
     session.append_user_message(text, now_ms().unwrap_or(0))?;
 
@@ -1113,11 +1126,14 @@ async fn handle_telegram_text_once(
     text: &str,
     history: &[ConversationMessage],
 ) -> Result<String, IronclawError> {
-    let host_allowed_tools = vec![
-        "bash".to_string(),
-        "file_read".to_string(),
-        "file_write".to_string(),
-    ];
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        send_stream_to_telegram(client, session.chat_id, message).await?;
+        return Ok(message.to_string());
+    }
+
+    let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
     if state.execution_mode == RuntimeExecutionMode::HostOnly {
         let output = run_host_turn(
             state,
@@ -1155,11 +1171,7 @@ async fn handle_telegram_text_once(
         .await
         .map_err(|err| IronclawError::new(format!("send to guest failed: {err}")))?;
 
-    let host_allowed_tools = vec![
-        "bash".to_string(),
-        "file_read".to_string(),
-        "file_write".to_string(),
-    ];
+    let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
 
     let mut streamed_any = false;
     let mut output = String::new();
@@ -1274,12 +1286,14 @@ async fn ensure_telegram_session_transport(
         return Ok(());
     }
 
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        return Err(IronclawError::new(message));
+    }
+
     let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
-    let guest_allowed_tools = vec![
-        "file_read".to_string(),
-        "file_write".to_string(),
-        "bash".to_string(),
-    ];
+    let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
     let cap_token = {
         use rand::RngCore;
         let mut bytes = [0u8; 32];
@@ -1331,6 +1345,62 @@ fn is_transport_failure(err: &IronclawError) -> bool {
         || msg.contains("auth ack timed out")
         || msg.contains("invalid auth ack")
         || msg.contains("vm start failed")
+}
+
+fn load_guest_allow_bash(config_path: &StdPath) -> bool {
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "guest config read failed at {}: {}",
+                config_path.display(),
+                err
+            );
+            return false;
+        }
+    };
+    match toml::from_str::<GuestConfig>(&raw) {
+        Ok(config) => config.tools.allow_bash,
+        Err(err) => {
+            tracing::warn!(
+                "guest config parse failed at {}: {}",
+                config_path.display(),
+                err
+            );
+            false
+        }
+    }
+}
+
+fn allowed_tools_for_runtime(local_guest: bool, guest_allow_bash: bool) -> Vec<String> {
+    let mut tools = vec!["file_read".to_string(), "file_write".to_string()];
+    if bash_allowed(local_guest, guest_allow_bash) {
+        tools.push("bash".to_string());
+    }
+    tools
+}
+
+fn bash_allowed(local_guest: bool, guest_allow_bash: bool) -> bool {
+    !local_guest && guest_allow_bash
+}
+
+fn telegram_runtime_banner(local_guest: bool) -> &'static str {
+    if local_guest {
+        "tools disabled: firecracker not enabled"
+    } else {
+        "running in firecracker vm"
+    }
+}
+
+fn telegram_firecracker_requirement_error(
+    execution_mode: RuntimeExecutionMode,
+    local_guest: bool,
+) -> Option<&'static str> {
+    if local_guest && execution_mode != RuntimeExecutionMode::HostOnly {
+        Some("Firecracker required for Telegram tool execution")
+    } else {
+        None
+    }
 }
 
 async fn send_stream_to_telegram(
@@ -1417,9 +1487,10 @@ fn save_telegram_offset(path: &StdPath, offset: i64) -> Result<(), IronclawError
 #[cfg(test)]
 mod tests {
     use super::{
-        deterministic_guest_tools_plan, load_telegram_offset, load_telegram_transcript,
-        save_telegram_offset, save_telegram_transcript, split_telegram_chunks,
-        telegram_transcript_path, TelegramTranscript, TelegramTranscriptMessage, ToolPlan,
+        allowed_tools_for_runtime, deterministic_guest_tools_plan, load_telegram_offset,
+        load_telegram_transcript, save_telegram_offset, save_telegram_transcript,
+        split_telegram_chunks, telegram_firecracker_requirement_error, telegram_transcript_path,
+        RuntimeExecutionMode, TelegramTranscript, TelegramTranscriptMessage, ToolPlan,
         TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
 
@@ -1512,5 +1583,38 @@ mod tests {
         assert!(loaded.is_ok());
         assert_eq!(loaded.unwrap_or_default().messages.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn telegram_guest_modes_require_firecracker_without_local_guest_fallback() {
+        let guest_tools =
+            telegram_firecracker_requirement_error(RuntimeExecutionMode::GuestTools, true);
+        assert_eq!(
+            guest_tools,
+            Some("Firecracker required for Telegram tool execution")
+        );
+
+        let guest_autonomous =
+            telegram_firecracker_requirement_error(RuntimeExecutionMode::GuestAutonomous, true);
+        assert_eq!(
+            guest_autonomous,
+            Some("Firecracker required for Telegram tool execution")
+        );
+
+        let host_only =
+            telegram_firecracker_requirement_error(RuntimeExecutionMode::HostOnly, true);
+        assert_eq!(host_only, None);
+    }
+
+    #[test]
+    fn local_runtime_never_offers_bash_tool() {
+        let local_tools = allowed_tools_for_runtime(true, true);
+        assert!(!local_tools.iter().any(|tool| tool == "bash"));
+
+        let firecracker_without_bash = allowed_tools_for_runtime(false, false);
+        assert!(!firecracker_without_bash.iter().any(|tool| tool == "bash"));
+
+        let firecracker_with_bash = allowed_tools_for_runtime(false, true);
+        assert!(firecracker_with_bash.iter().any(|tool| tool == "bash"));
     }
 }
