@@ -3,12 +3,15 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 mod auth_transport;
 mod host_tools;
 mod llm_client;
+mod soul_guard;
+mod whatsapp;
 
 use auth_transport::AuthenticatedTransport;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
@@ -27,12 +30,17 @@ use memory::{
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
+use soul_guard::{
+    decide_approval, has_pending_approval_for_user, list_pending_approvals, run_monitor,
+    soul_guard_db_path, SoulDecision,
+};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
+use whatsapp::should_enable_whatsapp;
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
@@ -50,12 +58,23 @@ async fn main() -> Result<(), IronclawError> {
     } else {
         None
     };
+    let run_whatsapp = should_enable_whatsapp(&config);
+    let whatsapp_config = if run_whatsapp {
+        Some(config.whatsapp.clone())
+    } else {
+        None
+    };
     let addr = format!("{}:{}", config.server.bind, config.server.port);
     let state = AppState::new(config)?;
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/ui", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))
+        .route("/api/soul-guard/pending", get(soul_guard_pending_handler))
+        .route(
+            "/api/soul-guard/decision",
+            post(soul_guard_decision_handler),
+        )
         .with_state(state.clone());
 
     tracing_subscriber::fmt::init();
@@ -64,6 +83,15 @@ async fn main() -> Result<(), IronclawError> {
         .map_err(|err| IronclawError::new(format!("bind failed: {err}")))?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let shutdown_server_rx = shutdown_rx.clone();
+    let soul_guard_state = state.clone();
+    let soul_guard_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let users_root = soul_guard_state.host_config.storage.users_root.clone();
+        let db_path = soul_guard_state.soul_guard_db_path.as_ref().clone();
+        if let Err(err) = run_monitor(users_root, db_path, soul_guard_shutdown).await {
+            tracing::error!("soul guard monitor failed: {err}");
+        }
+    });
 
     let server_task = tokio::spawn(async move {
         let mut rx = shutdown_server_rx;
@@ -87,6 +115,16 @@ async fn main() -> Result<(), IronclawError> {
         let rx = shutdown_rx.clone();
         Some(tokio::spawn(async move {
             run_telegram_loop(telegram_state, settings, rx).await
+        }))
+    } else {
+        None
+    };
+
+    let whatsapp_task = if let Some(wa_config) = whatsapp_config {
+        let whatsapp_state = state.clone();
+        let rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            run_whatsapp_loop(whatsapp_state, wa_config, rx).await
         }))
     } else {
         None
@@ -117,6 +155,23 @@ async fn main() -> Result<(), IronclawError> {
             let _ = shutdown_tx.send(true);
             result
         }
+        result = async {
+            if let Some(task) = whatsapp_task {
+                match task.await {
+                    Ok(value) => value,
+                    Err(err) => {
+                        Err(IronclawError::new(format!(
+                            "whatsapp task join failed: {err}"
+                        )))
+                    }
+                }
+            } else {
+                std::future::pending::<Result<(), IronclawError>>().await
+            }
+        } => {
+            let _ = shutdown_tx.send(true);
+            result
+        }
         signal = tokio::signal::ctrl_c() => {
             let _ = signal;
             let _ = shutdown_tx.send(true);
@@ -135,6 +190,7 @@ struct AppState {
     stub_vm_manager: Option<Arc<StubVmManager>>,
     execution_mode: RuntimeExecutionMode,
     guest_allow_bash: bool,
+    soul_guard_db_path: Arc<PathBuf>,
 }
 
 impl AppState {
@@ -183,6 +239,7 @@ impl AppState {
             (vm_manager, Some(stub_vm_manager))
         };
         let execution_mode = RuntimeExecutionMode::from_config(&config);
+        let soul_guard_db = soul_guard_db_path(&config.storage.users_root);
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -192,6 +249,7 @@ impl AppState {
             stub_vm_manager,
             execution_mode,
             guest_allow_bash,
+            soul_guard_db_path: Arc::new(soul_guard_db),
         })
     }
 }
@@ -358,6 +416,40 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             ws_msg = receiver.next() => {
                 let Some(Ok(message)) = ws_msg else { break; };
                 if let Message::Text(text) = message {
+                    match has_pending_approval_for_user(&state.soul_guard_db_path, &user_id) {
+                        Ok(true) => {
+                            let envelope = MessageEnvelope {
+                                user_id: user_id.clone(),
+                                session_id: session_id.clone(),
+                                msg_id,
+                                timestamp_ms: now_ms().unwrap_or(0),
+                                cap_token: String::new(),
+                                payload: Some(message_envelope::Payload::StreamDelta(
+                                    common::proto::ironclaw::StreamDelta {
+                                        delta: "security halt: pending soul.md approval".to_string(),
+                                        done: true,
+                                    },
+                                )),
+                            };
+                            msg_id = msg_id.saturating_add(1);
+                            let payload = match serde_json::to_string(&envelope) {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    tracing::error!("serialize ws message failed: {err}");
+                                    break;
+                                }
+                            };
+                            if sender.send(Message::Text(payload.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!("soul guard pending check failed: {err}");
+                        }
+                    }
+
                     let timestamp_ms = match now_ms() {
                         Ok(value) => value,
                         Err(err) => {
@@ -540,6 +632,50 @@ async fn ui_asset_handler(Path(path): Path<String>) -> Response {
         path.as_str()
     };
     ui_file_response(path)
+}
+
+#[derive(Deserialize)]
+struct SoulGuardDecisionRequest {
+    id: i64,
+    decision: SoulDecision,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SoulGuardDecisionResponse {
+    updated: bool,
+}
+
+async fn soul_guard_pending_handler(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<soul_guard::PendingSoulApproval>>, (StatusCode, String)> {
+    list_pending_approvals(&state.soul_guard_db_path)
+        .map(Json)
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("soul guard list failed: {err}"),
+            )
+        })
+}
+
+async fn soul_guard_decision_handler(
+    State(state): State<AppState>,
+    Json(request): Json<SoulGuardDecisionRequest>,
+) -> Result<Json<SoulGuardDecisionResponse>, (StatusCode, String)> {
+    let updated = decide_approval(
+        &state.soul_guard_db_path,
+        request.id,
+        request.decision,
+        request.note,
+    )
+    .map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("soul guard decision failed: {err}"),
+        )
+    })?;
+    Ok(Json(SoulGuardDecisionResponse { updated }))
 }
 
 fn ui_file_response(path: &str) -> Response {
@@ -1696,6 +1832,142 @@ fn save_telegram_offset(path: &StdPath, offset: i64) -> Result<(), IronclawError
     }
     std::fs::write(path, format!("{offset}\n"))
         .map_err(|err| IronclawError::new(format!("telegram offset write failed: {err}")))
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp integration (whatsapp-rust crate, event-driven)
+// ---------------------------------------------------------------------------
+
+async fn run_whatsapp_loop(
+    state: AppState,
+    config: common::config::HostWhatsAppConfig,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), IronclawError> {
+    tracing::info!(
+        "whatsapp: starting bot (session_db={})",
+        config.session_db_path
+    );
+
+    let (client, mut rx) = whatsapp::start_whatsapp_bot(&config).await?;
+
+    tracing::info!("whatsapp: bot started, waiting for messages");
+
+    let mut sessions = HashMap::<String, whatsapp::WhatsAppSession>::new();
+
+    loop {
+        tokio::select! {
+            maybe_msg = rx.recv() => {
+                let Some(incoming) = maybe_msg else {
+                    tracing::warn!("whatsapp message channel closed");
+                    break;
+                };
+
+                if !whatsapp::is_allowed(&config, &incoming.sender_jid) {
+                    tracing::warn!("whatsapp message denied from {}", incoming.sender_jid);
+                    continue;
+                }
+
+                if !sessions.contains_key(&incoming.sender_jid) {
+                    let users_root = StdPath::new(&state.host_config.storage.users_root);
+                    match whatsapp::WhatsAppSession::load(
+                        &incoming.sender_jid,
+                        users_root,
+                    ) {
+                        Ok(session) => {
+                            sessions.insert(incoming.sender_jid.clone(), session);
+                        }
+                        Err(err) => {
+                            tracing::error!("whatsapp session load failed: {err}");
+                            continue;
+                        }
+                    }
+                }
+                let Some(session) = sessions.get_mut(&incoming.sender_jid) else {
+                    continue;
+                };
+
+                if let Err(err) = handle_whatsapp_text(
+                    &state,
+                    &client,
+                    session,
+                    &incoming.text,
+                ).await {
+                    tracing::error!("whatsapp message handling failed: {err}");
+                    let _ = session.append_assistant_message(
+                        "request failed",
+                        now_ms().unwrap_or(0),
+                    );
+                    let _ = whatsapp::send_whatsapp_message(
+                        &client,
+                        &session.sender_jid,
+                        "request failed",
+                    ).await;
+                }
+            }
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    tracing::info!("whatsapp: shutdown signal received");
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_whatsapp_text(
+    state: &AppState,
+    client: &whatsapp_rust::Client,
+    session: &mut whatsapp::WhatsAppSession,
+    text: &str,
+) -> Result<(), IronclawError> {
+    let history = session.prompt_history();
+    session.append_user_message(text, now_ms()?)?;
+
+    if let Err(err) = summarize_whatsapp_session_memory(state, session) {
+        tracing::warn!("whatsapp memory summarize failed: {err}");
+    }
+
+    // Handle memory commands (remember, pins, forget).
+    if let Some(command) = parse_memory_command(text) {
+        let output = execute_memory_command(state, &session.user_id, &session.session_id, command)?;
+        whatsapp::send_whatsapp_message(client, &session.sender_jid, &output).await?;
+        session.append_assistant_message(&output, now_ms()?)?;
+        return Ok(());
+    }
+
+    // Host-only mode: run LLM turn directly.
+    let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
+    let output = run_host_turn(
+        state,
+        &session.user_id,
+        &host_allowed_tools,
+        text,
+        Some(&history),
+    )
+    .await?;
+
+    whatsapp::send_whatsapp_message(client, &session.sender_jid, &output).await?;
+    session.append_assistant_message(&output, now_ms()?)?;
+    Ok(())
+}
+
+fn summarize_whatsapp_session_memory(
+    state: &AppState,
+    session: &whatsapp::WhatsAppSession,
+) -> Result<(), IronclawError> {
+    let conn = open_memory_db(state, &session.user_id)?;
+    let user_messages = session.user_messages();
+    let _ = maybe_summarize_session(
+        &conn,
+        &session.user_id,
+        &session.session_id,
+        &user_messages,
+        now_ms()?,
+    )
+    .map_err(|err| IronclawError::new(format!("memory summarize failed: {err}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

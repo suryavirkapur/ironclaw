@@ -31,7 +31,14 @@ tracing = "*"
 tracing-subscriber = "*"
 rand = "*"
 hex = "*"
+sha2 = "*"
 async-trait = "*"
+whatsapp-rust = "0.2"
+wacore = "0.2"
+waproto = "0.2"
+wacore-binary = "0.2"
+qr2term = "0.3"
+log = "0.4"
 
 [features]
 firecracker = ["common/firecracker"]
