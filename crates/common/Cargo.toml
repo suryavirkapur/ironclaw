@@ -18,3 +18,7 @@ prost-build = "*"
 
 [features]
 firecracker = ["znskr-firecracker"]
+
+[[example]]
+name = "firecracker_vsock_roundtrip"
+required-features = ["firecracker"]

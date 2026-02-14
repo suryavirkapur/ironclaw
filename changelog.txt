@@ -1,3 +1,15 @@
+0.6.0 2026-02-14
+- switched guest cron behavior from direct execution to trigger-first dispatch
+- scheduler now writes `triggered` state and emits `JobTrigger` events for due jobs
+- added guest `run_scheduled_job` execution path so host can start runtime work on demand
+- wired host handling for `JobTrigger` to execute scheduled jobs and return `JobStatus`
+- added protocol messages for agent lifecycle control (`AgentControl`, `AgentState`)
+- implemented guest sleep/wake state persistence at `/mnt/brain/config/agent_state.toml`
+- added host `idle_timeout_minutes` config (default `5`) and idle sleep signaling
+- added websocket and telegram wake flow integration for user message and cron triggers
+- added unit/integration coverage for idle-timeout gating and cron wake-up job flow
+- gated `common` firecracker roundtrip example behind `firecracker` feature to keep workspace tests green
+
 0.5.0 2026-02-14
 - added host soul guard monitor for `soul.md` changes via `crates/ironclawd/src/soul_guard.rs`
 - watch targets include `/mnt/brain/soul.md` and per-user guest roots under

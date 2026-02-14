@@ -1,4 +1,5 @@
 execution_mode = "guest_autonomous"
+idle_timeout_minutes = 5
 
 [server]
 bind = "127.0.0.1"

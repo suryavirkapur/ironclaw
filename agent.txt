@@ -11,24 +11,34 @@ current context:
   - jobs source: `/mnt/brain/cron/jobs.toml`
   - results log sink: `/mnt/brain/logs/YYYY-MM-DD.md`
   - sqlite mirror table: `scheduler_state` (`last_run_ms`, `next_run_ms`, `status`)
+- scheduler now emits `JobTrigger` events instead of executing due jobs inline
+- host handles scheduled triggers by calling guest `run_scheduled_job` and returning `JobStatus`
+- guest runtime supports persisted sleep/awake power state in `config/agent_state.toml`
+- host enforces `idle_timeout_minutes` and sends `AgentControl` sleep/wake commands
 
 pending tasks:
 - rerun websocket smoke scripts on a host where tcp bind is permitted (current sandbox blocks bind)
 - validate soul guard api from ui integration flow
 - run manual firecracker and telegram/whatsapp e2e flows on a host with required runtime permissions
+- validate full whatsapp guest-mode wake flow parity with websocket/telegram path
 
 important decisions:
 - used host sqlite queue (`users_root/soul_guard.db`) for approvals instead of queue files
 - applied a polling soul monitor loop (2s tick) to avoid platform-specific fs watch dependencies
 - implemented internal 5-field cron parsing in guest to keep builds working offline
 - wrote scheduler state to the existing guest sqlite db path for ui read models
+- kept vm processes alive while pausing guest runtime behavior through control messages
+- used host-side idle timers to drive sleep transitions (`default: 5 minutes`)
 
 architectural notes:
 - soul guard logs every detected `soul.md` diff with hash before/after and suspicion metadata
 - pending soul approvals are deduped by `(path, after_hash, status='pending')`
 - scheduler cron matcher supports numeric fields and `*` only (5-field cron)
 - scheduler stores log file reference (`last_result_ref`) for ui navigation
+- protocol now includes `AgentControl` + `AgentState` for runtime lifecycle signaling
+- cron flow is now guest scheduler -> host `JobTrigger` handling -> guest job execution request
 
 plan:
 - validate websocket + api integration against ui workflows
 - evaluate extended cron grammar support (`*/n`, ranges, lists) if needed by product requirements
+- add whatsapp guest transport lifecycle support matching telegram session behavior
