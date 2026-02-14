@@ -1,3 +1,24 @@
+0.5.0 2026-02-14
+- added host soul guard monitor for `soul.md` changes via `crates/ironclawd/src/soul_guard.rs`
+- watch targets include `/mnt/brain/soul.md` and per-user guest roots under
+  `users_root/<user>/guest/soul.md`
+- implemented suspicious diff detection thresholds (`>1024` bytes changed or `>20%` ratio)
+- persisted soul change audit logs with `before_hash` and `after_hash` in host sqlite
+  (`soul_change_log`)
+- added sqlite-backed pending approval queue (`soul_change_approvals`) for suspicious soul diffs
+- added host security halt gate in websocket handling when pending soul approvals exist
+- added soul guard api endpoints:
+  `GET /api/soul-guard/pending` and `POST /api/soul-guard/decision`
+- added soul guard unit tests for threshold detection and approval roundtrip behavior
+- added guest cron scheduler module at `crates/irowclaw/src/scheduler.rs`
+- scheduler reads `/mnt/brain/cron/jobs.toml`, supports 5-field cron expressions, and executes
+  tasks in background runtime context
+- scheduler writes job execution results to `/logs/YYYY-MM-DD.md`
+- scheduler tracks `last_run_ms`, `next_run_ms`, `status`, and `last_result_ref` in sqlite table
+  `scheduler_state` for ui querying
+- wired scheduler startup into guest runtime loop lifecycle
+- added scheduler unit tests for due-job execution/logging and future-job scheduling state
+
 0.4.2 2026-02-13
 - enforced telegram guest tool isolation: `guest_tools` and `guest_autonomous` now require
   firecracker runtime and return `Firecracker required for Telegram tool execution` otherwise

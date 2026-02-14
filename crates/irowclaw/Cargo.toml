@@ -6,13 +6,14 @@ license.workspace = true
 
 [dependencies]
 async-trait = "*"
+chrono = "*"
 common = { path = "../common" }
 memory = { path = "../memory" }
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "time"] }
+tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "time", "process"] }
 tokio-vsock = "*"
 toml = "*"
 tools = { path = "../tools" }

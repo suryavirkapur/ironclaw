@@ -1,32 +1,34 @@
 current context:
-- shared long-term memory is now backed by sqlite tables in the guest brain db path
-  (`memories`, `summaries`, `memories_fts`)
-- host planning now injects a memory block before conversation history and current user message
-- memory retrieval uses fts5 candidate search with reranking by recency, importance, and pinned status
-- telegram memory identity is global (`owner`) instead of chat-scoped user ids
-- telegram transcripts still keep rolling 50-turn local history per chat session
-- background summarization now runs every 20 user messages per session and writes to `summaries`
-- summary distillation auto-upserts 1-3 durable fact memories when cadence triggers
-- memory persistence redacts key-like secrets before storage
-- guest runtime supports memory commands: `remember <text>`, `pins`, `forget <id or query>`
+- host now runs soul guard monitoring with sqlite audit + approval queue:
+  - monitored paths: `/mnt/brain/soul.md` and `users_root/<user>/guest/soul.md`
+  - suspicious thresholds: `>1024` bytes diff or `>20%` change ratio
+  - queue + logs in `users_root/soul_guard.db`
+- host exposes soul guard api:
+  - `GET /api/soul-guard/pending`
+  - `POST /api/soul-guard/decision` (`approve`/`reject`)
+- websocket handling now enforces a security halt when pending soul approvals exist
+- guest runtime now includes a background cron scheduler:
+  - jobs source: `/mnt/brain/cron/jobs.toml`
+  - results log sink: `/mnt/brain/logs/YYYY-MM-DD.md`
+  - sqlite mirror table: `scheduler_state` (`last_run_ms`, `next_run_ms`, `status`)
 
 pending tasks:
-- run websocket smoke scripts on a host where tcp bind is permitted
-- run manual telegram dm e2e with real bot credentials in firecracker mode
-- validate shared user identity behavior once whatsapp channel is added
+- rerun websocket smoke scripts on a host where tcp bind is permitted (current sandbox blocks bind)
+- validate soul guard api from ui integration flow
+- run manual firecracker and telegram/whatsapp e2e flows on a host with required runtime permissions
 
 important decisions:
-- used existing sqlite guest brain db layout and extended schema instead of a separate memory store
-- implemented no-embedding design using only fts5 + deterministic rerank
-- kept memory command surface minimal and channel-agnostic
-- used summary cadence keyed by session turn range (`<session>:<start>-<end>`) to avoid duplicates
+- used host sqlite queue (`users_root/soul_guard.db`) for approvals instead of queue files
+- applied a polling soul monitor loop (2s tick) to avoid platform-specific fs watch dependencies
+- implemented internal 5-field cron parsing in guest to keep builds working offline
+- wrote scheduler state to the existing guest sqlite db path for ui read models
 
 architectural notes:
-- memory prompt budget is clamped to ~2k-4k chars (target 3200)
-- planner prompt ordering is now: memory block, conversation history, current message
-- memory fts index is rebuilt on memory writes/forgets to keep content-linked fts in sync
-- telegram owner channel now writes memories under `users_root/owner/guest/db/ironclaw.db`
+- soul guard logs every detected `soul.md` diff with hash before/after and suspicion metadata
+- pending soul approvals are deduped by `(path, after_hash, status='pending')`
+- scheduler cron matcher supports numeric fields and `*` only (5-field cron)
+- scheduler stores log file reference (`last_result_ref`) for ui navigation
 
 plan:
-- add channel adapters to emit the same global owner user id for future whatsapp integration
-- tune fact distillation heuristics with real transcript samples if false positives appear
+- validate websocket + api integration against ui workflows
+- evaluate extended cron grammar support (`*/n`, ranges, lists) if needed by product requirements

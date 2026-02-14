@@ -1,3 +1,4 @@
+use crate::scheduler::{self, SchedulerPaths};
 use common::config::{GuestConfig, JobsConfig};
 use common::proto::ironclaw::{message_envelope, MessageEnvelope};
 use common::transport::Transport;
@@ -27,7 +28,7 @@ impl IrowclawError {
 
 pub struct Runtime {
     config: GuestConfig,
-    _brain: BrainPaths,
+    brain: BrainPaths,
     db: Connection,
     tool_registry: ToolRegistry,
     safety: SafetyLayer,
@@ -66,7 +67,7 @@ impl Runtime {
 
         Ok(Self {
             config,
-            _brain: brain,
+            brain,
             db,
             tool_registry,
             safety: SafetyLayer::new(),
@@ -226,6 +227,12 @@ pub async fn run_with_transport<T: Transport + 'static>(
     config_path: PathBuf,
 ) -> Result<(), IrowclawError> {
     let mut runtime = Runtime::load(&config_path)?;
+    let scheduler_paths = SchedulerPaths {
+        jobs_path: runtime.config.scheduler.jobs_path.clone(),
+        logs_dir: runtime.brain.logs.clone(),
+        db_path: runtime.brain.db_path.clone(),
+    };
+    let scheduler_task = scheduler::spawn_scheduler(scheduler_paths);
 
     // auth handshake: wait for host challenge and reply with ack.
     let (cap_token, mode) = match transport.recv().await {
@@ -401,6 +408,7 @@ pub async fn run_with_transport<T: Transport + 'static>(
                 .map_err(|err| IrowclawError::new(err.to_string()))?;
         }
     }
+    scheduler_task.abort();
     Ok(())
 }
 
