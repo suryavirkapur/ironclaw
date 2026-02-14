@@ -10,8 +10,12 @@ pub struct HostConfig {
     pub llm: HostLlmConfig,
     #[serde(default)]
     pub telegram: HostTelegramConfig,
+    #[serde(default)]
+    pub whatsapp: HostWhatsAppConfig,
     #[serde(default = "default_execution_mode")]
     pub execution_mode: HostExecutionMode,
+    #[serde(default = "default_idle_timeout_minutes")]
+    pub idle_timeout_minutes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -25,6 +29,10 @@ pub enum HostExecutionMode {
 
 fn default_execution_mode() -> HostExecutionMode {
     HostExecutionMode::Auto
+}
+
+fn default_idle_timeout_minutes() -> u64 {
+    5
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -102,6 +110,37 @@ fn default_telegram_poll_timeout_seconds() -> u64 {
     30
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostWhatsAppConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_whatsapp_session_db_path")]
+    pub session_db_path: String,
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    #[serde(default = "default_whatsapp_self_chat")]
+    pub self_chat_enabled: bool,
+}
+
+fn default_whatsapp_session_db_path() -> String {
+    "data/whatsapp_session.db".to_string()
+}
+
+fn default_whatsapp_self_chat() -> bool {
+    true
+}
+
+impl Default for HostWhatsAppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_db_path: default_whatsapp_session_db_path(),
+            allowlist: vec![],
+            self_chat_enabled: default_whatsapp_self_chat(),
+        }
+    }
+}
+
 impl Default for HostTelegramConfig {
     fn default() -> Self {
         Self {
@@ -139,7 +178,9 @@ impl HostConfig {
                 api: HostLlmApi::Responses,
             },
             telegram: HostTelegramConfig::default(),
+            whatsapp: HostWhatsAppConfig::default(),
             execution_mode: HostExecutionMode::Auto,
+            idle_timeout_minutes: default_idle_timeout_minutes(),
         }
     }
 }

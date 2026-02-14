@@ -5,6 +5,7 @@ use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 const LOOKBACK_MS: i64 = 60_000;
 
@@ -15,27 +16,97 @@ pub struct SchedulerPaths {
     pub db_path: PathBuf,
 }
 
-pub fn spawn_scheduler(paths: SchedulerPaths) -> tokio::task::JoinHandle<()> {
+pub fn spawn_scheduler(
+    paths: SchedulerPaths,
+    trigger_tx: mpsc::Sender<SchedulerTrigger>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if let Err(err) = scheduler_tick(&paths).await {
-                eprintln!("irowclaw scheduler tick failed: {err}");
+            match scheduler_tick(&paths).await {
+                Ok(triggered_jobs) => {
+                    for job_id in triggered_jobs {
+                        if trigger_tx.send(SchedulerTrigger { job_id }).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("irowclaw scheduler tick failed: {err}");
+                }
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     })
 }
 
-pub async fn scheduler_tick(paths: &SchedulerPaths) -> Result<(), IrowclawError> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchedulerTrigger {
+    pub job_id: String,
+}
+
+pub async fn scheduler_tick(paths: &SchedulerPaths) -> Result<Vec<String>, IrowclawError> {
     let jobs = load_jobs(&paths.jobs_path)?;
     let conn = open_scheduler_db(&paths.db_path)?;
     initialize_scheduler_schema(&conn)?;
     drop(conn);
 
+    let mut triggered_jobs = Vec::new();
     for job in jobs.jobs {
-        process_job(&paths.db_path, &job, &paths.logs_dir).await?;
+        if process_job(&paths.db_path, &job).await? {
+            triggered_jobs.push(job.id);
+        }
     }
-    Ok(())
+    Ok(triggered_jobs)
+}
+
+pub async fn run_job_by_id(
+    paths: &SchedulerPaths,
+    job_id: &str,
+) -> Result<ScheduledJobOutcome, IrowclawError> {
+    let jobs = load_jobs(&paths.jobs_path)?;
+    let job = jobs
+        .jobs
+        .iter()
+        .find(|item| item.id == job_id)
+        .ok_or_else(|| IrowclawError::new(format!("scheduled job not found: {job_id}")))?;
+    run_job(paths, job).await
+}
+
+pub async fn run_job(
+    paths: &SchedulerPaths,
+    job: &JobDefinition,
+) -> Result<ScheduledJobOutcome, IrowclawError> {
+    let now_ms = now_ms_i64()?;
+    let conn = open_scheduler_db(&paths.db_path)?;
+    initialize_scheduler_schema(&conn)?;
+    let schedule = CronSchedule::parse(&job.schedule)?;
+    upsert_state(
+        &conn,
+        job,
+        load_state(&conn, &job.id)?.last_run_ms,
+        Some(next_occurrence_ms(&schedule, now_ms.saturating_sub(1))?),
+        "running",
+        None,
+        now_ms,
+    )?;
+    drop(conn);
+
+    let outcome = execute_job(job, &paths.logs_dir).await?;
+    let next_run_ms = next_occurrence_ms(&schedule, now_ms)?;
+    let status = if outcome.ok { "success" } else { "failed" };
+    let conn = open_scheduler_db(&paths.db_path)?;
+    initialize_scheduler_schema(&conn)?;
+    upsert_state(
+        &conn,
+        job,
+        Some(now_ms),
+        Some(next_run_ms),
+        status,
+        Some(outcome.log_ref.clone()),
+        now_ms,
+    )?;
+
+    Ok(outcome)
 }
 
 fn load_jobs(path: &Path) -> Result<JobsConfig, IrowclawError> {
@@ -73,18 +144,17 @@ pub fn initialize_scheduler_schema(conn: &Connection) -> Result<(), IrowclawErro
 #[derive(Debug)]
 struct SchedulerStateRow {
     last_run_ms: Option<i64>,
+    next_run_ms: Option<i64>,
+    status: Option<String>,
 }
 
-async fn process_job(
-    db_path: &Path,
-    job: &JobDefinition,
-    logs_dir: &Path,
-) -> Result<(), IrowclawError> {
+async fn process_job(db_path: &Path, job: &JobDefinition) -> Result<bool, IrowclawError> {
     let schedule = CronSchedule::parse(&job.schedule)?;
     let now_ms = now_ms_i64()?;
     let conn = open_scheduler_db(db_path)?;
     initialize_scheduler_schema(&conn)?;
     let state = load_state(&conn, &job.id)?;
+
     let anchor = state
         .last_run_ms
         .unwrap_or(now_ms.saturating_sub(LOOKBACK_MS));
@@ -100,7 +170,11 @@ async fn process_job(
             None,
             now_ms,
         )?;
-        return Ok(());
+        return Ok(false);
+    }
+
+    if state.status.as_deref() == Some("triggered") && state.next_run_ms == Some(due_ms) {
+        return Ok(false);
     }
 
     upsert_state(
@@ -108,30 +182,23 @@ async fn process_job(
         job,
         state.last_run_ms,
         Some(due_ms),
-        "running",
+        "triggered",
         None,
         now_ms,
     )?;
-    drop(conn);
-
-    let outcome = execute_job(job, logs_dir).await?;
-    let next_run_ms = next_occurrence_ms(&schedule, now_ms)?;
-    let status = if outcome.ok { "success" } else { "failed" };
-    let conn = open_scheduler_db(db_path)?;
-    initialize_scheduler_schema(&conn)?;
-    upsert_state(
-        &conn,
-        job,
-        Some(now_ms),
-        Some(next_run_ms),
-        status,
-        Some(outcome.log_ref),
-        now_ms,
-    )?;
-    Ok(())
+    Ok(true)
 }
 
-async fn execute_job(job: &JobDefinition, logs_dir: &Path) -> Result<JobOutcome, IrowclawError> {
+#[derive(Clone, Debug)]
+pub struct ScheduledJobOutcome {
+    pub ok: bool,
+    pub log_ref: String,
+}
+
+async fn execute_job(
+    job: &JobDefinition,
+    logs_dir: &Path,
+) -> Result<ScheduledJobOutcome, IrowclawError> {
     let command_output = Command::new("sh")
         .arg("-lc")
         .arg(job.task.clone())
@@ -143,12 +210,7 @@ async fn execute_job(job: &JobDefinition, logs_dir: &Path) -> Result<JobOutcome,
     let exit_code = command_output.status.code().unwrap_or(-1);
     let ok = command_output.status.success();
     let log_ref = append_job_result_log(logs_dir, job, exit_code, ok, &stdout, &stderr)?;
-    Ok(JobOutcome { ok, log_ref })
-}
-
-struct JobOutcome {
-    ok: bool,
-    log_ref: String,
+    Ok(ScheduledJobOutcome { ok, log_ref })
 }
 
 fn append_job_result_log(
@@ -200,7 +262,7 @@ fn append_job_result_log(
 
 fn load_state(conn: &Connection, job_id: &str) -> Result<SchedulerStateRow, IrowclawError> {
     let mut stmt = conn
-        .prepare("select last_run_ms from scheduler_state where job_id = ?1")
+        .prepare("select last_run_ms, next_run_ms, status from scheduler_state where job_id = ?1")
         .map_err(|err| IrowclawError::new(format!("scheduler state prepare failed: {err}")))?;
     let mut rows = stmt
         .query(params![job_id])
@@ -213,9 +275,19 @@ fn load_state(conn: &Connection, job_id: &str) -> Result<SchedulerStateRow, Irow
             last_run_ms: row.get(0).map_err(|err| {
                 IrowclawError::new(format!("scheduler state parse failed: {err}"))
             })?,
+            next_run_ms: row.get(1).map_err(|err| {
+                IrowclawError::new(format!("scheduler state parse failed: {err}"))
+            })?,
+            status: row.get(2).map_err(|err| {
+                IrowclawError::new(format!("scheduler state parse failed: {err}"))
+            })?,
         })
     } else {
-        Ok(SchedulerStateRow { last_run_ms: None })
+        Ok(SchedulerStateRow {
+            last_run_ms: None,
+            next_run_ms: None,
+            status: None,
+        })
     }
 }
 

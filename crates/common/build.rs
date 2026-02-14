@@ -18,6 +18,14 @@ fn main() {
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );
     config.type_attribute(
+        ".ironclaw.AgentControl",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.AgentState",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
         ".ironclaw.UserMessage",
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );

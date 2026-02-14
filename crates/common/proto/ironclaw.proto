@@ -15,6 +15,8 @@ message MessageEnvelope {
   oneof payload {
     AuthChallenge auth_challenge = 9;
     AuthAck auth_ack = 8;
+    AgentControl agent_control = 18;
+    AgentState agent_state = 19;
 
     UserMessage user_message = 10;
     ToolCallRequest tool_call_request = 16;
@@ -36,6 +38,21 @@ message AuthChallenge {
 
 message AuthAck {
   string cap_token = 1;
+}
+
+message AgentControl {
+  enum Command {
+    SLEEP = 0;
+    WAKE = 1;
+  }
+
+  Command command = 1;
+  string reason = 2;
+}
+
+message AgentState {
+  string state = 1;
+  string detail = 2;
 }
 
 message UserMessage {

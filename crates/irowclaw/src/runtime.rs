@@ -1,6 +1,6 @@
 use crate::scheduler::{self, SchedulerPaths};
 use common::config::{GuestConfig, JobsConfig};
-use common::proto::ironclaw::{message_envelope, MessageEnvelope};
+use common::proto::ironclaw::{agent_control, message_envelope, AgentState, MessageEnvelope};
 use common::transport::Transport;
 use memory::{
     forget_memories_by_query, forget_memory_by_id, hybrid_fusion, index_chunks, initialize_schema,
@@ -8,8 +8,10 @@ use memory::{
 };
 use rusqlite::Connection;
 use serde::Deserialize;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 use tools::{FileReadTool, FileWriteTool, RestrictedBashTool, ToolRegistry, ToolResult};
 
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +234,10 @@ pub async fn run_with_transport<T: Transport + 'static>(
         logs_dir: runtime.brain.logs.clone(),
         db_path: runtime.brain.db_path.clone(),
     };
-    let scheduler_task = scheduler::spawn_scheduler(scheduler_paths);
+    let (scheduler_tx, mut scheduler_rx) = mpsc::channel::<scheduler::SchedulerTrigger>(64);
+    let scheduler_task = scheduler::spawn_scheduler(scheduler_paths.clone(), scheduler_tx);
+    let power_state_path = runtime.brain.config.join("agent_state.toml");
+    let mut power_state = AgentPowerState::load(&power_state_path).unwrap_or_default();
 
     // auth handshake: wait for host challenge and reply with ack.
     let (cap_token, mode) = match transport.recv().await {
@@ -271,14 +276,74 @@ pub async fn run_with_transport<T: Transport + 'static>(
     let mut internal_call_id = 1u64;
 
     loop {
-        let message = match transport.recv().await {
-            Ok(Some(message)) => message,
-            Ok(None) => break,
-            Err(err) => return Err(IrowclawError::new(err.to_string())),
-        };
+        tokio::select! {
+            maybe_trigger = scheduler_rx.recv() => {
+                let Some(trigger) = maybe_trigger else {
+                    continue;
+                };
+                transport
+                    .send(MessageEnvelope {
+                        user_id: "scheduler".to_string(),
+                        session_id: "scheduler".to_string(),
+                        msg_id: 0,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::JobTrigger(
+                            common::proto::ironclaw::JobTrigger {
+                                job_id: trigger.job_id,
+                            },
+                        )),
+                    })
+                    .await
+                    .map_err(|err| IrowclawError::new(err.to_string()))?;
+            }
+            recv = transport.recv() => {
+                let message = match recv {
+                    Ok(Some(message)) => message,
+                    Ok(None) => break,
+                    Err(err) => return Err(IrowclawError::new(err.to_string())),
+                };
 
-        let response = match message.payload.clone() {
+                let response = match message.payload.clone() {
+            Some(message_envelope::Payload::AgentControl(control)) => {
+                if control.command == agent_control::Command::Sleep as i32 {
+                    power_state.sleeping = true;
+                    power_state.last_reason = control.reason;
+                    power_state.save(&power_state_path)?;
+                    Some(MessageEnvelope {
+                        user_id: message.user_id,
+                        session_id: message.session_id,
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::AgentState(AgentState {
+                            state: "sleeping".to_string(),
+                            detail: "agent runtime paused".to_string(),
+                        })),
+                    })
+                } else {
+                    power_state.sleeping = false;
+                    power_state.last_reason = control.reason;
+                    power_state.save(&power_state_path)?;
+                    Some(MessageEnvelope {
+                        user_id: message.user_id,
+                        session_id: message.session_id,
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::AgentState(AgentState {
+                            state: "awake".to_string(),
+                            detail: "agent runtime resumed".to_string(),
+                        })),
+                    })
+                }
+            }
             Some(message_envelope::Payload::UserMessage(um)) => {
+                if power_state.sleeping {
+                    power_state.sleeping = false;
+                    power_state.last_reason = "user_message".to_string();
+                    power_state.save(&power_state_path)?;
+                }
                 let text = um.text.trim().to_string();
 
                 if let Some(command_output) =
@@ -344,6 +409,50 @@ pub async fn run_with_transport<T: Transport + 'static>(
                 }
             }
             Some(message_envelope::Payload::ToolCallRequest(req)) => {
+                if req.tool == "run_scheduled_job" {
+                    if power_state.sleeping {
+                        power_state.sleeping = false;
+                        power_state.last_reason = "scheduled_job".to_string();
+                        power_state.save(&power_state_path)?;
+                    }
+                    let run_result = scheduler::run_job_by_id(&scheduler_paths, &req.input).await;
+                    let (ok, output) = match run_result {
+                        Ok(result) => (
+                            result.ok,
+                            result.log_ref,
+                        ),
+                        Err(err) => (false, err.to_string()),
+                    };
+                    Some(MessageEnvelope {
+                        user_id: message.user_id,
+                        session_id: message.session_id,
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::ToolCallResponse(
+                            common::proto::ironclaw::ToolCallResponse {
+                                call_id: req.call_id,
+                                ok,
+                                output: runtime.safety.sanitize_outbound(&output),
+                            },
+                        )),
+                    })
+                } else if power_state.sleeping {
+                    Some(MessageEnvelope {
+                        user_id: message.user_id,
+                        session_id: message.session_id,
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::ToolCallResponse(
+                            common::proto::ironclaw::ToolCallResponse {
+                                call_id: req.call_id,
+                                ok: false,
+                                output: "agent is sleeping".to_string(),
+                            },
+                        )),
+                    })
+                } else {
                 let tool_result = runtime.execute_tool_checked(&req.tool, &req.input);
                 Some(MessageEnvelope {
                     user_id: message.user_id,
@@ -359,6 +468,7 @@ pub async fn run_with_transport<T: Transport + 'static>(
                         },
                     )),
                 })
+                }
             }
             Some(message_envelope::Payload::FileOpRequest(req)) => {
                 let tool = if req.op == "read" {
@@ -401,15 +511,46 @@ pub async fn run_with_transport<T: Transport + 'static>(
             _ => None,
         };
 
-        if let Some(response) = response {
-            transport
-                .send(response)
-                .await
-                .map_err(|err| IrowclawError::new(err.to_string()))?;
+                if let Some(response) = response {
+                    transport
+                        .send(response)
+                        .await
+                        .map_err(|err| IrowclawError::new(err.to_string()))?;
+                }
+            }
         }
     }
     scheduler_task.abort();
     Ok(())
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct AgentPowerState {
+    sleeping: bool,
+    last_reason: String,
+}
+
+impl AgentPowerState {
+    fn load(path: &Path) -> Result<Self, IrowclawError> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|err| IrowclawError::new(format!("agent state read failed: {err}")))?;
+        toml::from_str(&raw)
+            .map_err(|err| IrowclawError::new(format!("agent state parse failed: {err}")))
+    }
+
+    fn save(&self, path: &Path) -> Result<(), IrowclawError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| IrowclawError::new(format!("agent state dir failed: {err}")))?;
+        }
+        let raw = toml::to_string(self)
+            .map_err(|err| IrowclawError::new(format!("agent state encode failed: {err}")))?;
+        std::fs::write(path, format!("{raw}\n"))
+            .map_err(|err| IrowclawError::new(format!("agent state write failed: {err}")))
+    }
 }
 
 fn build_user_reply(

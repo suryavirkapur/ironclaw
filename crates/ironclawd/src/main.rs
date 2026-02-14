@@ -17,7 +17,7 @@ use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
-use common::proto::ironclaw::{message_envelope, MessageEnvelope};
+use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
@@ -48,6 +48,7 @@ const TELEGRAM_TRANSCRIPT_MAX_TURNS: usize = 50;
 const TELEGRAM_RETRY_MAX_ATTEMPTS: usize = 2;
 const MEMORY_RETRIEVAL_LIMIT: usize = 10;
 const MEMORY_PROMPT_BUDGET_CHARS: usize = 3200;
+const IDLE_CHECK_SECONDS: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
@@ -252,6 +253,10 @@ impl AppState {
             soul_guard_db_path: Arc::new(soul_guard_db),
         })
     }
+
+    fn idle_timeout_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.host_config.idle_timeout_minutes.saturating_mul(60))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,12 +415,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     // Avoid holding a mutex across `.await` on `Transport::recv()`.
     let mut transport = transport;
     let mut msg_id = 1u64;
+    let mut guest_sleeping = false;
+    let idle_timeout = state.idle_timeout_duration();
+    let mut last_user_activity = std::time::Instant::now();
 
     loop {
         tokio::select! {
             ws_msg = receiver.next() => {
                 let Some(Ok(message)) = ws_msg else { break; };
                 if let Message::Text(text) = message {
+                    last_user_activity = std::time::Instant::now();
                     match has_pending_approval_for_user(&state.soul_guard_db_path, &user_id) {
                         Ok(true) => {
                             let envelope = MessageEnvelope {
@@ -498,6 +507,22 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             break;
                         }
                     } else {
+                        if guest_sleeping {
+                            let wake_result = send_agent_control(
+                                &mut transport,
+                                &user_id,
+                                &session_id,
+                                msg_id,
+                                agent_control::Command::Wake,
+                                "user_message",
+                            )
+                            .await;
+                            if wake_result.is_err() {
+                                break;
+                            }
+                            msg_id = msg_id.saturating_add(1);
+                            guest_sleeping = false;
+                        }
                         let (payload, outbound_msg_id) = ws_text_to_guest_payload(
                             text.as_str(),
                             msg_id,
@@ -522,6 +547,71 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             transport_msg = transport.recv() => {
                 match transport_msg {
                     Ok(Some(envelope)) => {
+                        if let Some(message_envelope::Payload::JobTrigger(trigger)) =
+                            envelope.payload.clone()
+                        {
+                            if guest_sleeping {
+                                let wake_result = send_agent_control(
+                                    &mut transport,
+                                    &user_id,
+                                    &session_id,
+                                    msg_id,
+                                    agent_control::Command::Wake,
+                                    "scheduled_job",
+                                )
+                                .await;
+                                if wake_result.is_err() {
+                                    break;
+                                }
+                                msg_id = msg_id.saturating_add(1);
+                                guest_sleeping = false;
+                            }
+
+                            let call_id = msg_id;
+                            msg_id = msg_id.saturating_add(1);
+                            let job_status = run_scheduled_job_via_guest(
+                                &mut transport,
+                                &user_id,
+                                &session_id,
+                                call_id,
+                                &trigger.job_id,
+                            )
+                            .await;
+                            let status_text = match job_status {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    tracing::error!("scheduled job execution failed: {err}");
+                                    "failed".to_string()
+                                }
+                            };
+                            let status_envelope = MessageEnvelope {
+                                user_id: user_id.clone(),
+                                session_id: session_id.clone(),
+                                msg_id,
+                                timestamp_ms: now_ms().unwrap_or(0),
+                                cap_token: String::new(),
+                                payload: Some(message_envelope::Payload::JobStatus(
+                                    common::proto::ironclaw::JobStatus {
+                                        job_id: trigger.job_id,
+                                        status: status_text,
+                                    },
+                                )),
+                            };
+                            msg_id = msg_id.saturating_add(1);
+                            if let Err(err) = transport.send(status_envelope).await {
+                                tracing::error!("job status send failed: {err}");
+                                break;
+                            }
+                            continue;
+                        }
+
+                        if matches!(
+                            envelope.payload,
+                            Some(message_envelope::Payload::AgentState(_))
+                        ) {
+                            continue;
+                        }
+
                         // Handle host-side tools requested by the guest.
                         if let Some(message_envelope::Payload::ToolCallRequest(req)) =
                             envelope.payload.clone()
@@ -591,6 +681,97 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         break;
                     }
                 }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(IDLE_CHECK_SECONDS)) => {
+                if should_enter_idle_sleep(
+                    state.execution_mode,
+                    guest_sleeping,
+                    last_user_activity,
+                    idle_timeout,
+                ) {
+                    let sleep_result = send_agent_control(
+                        &mut transport,
+                        &user_id,
+                        &session_id,
+                        msg_id,
+                        agent_control::Command::Sleep,
+                        "idle_timeout",
+                    )
+                    .await;
+                    if sleep_result.is_err() {
+                        break;
+                    }
+                    msg_id = msg_id.saturating_add(1);
+                    guest_sleeping = true;
+                }
+            }
+        }
+    }
+}
+
+async fn send_agent_control(
+    transport: &mut Box<dyn common::transport::Transport>,
+    user_id: &str,
+    session_id: &str,
+    msg_id: u64,
+    command: agent_control::Command,
+    reason: &str,
+) -> Result<(), IronclawError> {
+    transport
+        .send(MessageEnvelope {
+            user_id: user_id.to_string(),
+            session_id: session_id.to_string(),
+            msg_id,
+            timestamp_ms: now_ms().unwrap_or(0),
+            cap_token: String::new(),
+            payload: Some(message_envelope::Payload::AgentControl(AgentControl {
+                command: command as i32,
+                reason: reason.to_string(),
+            })),
+        })
+        .await
+        .map_err(|err| IronclawError::new(format!("agent control send failed: {err}")))
+}
+
+async fn run_scheduled_job_via_guest(
+    transport: &mut Box<dyn common::transport::Transport>,
+    user_id: &str,
+    session_id: &str,
+    call_id: u64,
+    job_id: &str,
+) -> Result<String, IronclawError> {
+    transport
+        .send(MessageEnvelope {
+            user_id: user_id.to_string(),
+            session_id: session_id.to_string(),
+            msg_id: call_id,
+            timestamp_ms: now_ms().unwrap_or(0),
+            cap_token: String::new(),
+            payload: Some(message_envelope::Payload::ToolCallRequest(
+                common::proto::ironclaw::ToolCallRequest {
+                    call_id,
+                    tool: "run_scheduled_job".to_string(),
+                    input: job_id.to_string(),
+                },
+            )),
+        })
+        .await
+        .map_err(|err| IronclawError::new(format!("scheduled job send failed: {err}")))?;
+
+    loop {
+        let message = transport
+            .recv()
+            .await
+            .map_err(|err| IronclawError::new(format!("scheduled job recv failed: {err}")))?;
+        let Some(envelope) = message else {
+            return Err(IronclawError::new("scheduled job channel closed"));
+        };
+        if let Some(message_envelope::Payload::ToolCallResponse(resp)) = envelope.payload {
+            if resp.call_id == call_id {
+                if resp.ok {
+                    return Ok("success".to_string());
+                }
+                return Ok("failed".to_string());
             }
         }
     }
@@ -1244,6 +1425,8 @@ struct TelegramSession {
     transcript_path: PathBuf,
     transport_failures: u32,
     runtime_banner_sent: bool,
+    guest_sleeping: bool,
+    last_user_message_ms: u64,
 }
 
 impl TelegramSession {
@@ -1261,6 +1444,8 @@ impl TelegramSession {
             transcript_path,
             transport_failures: 0,
             runtime_banner_sent: false,
+            guest_sleeping: false,
+            last_user_message_ms: 0,
         })
     }
 
@@ -1400,8 +1585,49 @@ async fn run_telegram_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
+
+        if let Err(err) = enforce_telegram_idle_timeouts(&state, &mut sessions).await {
+            tracing::warn!("telegram idle timeout check failed: {err}");
+        }
     }
 
+    Ok(())
+}
+
+async fn enforce_telegram_idle_timeouts(
+    state: &AppState,
+    sessions: &mut HashMap<i64, TelegramSession>,
+) -> Result<(), IronclawError> {
+    if state.execution_mode == RuntimeExecutionMode::HostOnly {
+        return Ok(());
+    }
+
+    let timeout_ms = state
+        .host_config
+        .idle_timeout_minutes
+        .saturating_mul(60_000);
+    let now = now_ms()?;
+    for session in sessions.values_mut() {
+        if session.guest_sleeping || session.last_user_message_ms == 0 {
+            continue;
+        }
+        if now.saturating_sub(session.last_user_message_ms) < timeout_ms {
+            continue;
+        }
+        if let Some(transport) = session.transport.as_mut() {
+            send_agent_control(
+                transport,
+                &session.user_id,
+                &session.session_id,
+                session.msg_id,
+                agent_control::Command::Sleep,
+                "idle_timeout",
+            )
+            .await?;
+            session.msg_id = session.msg_id.saturating_add(1);
+            session.guest_sleeping = true;
+        }
+    }
     Ok(())
 }
 
@@ -1419,7 +1645,9 @@ async fn handle_telegram_text(
     }
 
     let history = session.prompt_history();
-    session.append_user_message(text, now_ms().unwrap_or(0))?;
+    let now = now_ms().unwrap_or(0);
+    session.last_user_message_ms = now;
+    session.append_user_message(text, now)?;
     if let Err(err) = summarize_telegram_session_memory(state, session) {
         tracing::warn!("memory summarize failed: {err}");
     }
@@ -1447,6 +1675,7 @@ async fn handle_telegram_text(
                 last_error = err;
                 session.transport_failures = session.transport_failures.saturating_add(1);
                 session.transport = None;
+                session.guest_sleeping = false;
                 let _ = state.vm_manager.stop_vm(&session.user_id).await;
                 let delay = session.transport_backoff();
                 tracing::warn!(
@@ -1492,6 +1721,23 @@ async fn handle_telegram_text_once(
     }
 
     ensure_telegram_session_transport(state, session).await?;
+    if session.guest_sleeping {
+        let transport = session
+            .transport
+            .as_mut()
+            .ok_or_else(|| IronclawError::new("missing telegram session transport"))?;
+        send_agent_control(
+            transport,
+            &session.user_id,
+            &session.session_id,
+            session.msg_id,
+            agent_control::Command::Wake,
+            "user_message",
+        )
+        .await?;
+        session.msg_id = session.msg_id.saturating_add(1);
+        session.guest_sleeping = false;
+    }
 
     let payload = message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
         text: text.to_string(),
@@ -1527,6 +1773,42 @@ async fn handle_telegram_text_once(
         let Some(envelope) = maybe else {
             return Err(IronclawError::new("guest transport closed"));
         };
+        if let Some(message_envelope::Payload::JobTrigger(trigger)) = envelope.payload.clone() {
+            let status = run_scheduled_job_via_guest(
+                transport,
+                &session.user_id,
+                &session.session_id,
+                session.msg_id,
+                &trigger.job_id,
+            )
+            .await
+            .unwrap_or_else(|_| "failed".to_string());
+            session.msg_id = session.msg_id.saturating_add(1);
+            transport
+                .send(MessageEnvelope {
+                    user_id: session.user_id.clone(),
+                    session_id: session.session_id.clone(),
+                    msg_id: session.msg_id,
+                    timestamp_ms: now_ms().unwrap_or(0),
+                    cap_token: String::new(),
+                    payload: Some(message_envelope::Payload::JobStatus(
+                        common::proto::ironclaw::JobStatus {
+                            job_id: trigger.job_id,
+                            status,
+                        },
+                    )),
+                })
+                .await
+                .map_err(|err| IronclawError::new(format!("job status send failed: {err}")))?;
+            session.msg_id = session.msg_id.saturating_add(1);
+            continue;
+        }
+        if matches!(
+            envelope.payload,
+            Some(message_envelope::Payload::AgentState(_))
+        ) {
+            continue;
+        }
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
             let (ok, output) = if req.tool == "host_plan" {
                 match host_plan_tool_response(
@@ -1681,6 +1963,7 @@ async fn ensure_telegram_session_transport(
     )
     .await?;
     session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
+    session.guest_sleeping = false;
     Ok(())
 }
 
@@ -1695,6 +1978,18 @@ fn is_transport_failure(err: &IronclawError) -> bool {
         || msg.contains("auth ack timed out")
         || msg.contains("invalid auth ack")
         || msg.contains("vm start failed")
+}
+
+fn should_enter_idle_sleep(
+    execution_mode: RuntimeExecutionMode,
+    guest_sleeping: bool,
+    last_user_activity: std::time::Instant,
+    idle_timeout: std::time::Duration,
+) -> bool {
+    if execution_mode == RuntimeExecutionMode::HostOnly || guest_sleeping {
+        return false;
+    }
+    last_user_activity.elapsed() >= idle_timeout
 }
 
 fn load_guest_allow_bash(config_path: &StdPath) -> bool {
@@ -1975,9 +2270,9 @@ mod tests {
     use super::{
         allowed_tools_for_runtime, deterministic_guest_tools_plan, load_telegram_offset,
         load_telegram_transcript, save_telegram_offset, save_telegram_transcript,
-        split_telegram_chunks, telegram_firecracker_requirement_error, telegram_transcript_path,
-        RuntimeExecutionMode, TelegramTranscript, TelegramTranscriptMessage, ToolPlan,
-        TELEGRAM_TRANSCRIPT_MAX_TURNS,
+        should_enter_idle_sleep, split_telegram_chunks, telegram_firecracker_requirement_error,
+        telegram_transcript_path, RuntimeExecutionMode, TelegramTranscript,
+        TelegramTranscriptMessage, ToolPlan, TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
 
     #[test]
@@ -2102,5 +2397,30 @@ mod tests {
 
         let firecracker_with_bash = allowed_tools_for_runtime(false, true);
         assert!(firecracker_with_bash.iter().any(|tool| tool == "bash"));
+    }
+
+    #[test]
+    fn idle_timeout_trigger_only_for_guest_modes() {
+        let now = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(300);
+        assert!(!should_enter_idle_sleep(
+            RuntimeExecutionMode::HostOnly,
+            false,
+            now.checked_sub(timeout).unwrap_or(now),
+            timeout,
+        ));
+        assert!(!should_enter_idle_sleep(
+            RuntimeExecutionMode::GuestTools,
+            true,
+            now.checked_sub(timeout).unwrap_or(now),
+            timeout,
+        ));
+        assert!(should_enter_idle_sleep(
+            RuntimeExecutionMode::GuestTools,
+            false,
+            now.checked_sub(timeout + std::time::Duration::from_secs(1))
+                .unwrap_or(now),
+            timeout,
+        ));
     }
 }
