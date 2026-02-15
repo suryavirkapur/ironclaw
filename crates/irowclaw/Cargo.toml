@@ -16,4 +16,5 @@ thiserror = "*"
 tokio = { version = "*", features = ["macros", "rt-multi-thread", "io-std", "io-util", "net", "time", "process"] }
 tokio-vsock = "*"
 toml = "*"
+tracing = "*"
 tools = { path = "../tools" }

@@ -1,3 +1,4 @@
+use crate::logging::LogLevel;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -16,6 +17,10 @@ pub struct HostConfig {
     pub execution_mode: HostExecutionMode,
     #[serde(default = "default_idle_timeout_minutes")]
     pub idle_timeout_minutes: u64,
+    #[serde(default = "default_log_level")]
+    pub log_level: LogLevel,
+    #[serde(default)]
+    pub daemon: HostDaemonConfig,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -33,6 +38,10 @@ fn default_execution_mode() -> HostExecutionMode {
 
 fn default_idle_timeout_minutes() -> u64 {
     5
+}
+
+fn default_log_level() -> LogLevel {
+    LogLevel::Info
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -92,6 +101,44 @@ pub struct HostFirecrackerConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostStorageConfig {
     pub users_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostDaemonConfig {
+    #[serde(default)]
+    pub pid_file: Option<PathBuf>,
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
+    #[serde(default = "default_graceful_timeout_ms")]
+    pub graceful_timeout_ms: u64,
+    #[serde(default = "default_log_rotate_keep")]
+    pub log_rotate_keep: usize,
+    #[serde(default = "default_log_rotate_max_bytes")]
+    pub log_rotate_max_bytes: u64,
+}
+
+fn default_graceful_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_log_rotate_keep() -> usize {
+    5
+}
+
+fn default_log_rotate_max_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+impl Default for HostDaemonConfig {
+    fn default() -> Self {
+        Self {
+            pid_file: None,
+            log_file: None,
+            graceful_timeout_ms: default_graceful_timeout_ms(),
+            log_rotate_keep: default_log_rotate_keep(),
+            log_rotate_max_bytes: default_log_rotate_max_bytes(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,6 +228,8 @@ impl HostConfig {
             whatsapp: HostWhatsAppConfig::default(),
             execution_mode: HostExecutionMode::Auto,
             idle_timeout_minutes: default_idle_timeout_minutes(),
+            log_level: default_log_level(),
+            daemon: HostDaemonConfig::default(),
         }
     }
 }
@@ -191,6 +240,8 @@ pub struct GuestConfig {
     pub tools: GuestToolsConfig,
     pub indexing: GuestIndexingConfig,
     pub scheduler: GuestSchedulerConfig,
+    #[serde(default = "default_log_level")]
+    pub log_level: LogLevel,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -256,6 +307,7 @@ impl Default for GuestConfig {
             scheduler: GuestSchedulerConfig {
                 jobs_path: PathBuf::from("/mnt/brain/cron/jobs.toml"),
             },
+            log_level: default_log_level(),
         }
     }
 }

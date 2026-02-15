@@ -1,3 +1,5 @@
+use common::config::GuestConfig;
+use common::logging::{init_logging, LoggingConfig};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -5,6 +7,16 @@ async fn main() -> Result<(), irowclaw::runtime::IrowclawError> {
     let config_path = std::env::var("IROWCLAW_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/mnt/brain/config/irowclaw.toml"));
+    let guest_config = load_guest_config_for_logging(&config_path);
+    let logging_result = init_logging(LoggingConfig {
+        level: guest_config.log_level,
+        log_file: None,
+        rotate_keep: 5,
+        rotate_max_bytes: 10 * 1024 * 1024,
+    });
+    if let Err(err) = logging_result {
+        eprintln!("irowclaw: logging init failed: {err}");
+    }
 
     // Firecracker best path: guest connects to host over vsock.
     // Firecracker reserves CID 2 for the host.
@@ -20,13 +32,13 @@ async fn main() -> Result<(), irowclaw::runtime::IrowclawError> {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(5000);
 
-        eprintln!("irowclaw: starting (vsock accept on port {port})");
+        tracing::info!("irowclaw: starting (vsock accept on port {port})");
 
         let transport = irowclaw::vsock_transport::VsockTransport::accept(port)
             .await
             .map_err(|e| irowclaw::runtime::IrowclawError::new(e.to_string()))?;
 
-        eprintln!("irowclaw: vsock accepted, entering loop");
+        tracing::info!("irowclaw: vsock accepted, entering loop");
 
         return irowclaw::runtime::run_with_transport(transport, config_path).await;
     }
@@ -48,6 +60,17 @@ impl StdioTransport {
         Self {
             codec: common::codec::ProtoCodec::new(),
         }
+    }
+}
+
+fn load_guest_config_for_logging(config_path: &std::path::Path) -> GuestConfig {
+    match std::fs::read_to_string(config_path) {
+        Ok(contents) => match toml::from_str::<GuestConfig>(&contents) {
+            Ok(config) => config,
+            Err(_) => GuestConfig::default(),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => GuestConfig::default(),
+        Err(_) => GuestConfig::default(),
     }
 }
 
