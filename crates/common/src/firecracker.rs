@@ -1,6 +1,11 @@
 use crate::transport::{LocalTransport, Transport};
+#[cfg(feature = "firecracker")]
+use std::collections::HashMap;
 use std::path::PathBuf;
-
+#[cfg(feature = "firecracker")]
+use std::sync::Arc;
+#[cfg(feature = "firecracker")]
+use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct VmConfig {
@@ -19,6 +24,7 @@ pub struct VmInstance {
 pub trait VmManager: Send + Sync {
     async fn start_vm(&self, config: VmConfig) -> Result<VmInstance, VmError>;
     async fn stop_vm(&self, user_id: &str) -> Result<(), VmError>;
+    async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,11 +43,17 @@ impl VmError {
 
 pub struct StubVmManager {
     buffer: usize,
+    running_users: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl StubVmManager {
     pub fn new(buffer: usize) -> Self {
-        Self { buffer }
+        Self {
+            buffer,
+            running_users: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+        }
     }
 
     pub fn make_transport_pair(&self) -> (LocalTransport, LocalTransport) {
@@ -52,6 +64,7 @@ impl StubVmManager {
         &self,
         config: VmConfig,
     ) -> Result<(VmInstance, LocalTransport), VmError> {
+        let user_id = config.user_id.clone();
         let (host_transport, guest_transport) = self.make_transport_pair();
         let instance = VmInstance {
             user_id: config.user_id,
@@ -59,6 +72,9 @@ impl StubVmManager {
             transport: Box::new(host_transport),
             allowed_tools: vec![],
         };
+        if let Ok(mut running_users) = self.running_users.lock() {
+            running_users.insert(user_id);
+        }
         Ok((instance, guest_transport))
     }
 }
@@ -66,6 +82,10 @@ impl StubVmManager {
 #[async_trait::async_trait]
 impl VmManager for StubVmManager {
     async fn start_vm(&self, config: VmConfig) -> Result<VmInstance, VmError> {
+        self.running_users
+            .lock()
+            .map_err(|_| VmError::new("stub vm manager lock poisoned"))?
+            .insert(config.user_id.clone());
         let (host_transport, _guest_transport) = self.make_transport_pair();
         Ok(VmInstance {
             user_id: config.user_id,
@@ -75,17 +95,22 @@ impl VmManager for StubVmManager {
         })
     }
 
-    async fn stop_vm(&self, _user_id: &str) -> Result<(), VmError> {
+    async fn stop_vm(&self, user_id: &str) -> Result<(), VmError> {
+        self.running_users
+            .lock()
+            .map_err(|_| VmError::new("stub vm manager lock poisoned"))?
+            .remove(user_id);
         Ok(())
     }
-}
 
-#[cfg(feature = "firecracker")]
-use std::collections::HashMap;
-#[cfg(feature = "firecracker")]
-use std::sync::Arc;
-#[cfg(feature = "firecracker")]
-use tokio::sync::Mutex;
+    async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError> {
+        let running_users = self
+            .running_users
+            .lock()
+            .map_err(|_| VmError::new("stub vm manager lock poisoned"))?;
+        Ok(running_users.contains(user_id))
+    }
+}
 
 #[cfg(feature = "firecracker")]
 pub struct FirecrackerManager {
@@ -119,6 +144,13 @@ impl FirecrackerManager {
 #[cfg(feature = "firecracker")]
 pub fn default_vsock_port() -> u32 {
     5000
+}
+
+#[cfg(feature = "firecracker")]
+impl FirecrackerManager {
+    async fn is_running_inner(&self, user_id: &str) -> bool {
+        self.handles.lock().await.contains_key(user_id)
+    }
 }
 
 #[cfg(feature = "firecracker")]
@@ -165,9 +197,9 @@ impl VmManager for FirecrackerManager {
         }
 
         let handle = builder
-        .build_and_start()
-        .await
-        .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;
+            .build_and_start()
+            .await
+            .map_err(|e| VmError::new(format!("firecracker start failed: {e}")))?;
 
         // Firecracker creates and listens on the host-side UDS endpoint for vsock.
         // Host-initiated connection flow (Firecracker docs):
@@ -264,5 +296,9 @@ impl VmManager for FirecrackerManager {
                 .map_err(|e| VmError::new(format!("firecracker kill failed: {e}")))?;
         }
         Ok(())
+    }
+
+    async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError> {
+        Ok(self.is_running_inner(user_id).await)
     }
 }

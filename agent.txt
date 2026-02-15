@@ -1,44 +1,25 @@
 current context:
-- host now runs soul guard monitoring with sqlite audit + approval queue:
-  - monitored paths: `/mnt/brain/soul.md` and `users_root/<user>/guest/soul.md`
-  - suspicious thresholds: `>1024` bytes diff or `>20%` change ratio
-  - queue + logs in `users_root/soul_guard.db`
-- host exposes soul guard api:
-  - `GET /api/soul-guard/pending`
-  - `POST /api/soul-guard/decision` (`approve`/`reject`)
-- websocket handling now enforces a security halt when pending soul approvals exist
-- guest runtime now includes a background cron scheduler:
-  - jobs source: `/mnt/brain/cron/jobs.toml`
-  - results log sink: `/mnt/brain/logs/YYYY-MM-DD.md`
-  - sqlite mirror table: `scheduler_state` (`last_run_ms`, `next_run_ms`, `status`)
-- scheduler now emits `JobTrigger` events instead of executing due jobs inline
-- host handles scheduled triggers by calling guest `run_scheduled_job` and returning `JobStatus`
-- guest runtime supports persisted sleep/awake power state in `config/agent_state.toml`
-- host enforces `idle_timeout_minutes` and sends `AgentControl` sleep/wake commands
+- host channel routing now uses a shared owner identity resolver across websocket, telegram, and whatsapp ingress
+- cron jobtrigger handling now traces full flow and explicitly wakes sleeping guest agents before scheduled execution
+- whatsapp path now supports guest transport lifecycle (vm check/start, auth, wake, vsock forwarding, stream delta handling)
+- vm manager now exposes `is_vm_running(user_id)`; host logs vm running state before spawn
+- integration tests cover cron-trigger wake/run/status behavior and owner identity routing across channels
 
 pending tasks:
 - rerun websocket smoke scripts on a host where tcp bind is permitted (current sandbox blocks bind)
 - validate soul guard api from ui integration flow
 - run manual firecracker and telegram/whatsapp e2e flows on a host with required runtime permissions
-- validate full whatsapp guest-mode wake flow parity with websocket/telegram path
 
 important decisions:
-- used host sqlite queue (`users_root/soul_guard.db`) for approvals instead of queue files
-- applied a polling soul monitor loop (2s tick) to avoid platform-specific fs watch dependencies
-- implemented internal 5-field cron parsing in guest to keep builds working offline
-- wrote scheduler state to the existing guest sqlite db path for ui read models
-- kept vm processes alive while pausing guest runtime behavior through control messages
-- used host-side idle timers to drive sleep transitions (`default: 5 minutes`)
+- kept agent ownership keyed by user identity (`owner` for telegram/whatsapp, explicit `user_id` for websocket)
+- reused existing guest job execution contract (`run_scheduled_job`) and wrapped it in host-side trigger orchestration with debug logs
+- aligned whatsapp with telegram guest-mode semantics instead of keeping host-only execution
 
 architectural notes:
-- soul guard logs every detected `soul.md` diff with hash before/after and suspicion metadata
-- pending soul approvals are deduped by `(path, after_hash, status='pending')`
-- scheduler cron matcher supports numeric fields and `*` only (5-field cron)
-- scheduler stores log file reference (`last_result_ref`) for ui navigation
-- protocol now includes `AgentControl` + `AgentState` for runtime lifecycle signaling
-- cron flow is now guest scheduler -> host `JobTrigger` handling -> guest job execution request
+- jobtrigger flow is now: guest scheduler emits trigger -> host wake if sleeping -> host sends `run_scheduled_job` -> host emits `jobstatus`
+- channel message flow is now: ingress identity resolve -> vm running check/log -> transport ensure -> wake if needed -> vsock send/recv stream
+- guest sleep state is tracked per channel session and transitioned by explicit `agentcontrol` messages
 
 plan:
-- validate websocket + api integration against ui workflows
-- evaluate extended cron grammar support (`*/n`, ranges, lists) if needed by product requirements
-- add whatsapp guest transport lifecycle support matching telegram session behavior
+- run full integration smoke for websocket + telegram + whatsapp routing against firecracker runtime
+- add cross-channel single-transport session coordination if concurrent owner traffic requires avoiding vm restarts

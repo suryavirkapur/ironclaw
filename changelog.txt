@@ -1,3 +1,8 @@
+0.3.1 2026-02-15
+- fixed host jobtrigger handling to wake sleeping guest agent, run scheduled job, and send jobstatus with debug tracing
+- added vm running-state checks to vm manager and host vm spawn logging
+- added integration-style test for cron jobtrigger wake+run flow
+
 0.6.0 2026-02-14
 - switched guest cron behavior from direct execution to trigger-first dispatch
 - scheduler now writes `triggered` state and emits `JobTrigger` events for due jobs

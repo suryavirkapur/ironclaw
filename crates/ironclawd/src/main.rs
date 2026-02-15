@@ -311,6 +311,22 @@ struct WsQuery {
     session_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelSource {
+    WebSocket,
+    Telegram,
+    WhatsApp,
+}
+
+fn resolve_owner_user_id(source: ChannelSource, inbound_user_id: Option<&str>) -> String {
+    match source {
+        ChannelSource::WebSocket => inbound_user_id.unwrap_or("local").to_string(),
+        ChannelSource::Telegram | ChannelSource::WhatsApp => {
+            inbound_user_id.unwrap_or("owner").to_string()
+        }
+    }
+}
+
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -320,8 +336,13 @@ async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
-    let user_id = query.user_id.unwrap_or_else(|| "local".to_string());
+    let user_id = resolve_owner_user_id(ChannelSource::WebSocket, query.user_id.as_deref());
     let session_id = query.session_id.unwrap_or_else(|| "session".to_string());
+    tracing::debug!(
+        "channel route source=websocket user_id={} session_id={} event=ingress",
+        user_id,
+        session_id
+    );
     let (vm_instance, guest_transport) = match start_vm_pair(&state, &user_id).await {
         Ok(pair) => pair,
         Err(err) => {
@@ -342,6 +363,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     };
 
     let mut transport = vm_instance.transport;
+    tracing::debug!(
+        "channel route source=websocket user_id={} event=vm_ready",
+        user_id
+    );
 
     if state.local_guest {
         if let Some(guest_transport) = guest_transport {
@@ -508,6 +533,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         }
                     } else {
                         if guest_sleeping {
+                            tracing::debug!(
+                                "channel route source=websocket user_id={} session_id={} action=wake reason=user_message",
+                                user_id,
+                                session_id
+                            );
                             let wake_result = send_agent_control(
                                 &mut transport,
                                 &user_id,
@@ -550,56 +580,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         if let Some(message_envelope::Payload::JobTrigger(trigger)) =
                             envelope.payload.clone()
                         {
-                            if guest_sleeping {
-                                let wake_result = send_agent_control(
-                                    &mut transport,
-                                    &user_id,
-                                    &session_id,
-                                    msg_id,
-                                    agent_control::Command::Wake,
-                                    "scheduled_job",
-                                )
-                                .await;
-                                if wake_result.is_err() {
-                                    break;
-                                }
-                                msg_id = msg_id.saturating_add(1);
-                                guest_sleeping = false;
-                            }
-
-                            let call_id = msg_id;
-                            msg_id = msg_id.saturating_add(1);
-                            let job_status = run_scheduled_job_via_guest(
+                            if let Err(err) = handle_guest_job_trigger(
                                 &mut transport,
                                 &user_id,
                                 &session_id,
-                                call_id,
-                                &trigger.job_id,
+                                &mut msg_id,
+                                &mut guest_sleeping,
+                                trigger,
+                                "websocket",
                             )
-                            .await;
-                            let status_text = match job_status {
-                                Ok(value) => value,
-                                Err(err) => {
-                                    tracing::error!("scheduled job execution failed: {err}");
-                                    "failed".to_string()
-                                }
-                            };
-                            let status_envelope = MessageEnvelope {
-                                user_id: user_id.clone(),
-                                session_id: session_id.clone(),
-                                msg_id,
-                                timestamp_ms: now_ms().unwrap_or(0),
-                                cap_token: String::new(),
-                                payload: Some(message_envelope::Payload::JobStatus(
-                                    common::proto::ironclaw::JobStatus {
-                                        job_id: trigger.job_id,
-                                        status: status_text,
-                                    },
-                                )),
-                            };
-                            msg_id = msg_id.saturating_add(1);
-                            if let Err(err) = transport.send(status_envelope).await {
-                                tracing::error!("job status send failed: {err}");
+                            .await
+                            {
+                                tracing::error!("scheduled job handling failed: {err}");
                                 break;
                             }
                             continue;
@@ -689,6 +681,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                     last_user_activity,
                     idle_timeout,
                 ) {
+                    tracing::debug!(
+                        "channel route source=websocket user_id={} session_id={} action=sleep reason=idle_timeout",
+                        user_id,
+                        session_id
+                    );
                     let sleep_result = send_agent_control(
                         &mut transport,
                         &user_id,
@@ -731,6 +728,88 @@ async fn send_agent_control(
         })
         .await
         .map_err(|err| IronclawError::new(format!("agent control send failed: {err}")))
+}
+
+async fn handle_guest_job_trigger(
+    transport: &mut Box<dyn common::transport::Transport>,
+    user_id: &str,
+    session_id: &str,
+    msg_id: &mut u64,
+    guest_sleeping: &mut bool,
+    trigger: common::proto::ironclaw::JobTrigger,
+    source: &str,
+) -> Result<(), IronclawError> {
+    tracing::debug!(
+        "job trigger route source={} user_id={} session_id={} job_id={} guest_sleeping={}",
+        source,
+        user_id,
+        session_id,
+        trigger.job_id,
+        *guest_sleeping
+    );
+    if *guest_sleeping {
+        tracing::debug!(
+            "job trigger route source={} user_id={} session_id={} action=wake",
+            source,
+            user_id,
+            session_id
+        );
+        send_agent_control(
+            transport,
+            user_id,
+            session_id,
+            *msg_id,
+            agent_control::Command::Wake,
+            "scheduled_job",
+        )
+        .await?;
+        *msg_id = msg_id.saturating_add(1);
+        *guest_sleeping = false;
+    }
+
+    let call_id = *msg_id;
+    *msg_id = msg_id.saturating_add(1);
+    tracing::debug!(
+        "job trigger route source={} user_id={} session_id={} action=run_scheduled_job job_id={} call_id={}",
+        source,
+        user_id,
+        session_id,
+        trigger.job_id,
+        call_id
+    );
+    let status_text =
+        run_scheduled_job_via_guest(transport, user_id, session_id, call_id, &trigger.job_id)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::error!("scheduled job execution failed: {err}");
+                "failed".to_string()
+            });
+
+    let status_envelope = MessageEnvelope {
+        user_id: user_id.to_string(),
+        session_id: session_id.to_string(),
+        msg_id: *msg_id,
+        timestamp_ms: now_ms().unwrap_or(0),
+        cap_token: String::new(),
+        payload: Some(message_envelope::Payload::JobStatus(
+            common::proto::ironclaw::JobStatus {
+                job_id: trigger.job_id,
+                status: status_text,
+            },
+        )),
+    };
+    *msg_id = msg_id.saturating_add(1);
+    transport
+        .send(status_envelope)
+        .await
+        .map_err(|err| IronclawError::new(format!("job status send failed: {err}")))?;
+    tracing::debug!(
+        "job trigger route source={} user_id={} session_id={} action=status_sent",
+        source,
+        user_id,
+        session_id
+    );
+    Ok(())
 }
 
 async fn run_scheduled_job_via_guest(
@@ -781,6 +860,16 @@ async fn start_vm_pair(
     state: &AppState,
     user_id: &str,
 ) -> Result<(VmInstance, Option<common::transport::LocalTransport>), IronclawError> {
+    let vm_running = state
+        .vm_manager
+        .is_vm_running(user_id)
+        .await
+        .map_err(|err| IronclawError::new(err.to_string()))?;
+    tracing::debug!(
+        "channel route user_id={} event=vm_lookup running={}",
+        user_id,
+        vm_running
+    );
     let brain_path = brain_ext4_path(&state.host_config.storage.users_root, user_id)?;
     let config = VmConfig {
         user_id: user_id.to_string(),
@@ -791,6 +880,10 @@ async fn start_vm_pair(
             let (instance, guest) = manager
                 .start_vm_with_guest(config)
                 .map_err(|err| IronclawError::new(err.to_string()))?;
+            tracing::debug!(
+                "channel route user_id={} event=vm_spawned mode=local_guest",
+                user_id
+            );
             return Ok((instance, Some(guest)));
         }
     }
@@ -799,6 +892,10 @@ async fn start_vm_pair(
         .start_vm(config)
         .await
         .map_err(|err| IronclawError::new(err.to_string()))?;
+    tracing::debug!(
+        "channel route user_id={} event=vm_spawned mode=firecracker",
+        user_id
+    );
     Ok((instance, None))
 }
 
@@ -1436,7 +1533,7 @@ impl TelegramSession {
         let transcript = load_telegram_transcript(&transcript_path)?;
         Ok(Self {
             chat_id,
-            user_id: "owner".to_string(),
+            user_id: resolve_owner_user_id(ChannelSource::Telegram, None),
             session_id,
             msg_id: 1,
             transport: None,
@@ -1556,6 +1653,10 @@ async fn run_telegram_loop(
                     let Some(text) = message.text else {
                         continue;
                     };
+                    tracing::debug!(
+                        "channel route source=telegram chat_id={} event=ingress",
+                        message.chat.id
+                    );
                     if message.chat.id != settings.owner_chat_id {
                         tracing::warn!("telegram message denied from chat {}", message.chat.id);
                         continue;
@@ -1615,6 +1716,11 @@ async fn enforce_telegram_idle_timeouts(
             continue;
         }
         if let Some(transport) = session.transport.as_mut() {
+            tracing::debug!(
+                "channel route source=telegram user_id={} session_id={} action=sleep reason=idle_timeout",
+                session.user_id,
+                session.session_id
+            );
             send_agent_control(
                 transport,
                 &session.user_id,
@@ -1722,6 +1828,11 @@ async fn handle_telegram_text_once(
 
     ensure_telegram_session_transport(state, session).await?;
     if session.guest_sleeping {
+        tracing::debug!(
+            "channel route source=telegram user_id={} session_id={} action=wake reason=user_message",
+            session.user_id,
+            session.session_id
+        );
         let transport = session
             .transport
             .as_mut()
@@ -1774,33 +1885,17 @@ async fn handle_telegram_text_once(
             return Err(IronclawError::new("guest transport closed"));
         };
         if let Some(message_envelope::Payload::JobTrigger(trigger)) = envelope.payload.clone() {
-            let status = run_scheduled_job_via_guest(
+            handle_guest_job_trigger(
                 transport,
                 &session.user_id,
                 &session.session_id,
-                session.msg_id,
-                &trigger.job_id,
+                &mut session.msg_id,
+                &mut session.guest_sleeping,
+                trigger,
+                "telegram",
             )
             .await
-            .unwrap_or_else(|_| "failed".to_string());
-            session.msg_id = session.msg_id.saturating_add(1);
-            transport
-                .send(MessageEnvelope {
-                    user_id: session.user_id.clone(),
-                    session_id: session.session_id.clone(),
-                    msg_id: session.msg_id,
-                    timestamp_ms: now_ms().unwrap_or(0),
-                    cap_token: String::new(),
-                    payload: Some(message_envelope::Payload::JobStatus(
-                        common::proto::ironclaw::JobStatus {
-                            job_id: trigger.job_id,
-                            status,
-                        },
-                    )),
-                })
-                .await
-                .map_err(|err| IronclawError::new(format!("job status send failed: {err}")))?;
-            session.msg_id = session.msg_id.saturating_add(1);
+            .map_err(|err| IronclawError::new(format!("job trigger handling failed: {err}")))?;
             continue;
         }
         if matches!(
@@ -1925,6 +2020,11 @@ async fn ensure_telegram_session_transport(
     }
 
     let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
+    tracing::debug!(
+        "channel route source=telegram user_id={} session_id={} event=transport_create",
+        session.user_id,
+        session.session_id
+    );
     let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
     let cap_token = {
         use rand::RngCore;
@@ -2168,7 +2268,9 @@ async fn run_whatsapp_loop(
                         &incoming.sender_jid,
                         users_root,
                     ) {
-                        Ok(session) => {
+                        Ok(mut session) => {
+                            session.user_id =
+                                resolve_owner_user_id(ChannelSource::WhatsApp, None);
                             sessions.insert(incoming.sender_jid.clone(), session);
                         }
                         Err(err) => {
@@ -2180,6 +2282,12 @@ async fn run_whatsapp_loop(
                 let Some(session) = sessions.get_mut(&incoming.sender_jid) else {
                     continue;
                 };
+                tracing::debug!(
+                    "channel route source=whatsapp sender={} user_id={} session_id={} event=ingress",
+                    incoming.sender_jid,
+                    session.user_id,
+                    session.session_id
+                );
 
                 if let Err(err) = handle_whatsapp_text(
                     &state,
@@ -2199,6 +2307,11 @@ async fn run_whatsapp_loop(
                     ).await;
                 }
             }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(IDLE_CHECK_SECONDS)) => {
+                if let Err(err) = enforce_whatsapp_idle_timeouts(&state, &mut sessions).await {
+                    tracing::warn!("whatsapp idle timeout check failed: {err}");
+                }
+            }
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("whatsapp: shutdown signal received");
@@ -2211,6 +2324,47 @@ async fn run_whatsapp_loop(
     Ok(())
 }
 
+async fn enforce_whatsapp_idle_timeouts(
+    state: &AppState,
+    sessions: &mut HashMap<String, whatsapp::WhatsAppSession>,
+) -> Result<(), IronclawError> {
+    if state.execution_mode == RuntimeExecutionMode::HostOnly {
+        return Ok(());
+    }
+    let timeout_ms = state
+        .host_config
+        .idle_timeout_minutes
+        .saturating_mul(60_000);
+    let now = now_ms()?;
+    for session in sessions.values_mut() {
+        if session.guest_sleeping || session.last_user_message_ms == 0 {
+            continue;
+        }
+        if now.saturating_sub(session.last_user_message_ms) < timeout_ms {
+            continue;
+        }
+        if let Some(transport) = session.transport.as_mut() {
+            tracing::debug!(
+                "channel route source=whatsapp user_id={} session_id={} action=sleep reason=idle_timeout",
+                session.user_id,
+                session.session_id
+            );
+            send_agent_control(
+                transport,
+                &session.user_id,
+                &session.session_id,
+                session.msg_id,
+                agent_control::Command::Sleep,
+                "idle_timeout",
+            )
+            .await?;
+            session.msg_id = session.msg_id.saturating_add(1);
+            session.guest_sleeping = true;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_whatsapp_text(
     state: &AppState,
     client: &whatsapp_rust::Client,
@@ -2218,7 +2372,9 @@ async fn handle_whatsapp_text(
     text: &str,
 ) -> Result<(), IronclawError> {
     let history = session.prompt_history();
-    session.append_user_message(text, now_ms()?)?;
+    let now = now_ms()?;
+    session.last_user_message_ms = now;
+    session.append_user_message(text, now)?;
 
     if let Err(err) = summarize_whatsapp_session_memory(state, session) {
         tracing::warn!("whatsapp memory summarize failed: {err}");
@@ -2232,19 +2388,262 @@ async fn handle_whatsapp_text(
         return Ok(());
     }
 
-    // Host-only mode: run LLM turn directly.
+    let mut attempt = 0usize;
+    let mut last_error = IronclawError::new("whatsapp request failed");
+    while attempt < TELEGRAM_RETRY_MAX_ATTEMPTS {
+        match handle_whatsapp_text_once(state, client, session, text, &history).await {
+            Ok(output) => {
+                session.append_assistant_message(&output, now_ms()?)?;
+                session.transport_failures = 0;
+                return Ok(());
+            }
+            Err(err) => {
+                if !is_transport_failure(&err) || attempt + 1 >= TELEGRAM_RETRY_MAX_ATTEMPTS {
+                    return Err(err);
+                }
+                last_error = err;
+                session.transport_failures = session.transport_failures.saturating_add(1);
+                session.transport = None;
+                session.guest_sleeping = false;
+                let _ = state.vm_manager.stop_vm(&session.user_id).await;
+                let delay = session.transport_backoff();
+                tracing::warn!(
+                    "whatsapp transport restart user_id={} backoff_ms={}",
+                    session.user_id,
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+        attempt = attempt.saturating_add(1);
+    }
+
+    Err(last_error)
+}
+
+async fn handle_whatsapp_text_once(
+    state: &AppState,
+    client: &whatsapp_rust::Client,
+    session: &mut whatsapp::WhatsAppSession,
+    text: &str,
+    history: &[ConversationMessage],
+) -> Result<String, IronclawError> {
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        whatsapp::send_whatsapp_message(client, &session.sender_jid, message).await?;
+        return Ok(message.to_string());
+    }
+
     let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
-    let output = run_host_turn(
-        state,
+    if state.execution_mode == RuntimeExecutionMode::HostOnly {
+        let output = run_host_turn(
+            state,
+            &session.user_id,
+            &host_allowed_tools,
+            text,
+            Some(history),
+        )
+        .await?;
+        whatsapp::send_whatsapp_message(client, &session.sender_jid, &output).await?;
+        return Ok(output);
+    }
+
+    ensure_whatsapp_session_transport(state, session).await?;
+    if session.guest_sleeping {
+        tracing::debug!(
+            "channel route source=whatsapp user_id={} session_id={} action=wake reason=user_message",
+            session.user_id,
+            session.session_id
+        );
+        let transport = session
+            .transport
+            .as_mut()
+            .ok_or_else(|| IronclawError::new("missing whatsapp session transport"))?;
+        send_agent_control(
+            transport,
+            &session.user_id,
+            &session.session_id,
+            session.msg_id,
+            agent_control::Command::Wake,
+            "user_message",
+        )
+        .await?;
+        session.msg_id = session.msg_id.saturating_add(1);
+        session.guest_sleeping = false;
+    }
+
+    let payload = message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
+        text: text.to_string(),
+    });
+    let timestamp_ms = now_ms().unwrap_or(0);
+    let envelope = MessageEnvelope {
+        user_id: session.user_id.clone(),
+        session_id: session.session_id.clone(),
+        msg_id: session.msg_id,
+        timestamp_ms,
+        cap_token: String::new(),
+        payload: Some(payload),
+    };
+    session.msg_id = session.msg_id.saturating_add(1);
+    let transport = session
+        .transport
+        .as_mut()
+        .ok_or_else(|| IronclawError::new("missing whatsapp session transport"))?;
+    transport
+        .send(envelope)
+        .await
+        .map_err(|err| IronclawError::new(format!("send to guest failed: {err}")))?;
+
+    let mut streamed_any = false;
+    let mut output = String::new();
+    loop {
+        let maybe = transport
+            .recv()
+            .await
+            .map_err(|err| IronclawError::new(format!("transport recv failed: {err}")))?;
+        let Some(envelope) = maybe else {
+            return Err(IronclawError::new("guest transport closed"));
+        };
+        if let Some(message_envelope::Payload::JobTrigger(trigger)) = envelope.payload.clone() {
+            handle_guest_job_trigger(
+                transport,
+                &session.user_id,
+                &session.session_id,
+                &mut session.msg_id,
+                &mut session.guest_sleeping,
+                trigger,
+                "whatsapp",
+            )
+            .await
+            .map_err(|err| IronclawError::new(format!("job trigger handling failed: {err}")))?;
+            continue;
+        }
+        if matches!(
+            envelope.payload,
+            Some(message_envelope::Payload::AgentState(_))
+        ) {
+            continue;
+        }
+        if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
+            let (ok, output) = if req.tool == "host_plan" {
+                match host_plan_tool_response(
+                    state,
+                    &session.user_id,
+                    &req.input,
+                    &host_allowed_tools,
+                    Some(history),
+                )
+                .await
+                {
+                    Ok(out) => (true, out),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            } else {
+                match run_host_tool(&host_allowed_tools, &session.user_id, &req.tool, &req.input)
+                    .await
+                {
+                    Ok(out) => (true, truncate_tool_output(&out)),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            };
+            let resp = MessageEnvelope {
+                user_id: envelope.user_id,
+                session_id: envelope.session_id,
+                msg_id: envelope.msg_id,
+                timestamp_ms: envelope.timestamp_ms,
+                cap_token: String::new(),
+                payload: Some(message_envelope::Payload::ToolCallResponse(
+                    common::proto::ironclaw::ToolCallResponse {
+                        call_id: req.call_id,
+                        ok,
+                        output,
+                    },
+                )),
+            };
+            transport
+                .send(resp)
+                .await
+                .map_err(|err| IronclawError::new(format!("tool response send failed: {err}")))?;
+            continue;
+        }
+        if let Some(message_envelope::Payload::StreamDelta(delta)) = envelope.payload {
+            if !delta.delta.is_empty() {
+                output.push_str(&delta.delta);
+                whatsapp::send_whatsapp_message(client, &session.sender_jid, &delta.delta).await?;
+                streamed_any = true;
+            }
+            if delta.done {
+                break;
+            }
+        }
+    }
+
+    if !streamed_any {
+        whatsapp::send_whatsapp_message(client, &session.sender_jid, "done").await?;
+        output.push_str("done");
+    }
+
+    Ok(output)
+}
+
+async fn ensure_whatsapp_session_transport(
+    state: &AppState,
+    session: &mut whatsapp::WhatsAppSession,
+) -> Result<(), IronclawError> {
+    if session.transport.is_some() {
+        return Ok(());
+    }
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        return Err(IronclawError::new(message));
+    }
+    let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
+    tracing::debug!(
+        "channel route source=whatsapp user_id={} session_id={} event=transport_create",
+        session.user_id,
+        session.session_id
+    );
+    let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
+    let cap_token = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+
+    let mut transport = vm_instance.transport;
+    if state.local_guest {
+        if let Some(guest_transport) = guest_transport {
+            let guest_user_id = session.user_id.clone();
+            let users_root = state.host_config.storage.users_root.clone();
+            let guest_config_path = (*state.guest_config_path).clone();
+            tokio::spawn(async move {
+                let brain_root = users_root.join(&guest_user_id).join("guest");
+                if let Err(err) = std::fs::create_dir_all(&brain_root) {
+                    tracing::warn!("create brain root failed: {err}");
+                }
+                std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+                if let Err(err) =
+                    irowclaw::runtime::run_with_transport(guest_transport, guest_config_path).await
+                {
+                    tracing::error!("guest runtime failed: {err}");
+                }
+            });
+        }
+    }
+    send_guest_auth_challenge(
+        &mut transport,
         &session.user_id,
-        &host_allowed_tools,
-        text,
-        Some(&history),
+        &session.session_id,
+        &cap_token,
+        &guest_allowed_tools,
+        state.execution_mode,
     )
     .await?;
-
-    whatsapp::send_whatsapp_message(client, &session.sender_jid, &output).await?;
-    session.append_assistant_message(&output, now_ms()?)?;
+    session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
+    session.guest_sleeping = false;
     Ok(())
 }
 
@@ -2268,12 +2667,15 @@ fn summarize_whatsapp_session_memory(
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_tools_for_runtime, deterministic_guest_tools_plan, load_telegram_offset,
-        load_telegram_transcript, save_telegram_offset, save_telegram_transcript,
-        should_enter_idle_sleep, split_telegram_chunks, telegram_firecracker_requirement_error,
-        telegram_transcript_path, RuntimeExecutionMode, TelegramTranscript,
-        TelegramTranscriptMessage, ToolPlan, TELEGRAM_TRANSCRIPT_MAX_TURNS,
+        allowed_tools_for_runtime, deterministic_guest_tools_plan, handle_guest_job_trigger,
+        load_telegram_offset, load_telegram_transcript, resolve_owner_user_id,
+        save_telegram_offset, save_telegram_transcript, should_enter_idle_sleep,
+        split_telegram_chunks, telegram_firecracker_requirement_error, telegram_transcript_path,
+        ChannelSource, RuntimeExecutionMode, TelegramTranscript, TelegramTranscriptMessage,
+        ToolPlan, TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
+    use common::proto::ironclaw::{message_envelope, MessageEnvelope};
+    use common::transport::{LocalTransport, Transport};
 
     #[test]
     fn tooltest_write_plans_file_write() {
@@ -2397,6 +2799,102 @@ mod tests {
 
         let firecracker_with_bash = allowed_tools_for_runtime(false, true);
         assert!(firecracker_with_bash.iter().any(|tool| tool == "bash"));
+    }
+
+    #[test]
+    fn channel_owner_identity_routes_across_sources() {
+        assert_eq!(
+            resolve_owner_user_id(ChannelSource::Telegram, None),
+            "owner".to_string()
+        );
+        assert_eq!(
+            resolve_owner_user_id(ChannelSource::WhatsApp, None),
+            "owner".to_string()
+        );
+        assert_eq!(
+            resolve_owner_user_id(ChannelSource::WebSocket, Some("owner")),
+            "owner".to_string()
+        );
+        assert_eq!(
+            resolve_owner_user_id(ChannelSource::WebSocket, Some("alice")),
+            "alice".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_job_trigger_wakes_agent_and_reports_status() {
+        let (host, mut guest) = LocalTransport::pair(16);
+        let mut host_box: Box<dyn Transport> = Box::new(host);
+        let guest_task = tokio::spawn(async move {
+            // host should wake sleeping agent before scheduling the job
+            let wake = guest
+                .recv()
+                .await
+                .expect("wake recv")
+                .expect("wake envelope");
+            assert!(matches!(
+                wake.payload,
+                Some(message_envelope::Payload::AgentControl(_))
+            ));
+            // host requests scheduled job execution
+            let run = guest.recv().await.expect("run recv").expect("run envelope");
+            let call_id = match run.payload {
+                Some(message_envelope::Payload::ToolCallRequest(req)) => {
+                    assert_eq!(req.tool, "run_scheduled_job".to_string());
+                    assert_eq!(req.input, "cron-test".to_string());
+                    req.call_id
+                }
+                _ => panic!("expected run_scheduled_job call"),
+            };
+            guest
+                .send(MessageEnvelope {
+                    user_id: "owner".to_string(),
+                    session_id: "session".to_string(),
+                    msg_id: 77,
+                    timestamp_ms: 1,
+                    cap_token: String::new(),
+                    payload: Some(message_envelope::Payload::ToolCallResponse(
+                        common::proto::ironclaw::ToolCallResponse {
+                            call_id,
+                            ok: true,
+                            output: "ok".to_string(),
+                        },
+                    )),
+                })
+                .await
+                .expect("send tool response");
+            let status = guest
+                .recv()
+                .await
+                .expect("status recv")
+                .expect("status envelope");
+            match status.payload {
+                Some(message_envelope::Payload::JobStatus(job)) => {
+                    assert_eq!(job.job_id, "cron-test".to_string());
+                    assert_eq!(job.status, "success".to_string());
+                }
+                _ => panic!("expected job status"),
+            }
+        });
+
+        let mut msg_id = 2u64;
+        let mut guest_sleeping = true;
+        handle_guest_job_trigger(
+            &mut host_box,
+            "owner",
+            "session",
+            &mut msg_id,
+            &mut guest_sleeping,
+            common::proto::ironclaw::JobTrigger {
+                job_id: "cron-test".to_string(),
+            },
+            "test",
+        )
+        .await
+        .expect("handle job trigger");
+        assert!(!guest_sleeping);
+        assert_eq!(msg_id, 5);
+        guest_task.await.expect("guest task");
     }
 
     #[test]
