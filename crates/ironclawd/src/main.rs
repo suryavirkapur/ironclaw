@@ -321,9 +321,7 @@ enum ChannelSource {
 fn resolve_owner_user_id(source: ChannelSource, inbound_user_id: Option<&str>) -> String {
     match source {
         ChannelSource::WebSocket => inbound_user_id.unwrap_or("local").to_string(),
-        ChannelSource::Telegram | ChannelSource::WhatsApp => {
-            inbound_user_id.unwrap_or("owner").to_string()
-        }
+        ChannelSource::Telegram | ChannelSource::WhatsApp => "owner".to_string(),
     }
 }
 
@@ -2269,8 +2267,10 @@ async fn run_whatsapp_loop(
                         users_root,
                     ) {
                         Ok(mut session) => {
-                            session.user_id =
-                                resolve_owner_user_id(ChannelSource::WhatsApp, None);
+                            session.user_id = resolve_owner_user_id(
+                                ChannelSource::WhatsApp,
+                                Some(&incoming.sender_jid),
+                            );
                             sessions.insert(incoming.sender_jid.clone(), session);
                         }
                         Err(err) => {
@@ -2808,7 +2808,15 @@ mod tests {
             "owner".to_string()
         );
         assert_eq!(
+            resolve_owner_user_id(ChannelSource::Telegram, Some("123456")),
+            "owner".to_string()
+        );
+        assert_eq!(
             resolve_owner_user_id(ChannelSource::WhatsApp, None),
+            "owner".to_string()
+        );
+        assert_eq!(
+            resolve_owner_user_id(ChannelSource::WhatsApp, Some("15551234567@s.whatsapp.net")),
             "owner".to_string()
         );
         assert_eq!(

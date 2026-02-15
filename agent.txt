@@ -1,9 +1,9 @@
 current context:
-- host channel routing now uses a shared owner identity resolver across websocket, telegram, and whatsapp ingress
-- cron jobtrigger handling now traces full flow and explicitly wakes sleeping guest agents before scheduled execution
-- whatsapp path now supports guest transport lifecycle (vm check/start, auth, wake, vsock forwarding, stream delta handling)
-- vm manager now exposes `is_vm_running(user_id)`; host logs vm running state before spawn
-- integration tests cover cron-trigger wake/run/status behavior and owner identity routing across channels
+- cron jobtrigger host handling now wakes sleeping guest agents, runs scheduled jobs, and sends jobstatus with debug traces
+- vm manager now exposes `is_vm_running(user_id)` and host logs vm lookup state before spawn/start
+- channel ingress now resolves owner-keyed identity across websocket, telegram, and whatsapp
+- whatsapp now uses guest transport lifecycle with vm check/start, auth, wake/sleep, vsock forwarding, and streamed deltas
+- integration tests cover cron-trigger wake/run/status and channel owner identity routing
 
 pending tasks:
 - rerun websocket smoke scripts on a host where tcp bind is permitted (current sandbox blocks bind)
@@ -11,15 +11,15 @@ pending tasks:
 - run manual firecracker and telegram/whatsapp e2e flows on a host with required runtime permissions
 
 important decisions:
-- kept agent ownership keyed by user identity (`owner` for telegram/whatsapp, explicit `user_id` for websocket)
-- reused existing guest job execution contract (`run_scheduled_job`) and wrapped it in host-side trigger orchestration with debug logs
-- aligned whatsapp with telegram guest-mode semantics instead of keeping host-only execution
+- kept owner identity canonical for telegram/whatsapp as `owner`; websocket keeps explicit `user_id`
+- reused existing guest `run_scheduled_job` tool path to execute cron work after host-trigger orchestration
+- aligned whatsapp guest-mode behavior with telegram/websocket wake-forward-stream semantics
 
 architectural notes:
-- jobtrigger flow is now: guest scheduler emits trigger -> host wake if sleeping -> host sends `run_scheduled_job` -> host emits `jobstatus`
-- channel message flow is now: ingress identity resolve -> vm running check/log -> transport ensure -> wake if needed -> vsock send/recv stream
-- guest sleep state is tracked per channel session and transitioned by explicit `agentcontrol` messages
+- jobtrigger flow: guest scheduler emits trigger -> host wakes agent (if sleeping) -> host requests `run_scheduled_job` -> host sends `jobstatus`
+- channel flow: ingress -> resolve owner identity -> vm running check -> transport ensure -> wake (if sleeping) -> vsock send/recv stream
+- guest sleep state remains session-tracked and controlled via explicit `agentcontrol` messages
 
 plan:
 - run full integration smoke for websocket + telegram + whatsapp routing against firecracker runtime
-- add cross-channel single-transport session coordination if concurrent owner traffic requires avoiding vm restarts
+- evaluate cross-channel single-transport coordination if concurrent owner traffic needs stronger vm reuse guarantees

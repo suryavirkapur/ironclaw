@@ -1,3 +1,8 @@
+0.3.2 2026-02-15
+- routed whatsapp, telegram, and websocket ingress through owner-keyed agent identity resolution
+- completed whatsapp guest routing flow with vm check/start, wake, vsock forward, and streamed responses
+- added channel routing assertions to verify owner-keyed identity behavior across channels
+
 0.3.1 2026-02-15
 - fixed host jobtrigger handling to wake sleeping guest agent, run scheduled job, and send jobstatus with debug tracing
 - added vm running-state checks to vm manager and host vm spawn logging
