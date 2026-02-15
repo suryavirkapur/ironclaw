@@ -298,12 +298,15 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "prost",
  "prost-build",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "znskr-firecracker",
 ]
 
@@ -1341,6 +1344,7 @@ dependencies = [
  "log",
  "memory",
  "mime_guess",
+ "nix 0.27.1",
  "qr2term",
  "rand",
  "reqwest",
@@ -1375,6 +1379,7 @@ dependencies = [
  "tokio-vsock",
  "toml",
  "tools",
+ "tracing",
 ]
 
 [[package]]
@@ -1496,6 +1501,15 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
 
 [[package]]
 name = "matchit"
@@ -2911,10 +2925,14 @@ version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f30143827ddab0d256fd843b7a66d164e9f271cfa0dde49142c5ca0ca291f1e"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
 ]

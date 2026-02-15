@@ -1,3 +1,20 @@
+0.7.0 2026-02-15
+- added shared `common::logging` module with levels:
+  `noop`, `error`, `warn`, `info`, `debug`, `trace` (default `info`)
+- wired host and guest `log_level` config parsing and runtime logging initialization
+- added dynamic logging level reload and manual log rotation hooks
+- added ironclawd daemon cli flags:
+  `--daemon`, `--pid-file <path>`, `--stop`
+- implemented pid file lifecycle management with runtime dir fallback to
+  `/var/run/ironclaw` or `~/.local/share/ironclaw`
+- added daemon signal handling:
+  sigterm for graceful shutdown, sighup for config/log level reload, sigusr1 for log rotation
+- added host daemon config section with:
+  `pid_file`, `log_file`, `graceful_timeout_ms`, `log_rotate_keep`, `log_rotate_max_bytes`
+- implemented rotating log file sink with size and daily rotation,
+  gzip compression, and rotated-file retention
+- added unit tests for log level filtering and integration test for daemon start/stop
+
 0.6.1 2026-02-15
 - implemented sqlite blob vector storage in `embeddings(id, chunk_id, vector, model)` with
   pure-sql cosine ranking via registered sqlite scalar functions

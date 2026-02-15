@@ -1,5 +1,6 @@
 execution_mode = "guest_autonomous"
 idle_timeout_minutes = 5
+log_level = "info"
 
 [server]
 bind = "127.0.0.1"
@@ -24,3 +25,10 @@ rootfs_path = "rootfs/build/guest-rootfs.ext4"
 api_socket_dir = "/tmp/ironclaw-fc"
 vsock_uds_dir = "/tmp/ironclaw/vsock"
 vsock_port = 5000
+
+[daemon]
+pid_file = "/tmp/ironclaw/ironclawd.pid"
+log_file = "/tmp/ironclaw/ironclawd.log"
+graceful_timeout_ms = 5000
+log_rotate_keep = 5
+log_rotate_max_bytes = 10485760

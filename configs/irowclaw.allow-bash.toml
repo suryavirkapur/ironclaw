@@ -1,4 +1,5 @@
 default_agent = "default"
+log_level = "info"
 
 [tools]
 allow_bash = true

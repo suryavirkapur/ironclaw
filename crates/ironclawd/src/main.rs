@@ -1,6 +1,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
 mod auth_transport;
+mod daemon;
 mod host_tools;
 mod llm_client;
 mod soul_guard;
@@ -17,6 +18,7 @@ use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
+use common::logging::{init_logging, LoggingConfig, LoggingHandle};
 use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
@@ -38,8 +40,9 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use whatsapp::should_enable_whatsapp;
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
@@ -52,7 +55,50 @@ const IDLE_CHECK_SECONDS: u64 = 10;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
-    let config = load_host_config()?;
+    let cli = daemon::CliArgs::parse()?;
+    let config_path = host_config_path()?;
+    let config = load_host_config_from_path(&config_path)?;
+    let pid_file = resolve_pid_file(&cli, &config)?;
+
+    if cli.stop {
+        daemon::stop_daemon(&pid_file)?;
+        return Ok(());
+    }
+
+    if cli.should_spawn_daemon() {
+        daemon::spawn_daemon_child(&cli)?;
+        return Ok(());
+    }
+
+    let _pid_file_guard =
+        if cli.daemon_child || cli.pid_file.is_some() || config.daemon.pid_file.is_some() {
+            Some(daemon::PidFileGuard::create(pid_file)?)
+        } else {
+            None
+        };
+
+    let logging = init_logging(LoggingConfig {
+        level: config.log_level,
+        log_file: config.daemon.log_file.clone(),
+        rotate_keep: config.daemon.log_rotate_keep,
+        rotate_max_bytes: config.daemon.log_rotate_max_bytes,
+    })
+    .map_err(|err| IronclawError::new(format!("logging init failed: {err}")))?;
+
+    run_server(config, config_path, logging).await
+}
+
+async fn run_server(
+    config: HostConfig,
+    config_path: PathBuf,
+    logging: LoggingHandle,
+) -> Result<(), IronclawError> {
+    let graceful_timeout = Duration::from_millis(config.daemon.graceful_timeout_ms);
+    spawn_reload_signal_task(config_path, logging);
+    if test_no_bind_enabled() {
+        return run_no_bind_daemon().await;
+    }
+
     let run_telegram = should_enable_telegram(&config);
     let telegram_settings = if run_telegram {
         Some(TelegramSettings::from_config(&config)?)
@@ -78,7 +124,6 @@ async fn main() -> Result<(), IronclawError> {
         )
         .with_state(state.clone());
 
-    tracing_subscriber::fmt::init();
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|err| IronclawError::new(format!("bind failed: {err}")))?;
@@ -94,7 +139,7 @@ async fn main() -> Result<(), IronclawError> {
         }
     });
 
-    let server_task = tokio::spawn(async move {
+    let mut server_task = tokio::spawn(async move {
         let mut rx = shutdown_server_rx;
         axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -111,7 +156,7 @@ async fn main() -> Result<(), IronclawError> {
             .map_err(|err| IronclawError::new(format!("server failed: {err}")))
     });
 
-    let telegram_task = if let Some(settings) = telegram_settings {
+    let mut telegram_task = if let Some(settings) = telegram_settings {
         let telegram_state = state.clone();
         let rx = shutdown_rx.clone();
         Some(tokio::spawn(async move {
@@ -121,7 +166,7 @@ async fn main() -> Result<(), IronclawError> {
         None
     };
 
-    let whatsapp_task = if let Some(wa_config) = whatsapp_config {
+    let mut whatsapp_task = if let Some(wa_config) = whatsapp_config {
         let whatsapp_state = state.clone();
         let rx = shutdown_rx.clone();
         Some(tokio::spawn(async move {
@@ -131,53 +176,194 @@ async fn main() -> Result<(), IronclawError> {
         None
     };
 
+    #[cfg(unix)]
+    let mut sigterm_stream =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|err| IronclawError::new(format!("sigterm signal setup failed: {err}")))?;
+
     tokio::select! {
-        result = server_task => {
+        result = &mut server_task => {
             let _ = shutdown_tx.send(true);
-            match result {
-                Ok(value) => value,
-                Err(err) => Err(IronclawError::new(format!("server task join failed: {err}"))),
-            }
+            join_server_task_result(result)
         }
-        result = async {
-            if let Some(task) = telegram_task {
-                match task.await {
-                    Ok(value) => value,
-                    Err(err) => {
-                        Err(IronclawError::new(format!(
-                            "telegram task join failed: {err}"
-                        )))
-                    }
-                }
-            } else {
-                std::future::pending::<Result<(), IronclawError>>().await
-            }
-        } => {
+        result = join_optional_task(&mut telegram_task, "telegram") => {
             let _ = shutdown_tx.send(true);
             result
         }
-        result = async {
-            if let Some(task) = whatsapp_task {
-                match task.await {
-                    Ok(value) => value,
-                    Err(err) => {
-                        Err(IronclawError::new(format!(
-                            "whatsapp task join failed: {err}"
-                        )))
-                    }
-                }
-            } else {
-                std::future::pending::<Result<(), IronclawError>>().await
-            }
-        } => {
+        result = join_optional_task(&mut whatsapp_task, "whatsapp") => {
             let _ = shutdown_tx.send(true);
             result
         }
         signal = tokio::signal::ctrl_c() => {
             let _ = signal;
             let _ = shutdown_tx.send(true);
-            Ok(())
+            await_shutdown(
+                &mut server_task,
+                &mut telegram_task,
+                &mut whatsapp_task,
+                graceful_timeout,
+            )
+            .await
         }
+        _ = async {
+            #[cfg(unix)]
+            {
+                let _ = sigterm_stream.recv().await;
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            let _ = shutdown_tx.send(true);
+            await_shutdown(
+                &mut server_task,
+                &mut telegram_task,
+                &mut whatsapp_task,
+                graceful_timeout,
+            )
+            .await
+        }
+    }
+}
+
+fn test_no_bind_enabled() -> bool {
+    std::env::var("IRONCLAWD_TEST_NO_BIND")
+        .ok()
+        .as_deref()
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+async fn run_no_bind_daemon() -> Result<(), IronclawError> {
+    #[cfg(unix)]
+    {
+        let mut sigterm_stream =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|err| IronclawError::new(format!("sigterm signal setup failed: {err}")))?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Ok(()),
+            _ = sigterm_stream.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|err| IronclawError::new(format!("ctrl_c failed: {err}")))?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn spawn_reload_signal_task(config_path: PathBuf, logging: LoggingHandle) {
+    tokio::spawn(async move {
+        let hup_result = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup());
+        let usr1_result =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1());
+        let mut hup = match hup_result {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!("sighup signal setup failed: {err}");
+                return;
+            }
+        };
+        let mut usr1 = match usr1_result {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!("sigusr1 signal setup failed: {err}");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                _ = hup.recv() => {
+                    match load_host_config_from_path(&config_path) {
+                        Ok(reloaded) => {
+                            if let Err(err) = logging.set_level(reloaded.log_level) {
+                                tracing::error!("sighup logging reload failed: {err}");
+                            } else {
+                                tracing::info!("sighup reloaded logging level");
+                            }
+                        }
+                        Err(err) => tracing::error!("sighup config reload failed: {err}"),
+                    }
+                }
+                _ = usr1.recv() => {
+                    if let Err(err) = logging.rotate_logs() {
+                        tracing::error!("sigusr1 log rotation failed: {err}");
+                    } else {
+                        tracing::info!("sigusr1 rotated logs");
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_reload_signal_task(_config_path: PathBuf, _logging: LoggingHandle) {}
+
+fn resolve_pid_file(cli: &daemon::CliArgs, config: &HostConfig) -> Result<PathBuf, IronclawError> {
+    if let Some(path) = &cli.pid_file {
+        return Ok(path.clone());
+    }
+    if let Some(path) = &config.daemon.pid_file {
+        return Ok(path.clone());
+    }
+    let runtime_dir = daemon::default_runtime_dir()?;
+    Ok(runtime_dir.join("ironclawd.pid"))
+}
+
+fn join_server_task_result(
+    result: Result<Result<(), IronclawError>, tokio::task::JoinError>,
+) -> Result<(), IronclawError> {
+    match result {
+        Ok(value) => value,
+        Err(err) => Err(IronclawError::new(format!(
+            "server task join failed: {err}"
+        ))),
+    }
+}
+
+async fn join_optional_task(
+    task: &mut Option<JoinHandle<Result<(), IronclawError>>>,
+    name: &str,
+) -> Result<(), IronclawError> {
+    if let Some(handle) = task.take() {
+        match handle.await {
+            Ok(value) => value,
+            Err(err) => Err(IronclawError::new(format!(
+                "{name} task join failed: {err}"
+            ))),
+        }
+    } else {
+        std::future::pending::<Result<(), IronclawError>>().await
+    }
+}
+
+async fn await_shutdown(
+    server_task: &mut JoinHandle<Result<(), IronclawError>>,
+    telegram_task: &mut Option<JoinHandle<Result<(), IronclawError>>>,
+    whatsapp_task: &mut Option<JoinHandle<Result<(), IronclawError>>>,
+    graceful_timeout: Duration,
+) -> Result<(), IronclawError> {
+    let wait_all = async {
+        let server_result = server_task.await;
+        let _ = join_server_task_result(server_result);
+        if let Some(handle) = telegram_task.take() {
+            let _ = handle.await;
+        }
+        if let Some(handle) = whatsapp_task.take() {
+            let _ = handle.await;
+        }
+    };
+
+    match tokio::time::timeout(graceful_timeout, wait_all).await {
+        Ok(_) => Ok(()),
+        Err(_) => Err(IronclawError::new(
+            "graceful shutdown timed out before tasks completed",
+        )),
     }
 }
 
@@ -970,14 +1156,12 @@ fn ui_file_response(path: &str) -> Response {
     }
 }
 
-fn load_host_config() -> Result<HostConfig, IronclawError> {
-    let path = host_config_path()?;
+fn load_host_config_from_path(path: &StdPath) -> Result<HostConfig, IronclawError> {
     if path.exists() {
-        let contents = std::fs::read_to_string(&path)
+        let contents = std::fs::read_to_string(path)
             .map_err(|err| IronclawError::new(format!("config read failed: {err}")))?;
-        let config: HostConfig = toml::from_str(&contents)
-            .map_err(|err| IronclawError::new(format!("config parse failed: {err}")))?;
-        Ok(config)
+        toml::from_str(&contents)
+            .map_err(|err| IronclawError::new(format!("config parse failed: {err}")))
     } else {
         let users_root = PathBuf::from("data/users");
         Ok(HostConfig::default_for_local(users_root))

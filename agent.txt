@@ -1,25 +1,26 @@
 current context:
-- memory crate now implements hybrid retrieval with sqlite fts5 + blob vectors and weighted fusion
-- vector search uses pure-sql cosine ranking with sqlite scalar functions (`vec_dot`, `vec_norm`)
-- markdown indexing now preserves heading hierarchy and stable chunk ids for document provenance
-- guest runtime retrieval now uses hybrid search config and returns path, heading, ordinal, and text
+- added shared logging stack in `crates/common/src/logging.rs` with dynamic level reload support
+- host and guest config now include `log_level` with default `info`
+- ironclawd now supports daemon lifecycle flags, pid files, and unix signal hooks
+- host daemon config now includes pid/log path, graceful shutdown timeout, and log rotation settings
+- log sink supports size/daily rotation with gzip compression and retention trimming
 
 pending tasks:
-- validate retrieval quality against real project markdown corpus and tune fusion weights if needed
-- decide whether to add remote embedding provider support beyond local `simple-384` fallback
-- run full smoke tests in an environment with network and vm permissions before release
+- validate daemon behavior against a real network-enabled runtime environment
+- decide if stop flow should actively wait for full process exit in non-sandbox deployments
+- expand config reload scope beyond logging to full runtime mutable settings
 
 important decisions:
-- kept sqlite-only storage for vectors and cache; no external vector database dependency
-- added backward-compatible config aliases for `semantic_weight` and `lexical_weight`
-- used lru cache policy by updating `embedding_cache.created_at` on hit and pruning oldest rows
+- implemented shared logging in `common` so host and guest use one level model
+- used runtime reload handle for log level changes on sighup
+- added a no-bind daemon test mode (`IRONCLAWD_TEST_NO_BIND=1`) for integration tests under sandbox restrictions
 
 architectural notes:
-- indexing flow: markdown chunk -> chunk upsert/delete -> atomic fts rebuild
-  -> re-embed missing vectors
-- retrieval flow: bm25 fts + semantic cosine -> weighted fusion -> provenance summary output
-- fallback flow: if embedding generation fails, retrieval falls back to sql like matching
+- logging initialization now happens before host runtime startup and before guest transport loop startup
+- daemon start flow forks by spawning a detached child with `--daemon-child`
+- stop flow reads pid file and sends sigterm; pid file cleanup is handled in stop and normal daemon teardown
+- signal model: sigterm triggers shutdown path, sighup reloads host config for logging level, sigusr1 rotates logs
 
 plan:
-- monitor retrieval relevance and cache hit rate during real usage
-- add optional telemetry counters for indexing/retrieval latency if performance tuning is needed
+- monitor log rotation behavior and tune default max size/retention values from production data
+- add richer daemon health probes if service supervision tooling is introduced

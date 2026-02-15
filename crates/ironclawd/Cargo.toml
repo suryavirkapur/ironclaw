@@ -13,6 +13,7 @@ include_dir = "*"
 irowclaw = { path = "../irowclaw" }
 memory = { path = "../memory" }
 mime_guess = "*"
+nix = { version = "*", features = ["signal"] }
 reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
