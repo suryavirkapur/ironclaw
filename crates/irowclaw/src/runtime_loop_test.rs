@@ -171,7 +171,20 @@ async fn scheduler_trigger_wakes_and_runs_job_on_host_request() {
     std::fs::write(
         root.join("config").join("irowclaw.toml"),
         format!(
-            "default_agent = \"default\"\n[tools]\nallow_bash = false\nallow_file = true\n[indexing]\nmax_chunk_bytes = 2048\nsemantic_weight = 0.7\nlexical_weight = 0.3\n[scheduler]\njobs_path = \"{}\"\n",
+            concat!(
+                "default_agent = \"default\"\n",
+                "[tools]\n",
+                "allow_bash = false\n",
+                "allow_file = true\n",
+                "[indexing]\n",
+                "max_chunk_bytes = 2048\n",
+                "embedding_model = \"text-embedding-3-small\"\n",
+                "vector_weight = 0.7\n",
+                "keyword_weight = 0.3\n",
+                "embedding_cache_size = 1000\n",
+                "[scheduler]\n",
+                "jobs_path = \"{}\"\n",
+            ),
             root.join("cron/jobs.toml").display()
         ),
     )
@@ -212,12 +225,11 @@ async fn scheduler_trigger_wakes_and_runs_job_on_host_request() {
     let mut saw_sleep_ack = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        let maybe = match tokio::time::timeout(std::time::Duration::from_millis(500), host.recv())
-            .await
-        {
-            Ok(value) => value.expect("recv trigger window"),
-            Err(_) => continue,
-        };
+        let maybe =
+            match tokio::time::timeout(std::time::Duration::from_millis(500), host.recv()).await {
+                Ok(value) => value.expect("recv trigger window"),
+                Err(_) => continue,
+            };
         let Some(envelope) = maybe else {
             continue;
         };

@@ -50,8 +50,8 @@ impl LocalTransport {
 #[async_trait]
 impl Transport for LocalTransport {
     async fn send(&mut self, message: MessageEnvelope) -> Result<(), TransportError> {
-        let bytes = ProtoCodec::encode(&message)
-            .map_err(|err| TransportError::new(err.to_string()))?;
+        let bytes =
+            ProtoCodec::encode(&message).map_err(|err| TransportError::new(err.to_string()))?;
         self.tx
             .send(bytes)
             .await

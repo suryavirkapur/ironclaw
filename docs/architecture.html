@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ironclaw Architecture</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 {
+            color: #e94560;
+            border-bottom: 2px solid #e94560;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #0f3460;
+            background: #16213e;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #e94560;
+        }
+        code {
+            background: #0f3460;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        pre {
+            background: #0f3460;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .diagram {
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 15px 0;
+            text-align: center;
+        }
+        .diagram pre {
+            text-align: left;
+            margin: 0;
+        }
+        .component {
+            display: inline-block;
+            background: #e94560;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 5px;
+            margin: 5px;
+        }
+        .component.secondary {
+            background: #0f3460;
+            border: 2px solid #e94560;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        th, td {
+            border: 1px solid #0f3460;
+            padding: 10px;
+            text-align: left;
+        }
+        th {
+            background: #0f3460;
+        }
+        .nav {
+            position: sticky;
+            top: 0;
+            background: #16213e;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .nav a {
+            color: #e94560;
+            margin-right: 15px;
+            text-decoration: none;
+        }
+        .nav a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>Ironclaw Architecture</h1>
+
+    <div class="nav">
+        <a href="#overview">Overview</a>
+        <a href="#structure">Structure</a>
+        <a href="#components">Components</a>
+        <a href="#flow">Data Flow</a>
+        <a href="#tech">Tech Stack</a>
+        <a href="#patterns">Patterns</a>
+        <a href="#openclaw">OpenClaw</a>
+    </div>
+
+    <h2 id="overview">What is Ironclaw?</h2>
+    <p>
+        Ironclaw is a <strong>sovereign, self-hosted AI agent platform</strong> built for absolute data ownership
+        and maximum security via a strict hypervisor-agent architecture.
+    </p>
+    <p>
+        It implements a <strong>"jail cell"</strong> model where the Warden (host) boots isolated VMs
+        and the Inmate (guest) runs inside that sandbox with its own memory system.
+    </p>
+
+    <h2 id="structure">Directory Structure</h2>
+    <pre>
+ironclaw/
+├── crates/
+│   ├── ironclawd/          # Host daemon (Warden)
+│   ├── irowclaw/           # Guest runtime (Inmate)
+│   ├── common/             # Shared protocol, config, transport
+│   ├── memory/             # SQLite FTS5 memory system
+│   └── tools/              # Guest tool registry
+├── ui/                     # Frontend (WebSocket chat)
+├── configs/                # Example TOML configs
+├── scripts/                # Build + smoke tests
+├── data/                   # Runtime data per user
+│   └── users/
+│       ├── local/guest/    # Local guest mode brain
+│       │   ├── soul.md     # Persona + safety boundaries
+│       │   ├── identity.md # Agent name + user facts
+│       │   ├── memory.md   # Long-term memory
+│       │   └── workspace/  # File tool workspace
+│       └── telegram-*/     # Telegram user sessions
+└── rootfs/guest-skel/      # VM skeleton filesystem
+    </pre>
+
+    <h2 id="components">Main Components</h2>
+
+    <h3>1. ironclawd (Host Daemon)</h3>
+    <p>The Warden - a Rust daemon that:</p>
+    <ul>
+        <li>Runs an Axum HTTP server with WebSocket support</li>
+        <li>Handles Telegram bot integration (long-polling)</li>
+        <li>Manages Firecracker VM lifecycle (or stub VM for testing)</li>
+        <li>Integrates with LLM providers (OpenAI-compatible APIs)</li>
+        <li>Proxies traffic to guests over vsock</li>
+    </ul>
+
+    <h3>2. irowclaw (Guest Runtime)</h3>
+    <p>The Inmate - runs inside the VM and:</p>
+    <ul>
+        <li>Executes the cognition loop (LLM + tools)</li>
+        <li>Enforces safety (prompt injection detection, policy checks)</li>
+        <li>Manages sovereign memory with hybrid retrieval</li>
+        <li>Runs sandboxed tools (file_read, file_write, bash)</li>
+        <li>Executes cron-like scheduled jobs</li>
+    </ul>
+
+    <h3>3. common (Shared Library)</h3>
+    <ul>
+        <li><strong>Protocol</strong>: Protobuf message definitions</li>
+        <li><strong>Transport</strong>: Async trait for vsock, stdio, WebSocket</li>
+        <li><strong>Config</strong>: TOML config deserialization</li>
+        <li><strong>Firecracker</strong>: VM lifecycle management</li>
+    </ul>
+
+    <h3>4. memory (SQLite + Indexing)</h3>
+    <ul>
+        <li>FTS5 full-text search with BM25 ranking</li>
+        <li>Hybrid fusion (semantic + lexical)</li>
+        <li>Memory operations: upsert, retrieve, pin, forget, summarize</li>
+    </ul>
+
+    <h3>5. tools (Tool Registry)</h3>
+    <ul>
+        <li>Dynamic tool registration with allowlist enforcement</li>
+        <li><strong>FileReadTool</strong>: Read within workspace (path traversal protection)</li>
+        <li><strong>FileWriteTool</strong>: Write within workspace</li>
+        <li><strong>RestrictedBashTool</strong>: Shell with guardrails</li>
+    </ul>
+
+    <h2 id="flow">How Data Flows</h2>
+
+    <h3>Execution Modes</h3>
+    <table>
+        <tr>
+            <th>Mode</th>
+            <th>Description</th>
+        </tr>
+        <tr>
+            <td><strong>HostOnly</strong></td>
+            <td>Host does planning + tool execution</td>
+        </tr>
+        <tr>
+            <td><strong>GuestTools</strong></td>
+            <td>Host routes to guest; guest asks for plan, executes allowlisted tools</td>
+        </tr>
+        <tr>
+            <td><strong>GuestAutonomous</strong></td>
+            <td>Guest does planning + execution locally</td>
+        </tr>
+    </table>
+
+    <h3>WebSocket Message Flow</h3>
+    <div class="diagram">
+<pre>
+┌─────────────┐
+│   User     │
+│ (Browser)  │
+└─────┬───────┘
+      │ WebSocket
+      ▼
+┌─────────────────┐
+│   ironclawd     │
+│ (WebSocket)     │
+└─────┬───────────┘
+      │
+      ├──────────────────────┐
+      │                      │
+      ▼                      ▼
+┌─────────────┐      ┌─────────────┐
+│ HostOnly    │      │ GuestTools/ │
+│             │      │ GuestAuto   │
+└─────┬───────┘      └─────┬───────┘
+      │                     │
+      ▼                     ▼
+┌─────────────┐      ┌─────────────┐
+│ LLM Client  │      │ VM Transport│
+│ + Tools     │      │ (vsock)     │
+└─────┬───────┘      └─────┬───────┘
+      │                     │
+      │                     ▼
+      │              ┌─────────────┐
+      │              │  irowclaw   │
+      │              │ (guest)     │
+      │              └─────┬───────┘
+      │                    │
+      │                    ├─ Safety Layer
+      │                    ├─ Tool Execution
+      │                    └─ Memory Retrieval
+      │                    │
+      └────────────────────┘
+            │
+            ▼
+      StreamDelta response
+</pre>
+    </div>
+
+    <h3>Telegram Flow</h3>
+    <div class="diagram">
+<pre>
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Telegram   │────▶│  ironclawd  │────▶│   irowclaw  │
+│    User     │     │ (long-poll) │     │   (guest)   │
+└─────────────┘     └──────┬──────┘     └─────────────┘
+                           │
+                           ▼
+                    Memory commands
+                    (remember, pins, forget)
+</pre>
+    </div>
+
+    <h2 id="tech">Technology Stack</h2>
+    <table>
+        <tr>
+            <th>Component</th>
+            <th>Technology</th>
+            <th>Why</th>
+        </tr>
+        <tr>
+            <td>Language</td>
+            <td>Rust</td>
+            <td>Memory safety, async (tokio), performance</td>
+        </tr>
+        <tr>
+            <td>HTTP Server</td>
+            <td>Axum</td>
+            <td>Modern, async, WebSocket support</td>
+        </tr>
+        <tr>
+            <td>Serialization</td>
+            <td>Protobuf (prost)</td>
+            <td>Efficient binary framing for vsock</td>
+        </tr>
+        <tr>
+            <td>Database</td>
+            <td>SQLite + FTS5</td>
+            <td>Embedded, file-first, full-text search</td>
+        </tr>
+        <tr>
+            <td>VM</td>
+            <td>Firecracker</td>
+            <td>Lightweight isolation, fast startup</td>
+        </tr>
+        <tr>
+            <td>Transport</td>
+            <td>vsock</td>
+            <td>Host-guest without network</td>
+        </tr>
+        <tr>
+            <td>Frontend</td>
+            <td>Vanilla JS + CSS</td>
+            <td>Minimal, embeddable</td>
+        </tr>
+        <tr>
+            <td>Config</td>
+            <td>TOML</td>
+            <td>Human-readable, Rust standard</td>
+        </tr>
+        <tr>
+            <td>Async</td>
+            <td>Tokio</td>
+            <td>Mature async runtime</td>
+        </tr>
+    </table>
+
+    <h2 id="patterns">Key Architectural Patterns</h2>
+
+    <h3>Transport Abstraction</h3>
+    <p>The <code>Transport</code> trait enables different transports (vsock, stdio, WebSocket) - allowing the same guest code to run in a VM, locally, or over a network.</p>
+
+    <h3>Capability Tokens</h3>
+    <p>Host issues <code>cap_token</code> via AuthChallenge; all subsequent messages must include it.</p>
+
+    <h3>Tool Allowlisting</h3>
+    <p>Host provides <code>allowed_tools</code> list; guest enforces it.</p>
+
+    <h3>File-First Memory</h3>
+    <p>Markdown is canonical truth; SQLite is a derived index.</p>
+
+    <h3>Hybrid Retrieval</h3>
+    <p>Combines FTS5 lexical + semantic search with configurable weights.</p>
+
+    <h3>Safety Layers</h3>
+    <p>Multiple checkpoints: before acting, before/after tool execution, before outbound.</p>
+
+    <h3>Session Management</h3>
+    <p>Per-user brain.ext4 persistence with transcript rolling window.</p>
+
+    <h2>Ideas for Improvement</h2>
+
+    <h3>High Impact</h3>
+    <ol>
+        <li><strong>Semantic Embeddings</strong> - Currently placeholder; add actual embedding generation for hybrid search</li>
+        <li><strong>Real-time Frontend</strong> - Replace scaffold with a proper UI (SolidJS, React, or Vue)</li>
+        <li><strong>Tool Sandboxing</strong> - Use gVisor or landlock for stronger isolation than bash guards</li>
+        <li><strong>Multi-agent Support</strong> - Enable agents to coordinate with each other</li>
+    </ol>
+
+    <h3>Medium Impact</h3>
+    <ol>
+        <li><strong>Memory Summarization</strong> - Auto-compress old memories with LLM</li>
+        <li><strong>Encrypted Storage</strong> - Add disk encryption for brain.ext4</li>
+        <li><strong>Plugin System</strong> - Dynamic tool loading at runtime</li>
+        <li><strong>Metrics & Observability</strong> - Add tracing, Prometheus metrics</li>
+    </ol>
+
+    <h3>Lower Priority</h3>
+    <ol>
+        <li><strong>Multiple VM Support</strong> - Run multiple guest VMs simultaneously</li>
+        <li><strong>Cloud Storage Backend</strong> - S3-compatible backup/restore</li>
+        <li><strong>Web UI Builder</strong> - Visual tool configuration</li>
+        <li><strong>Voice Interface</strong> - Whisper/STT integration</li>
+    </ol>
+
+    <h2 id="openclaw">OpenClaw Integration</h2>
+
+    <h3>What is OpenClaw?</h3>
+    <p>
+        <a href="https://github.com/anthropics/openclaw">OpenClaw</a> is Anthropic's open-source CLI agent framework.
+        It's a mature, production-ready AI agent that runs locally with deep system integration.
+        Your <code>~/.openclaw</code> directory contains a fully configured OpenClaw installation.
+    </p>
+
+    <h3>OpenClaw Features (What Ironclaw Can Learn From)</h3>
+    <table>
+        <tr>
+            <th>Feature</th>
+            <th>OpenClaw Implementation</th>
+            <th>Ironclaw Integration Idea</th>
+        </tr>
+        <tr>
+            <td><strong>WhatsApp Support</strong></td>
+            <td>Native plugin with E2E encryption, media handling, reactions</td>
+            <td>Reuse OpenClaw's whatsapp plugin via gateway API</td>
+        </tr>
+        <tr>
+            <td><strong>Browser Automation</strong></td>
+            <td>Chrome CDP integration, headless/headed modes</td>
+            <td>Add browser tool via subprocess to OpenClaw</td>
+        </tr>
+        <tr>
+            <td><strong>Cron Jobs</strong></td>
+            <td>Scheduled jobs with agentTurn/systemEvent payloads</td>
+            <td>Adopt same job schema + execution model</td>
+        </tr>
+        <tr>
+            <td><strong>OAuth Auth</strong></td>
+            <td>OpenAI Codex OAuth, multi-provider support</td>
+            <td>Import auth profiles from openclaw.json</td>
+        </tr>
+        <tr>
+            <td><strong>Gateway/Tailscale</strong></td>
+            <td>Local HTTP server with token auth, Tailscale serve</td>
+            <td>Proxy through OpenClaw gateway for external access</td>
+        </tr>
+        <tr>
+            <td><strong>Multi-model</strong></td>
+            <td>OpenRouter, OpenAI Codex, Anthropic native</td>
+            <td>Use same model configs from auth-profiles.json</td>
+        </tr>
+        <tr>
+            <td><strong>Subagents</strong></td>
+            <td>Parallel subagent execution with concurrency limits</td>
+            <td>Delegate to Ironclaw guests as subagents</td>
+        </tr>
+    </table>
+
+    <h3>OpenClaw Config Location</h3>
+    <pre>
+~/.openclaw/
+├── openclaw.json              # Main config (channels, plugins, gateway)
+├── agents/main/agent/auth-profiles.json  # OAuth tokens
+├── credentials/whatsapp/default/creds.json  # WhatsApp session
+├── cron/jobs.json             # Scheduled jobs
+└── workspace/                 # Working files
+    </pre>
+
+    <h3>Integration Strategy</h3>
+    <ol>
+        <li><strong>Gateway Proxy</strong>: Ironclaw calls OpenClaw's gateway API (port 18789) for WhatsApp</li>
+        <li><strong>Tool Delegation</strong>: Ironclaw guest spawns OpenClaw as subprocess for browser/file tools</li>
+        <li><strong>Shared Memory</strong>: Both read/write to same memory.md files</li>
+        <li><strong>Credential Sharing</strong>: Use OpenClaw's WhatsApp credentials directly</li>
+    </ol>
+
+    <h2 id="whatsapp">WhatsApp Integration Plan</h2>
+
+    <h3>Current State</h3>
+    <ul>
+        <li>OpenClaw already has WhatsApp working (credentials in ~/.openclaw/credentials/whatsapp/)</li>
+        <li>Ironclaw has Telegram - needs WhatsApp parity</li>
+    </ul>
+
+    <h3>Approach: Gateway Proxy</h3>
+    <div class="diagram">
+<pre>
+┌─────────────┐    WebSocket    ┌─────────────┐    HTTP     ┌─────────────┐
+│   ironclawd │────────────────▶│ OpenClaw    │────────────▶│  WhatsApp   │
+│   (Rust)    │                 │ Gateway     │             │   (Meta)    │
+└─────────────┘                 │ (Node.js)   │             └─────────────┘
+                                │ port 18789  │
+                                └─────────────┘
+</pre>
+    </div>
+
+    <h3>Implementation Steps</h3>
+    <ol>
+        <li><strong>Start OpenClaw Gateway</strong>: Ensure OpenClaw runs with WhatsApp plugin</li>
+        <li><strong>Add WhatsApp Channel to Ironclaw</strong>: New channel type in ironclawd</li>
+        <li><strong>Implement Gateway Client</strong>: HTTP client to call OpenClaw API</li>
+        <li><strong>Message Translation</strong>: Convert between Ironclaw protocol and OpenClaw format</li>
+        <li><strong>Handle Callbacks</strong>: Receive messages from OpenClaw webhook/gateway</li>
+    </ol>
+
+    <h3>OpenClaw Gateway API</h3>
+    <pre>
+# Start OpenClaw with gateway
+openclaw --gateway
+
+# API endpoints (based on openclaw.json config):
+POST http://localhost:18789/v1/chat  # Send message
+GET  http://localhost:18789/v1/chats # List chats
+</pre>
+
+    <h3>Ironclaw Changes Needed</h3>
+    <pre>
+crates/ironclawd/src/
+├── main.rs           # Add WhatsApp channel startup
+├── whatsapp.rs       # NEW: OpenClaw gateway client
+└── channels.rs       # Channel trait with Telegram/WhatsApp variants
+
+crates/common/src/
+└── config.rs         # Add whatsapp channel config
+    </pre>
+
+    <h3>Alternative: Direct WhatsApp Library</h3>
+    <p>If not proxying through OpenClaw, use <code>baileys</code> (Node.js) or <code>rusty-whatsapp</code> directly:</p>
+    <ul>
+        <li><strong>baileys</strong>: Most mature WhatsApp Web library, used by OpenClaw</li>
+        <li><strong>whatsapp-web-rs</strong>: Rust port of Baileys (less mature)</li>
+        <li><strong>Multi-device API</strong>: Official Meta Business API (requires business verification)</li>
+    </ul>
+
+    <hr>
+    <p style="color: #888; text-align: center;">
+        Ironclaw - Sovereign AI Agents
+    </p>
+</body>
+</html>

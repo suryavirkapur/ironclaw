@@ -1,25 +1,25 @@
 current context:
-- cron jobtrigger host handling now wakes sleeping guest agents, runs scheduled jobs, and sends jobstatus with debug traces
-- vm manager now exposes `is_vm_running(user_id)` and host logs vm lookup state before spawn/start
-- channel ingress now resolves owner-keyed identity across websocket, telegram, and whatsapp
-- whatsapp now uses guest transport lifecycle with vm check/start, auth, wake/sleep, vsock forwarding, and streamed deltas
-- integration tests cover cron-trigger wake/run/status and channel owner identity routing
+- memory crate now implements hybrid retrieval with sqlite fts5 + blob vectors and weighted fusion
+- vector search uses pure-sql cosine ranking with sqlite scalar functions (`vec_dot`, `vec_norm`)
+- markdown indexing now preserves heading hierarchy and stable chunk ids for document provenance
+- guest runtime retrieval now uses hybrid search config and returns path, heading, ordinal, and text
 
 pending tasks:
-- rerun websocket smoke scripts on a host where tcp bind is permitted (current sandbox blocks bind)
-- validate soul guard api from ui integration flow
-- run manual firecracker and telegram/whatsapp e2e flows on a host with required runtime permissions
+- validate retrieval quality against real project markdown corpus and tune fusion weights if needed
+- decide whether to add remote embedding provider support beyond local `simple-384` fallback
+- run full smoke tests in an environment with network and vm permissions before release
 
 important decisions:
-- kept owner identity canonical for telegram/whatsapp as `owner`; websocket keeps explicit `user_id`
-- reused existing guest `run_scheduled_job` tool path to execute cron work after host-trigger orchestration
-- aligned whatsapp guest-mode behavior with telegram/websocket wake-forward-stream semantics
+- kept sqlite-only storage for vectors and cache; no external vector database dependency
+- added backward-compatible config aliases for `semantic_weight` and `lexical_weight`
+- used lru cache policy by updating `embedding_cache.created_at` on hit and pruning oldest rows
 
 architectural notes:
-- jobtrigger flow: guest scheduler emits trigger -> host wakes agent (if sleeping) -> host requests `run_scheduled_job` -> host sends `jobstatus`
-- channel flow: ingress -> resolve owner identity -> vm running check -> transport ensure -> wake (if sleeping) -> vsock send/recv stream
-- guest sleep state remains session-tracked and controlled via explicit `agentcontrol` messages
+- indexing flow: markdown chunk -> chunk upsert/delete -> atomic fts rebuild
+  -> re-embed missing vectors
+- retrieval flow: bm25 fts + semantic cosine -> weighted fusion -> provenance summary output
+- fallback flow: if embedding generation fails, retrieval falls back to sql like matching
 
 plan:
-- run full integration smoke for websocket + telegram + whatsapp routing against firecracker runtime
-- evaluate cross-channel single-transport coordination if concurrent owner traffic needs stronger vm reuse guarantees
+- monitor retrieval relevance and cache hit rate during real usage
+- add optional telemetry counters for indexing/retrieval latency if performance tuning is needed

@@ -1,9 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{params, Connection};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+
+const DEFAULT_EMBEDDING_DIM: usize = 384;
+const DEFAULT_EMBEDDING_CACHE_TTL_MS: u64 = 86_400_000;
 
 #[derive(Clone, Debug)]
 pub struct Chunk {
@@ -58,6 +62,29 @@ pub struct SummaryOutcome {
     pub distilled_count: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct HybridSearchConfig {
+    pub embedding_model: String,
+    pub vector_weight: f32,
+    pub keyword_weight: f32,
+    pub embedding_cache_size: usize,
+    pub max_chunk_bytes: usize,
+    pub embedding_cache_ttl_ms: u64,
+}
+
+impl Default for HybridSearchConfig {
+    fn default() -> Self {
+        Self {
+            embedding_model: "text-embedding-3-small".to_string(),
+            vector_weight: 0.7,
+            keyword_weight: 0.3,
+            embedding_cache_size: 1000,
+            max_chunk_bytes: 2048,
+            embedding_cache_ttl_ms: DEFAULT_EMBEDDING_CACHE_TTL_MS,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("memory error: {message}")]
 pub struct MemoryError {
@@ -74,18 +101,24 @@ impl MemoryError {
 
 pub fn chunk_markdown(path: &str, input: &str, max_bytes: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
+    let mut heading_stack: Vec<String> = Vec::new();
     let mut heading = String::new();
     let mut ordinal = 0u32;
     let mut buffer = String::new();
+    let target_max = max_bytes.max(128);
 
     for line in input.lines() {
-        if is_heading(line) {
+        if let Some((level, heading_text)) = parse_heading(line) {
             if !buffer.trim().is_empty() {
                 chunks.push(build_chunk(path, &heading, ordinal, &buffer));
                 ordinal += 1;
                 buffer.clear();
             }
-            heading = heading_text(line);
+            while heading_stack.len() >= level {
+                let _ = heading_stack.pop();
+            }
+            heading_stack.push(heading_text);
+            heading = heading_stack.join(" > ");
             buffer.push_str(line);
             buffer.push('\n');
             continue;
@@ -94,7 +127,7 @@ pub fn chunk_markdown(path: &str, input: &str, max_bytes: usize) -> Vec<Chunk> {
         buffer.push_str(line);
         buffer.push('\n');
 
-        if buffer.len() >= max_bytes {
+        if buffer.len() >= target_max {
             chunks.push(build_chunk(path, &heading, ordinal, &buffer));
             ordinal += 1;
             buffer.clear();
@@ -109,6 +142,7 @@ pub fn chunk_markdown(path: &str, input: &str, max_bytes: usize) -> Vec<Chunk> {
 }
 
 pub fn initialize_schema(conn: &Connection) -> Result<(), MemoryError> {
+    register_vector_sql_functions(conn)?;
     try_load_vector_extension(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS chunks (\
@@ -122,9 +156,21 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), MemoryError> {
             content, path, heading\
         );\
         CREATE TABLE IF NOT EXISTS embeddings (\
-            chunk_id TEXT PRIMARY KEY,\
-            embedding BLOB\
+            id TEXT PRIMARY KEY,\
+            chunk_id TEXT NOT NULL,\
+            vector BLOB NOT NULL,\
+            model TEXT NOT NULL,\
+            UNIQUE(chunk_id, model)\
         );\
+        CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);\
+        CREATE TABLE IF NOT EXISTS embedding_cache (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            text_hash TEXT NOT NULL UNIQUE,\
+            embedding BLOB NOT NULL,\
+            created_at INTEGER NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS idx_embedding_cache_created_at \
+            ON embedding_cache(created_at ASC);\
         CREATE TABLE IF NOT EXISTS compactions (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
             timestamp_ms INTEGER NOT NULL,\
@@ -166,45 +212,95 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
-pub fn index_chunks(conn: &Connection, chunks: &[Chunk]) -> Result<(), MemoryError> {
-    for chunk in chunks {
-        conn.execute(
-            "INSERT INTO chunks (id, path, heading, ordinal, content)\
-            VALUES (?1, ?2, ?3, ?4, ?5)\
-            ON CONFLICT(id) DO UPDATE SET\
-                path = excluded.path,\
-                heading = excluded.heading,\
-                ordinal = excluded.ordinal,\
-                content = excluded.content",
-            params![
-                chunk.id,
-                chunk.path,
-                chunk.heading,
-                chunk.ordinal,
-                chunk.content
-            ],
-        )
-        .map_err(|err| MemoryError::new(format!("chunk upsert failed: {err}")))?;
-
-        let rowid: i64 = conn
-            .query_row(
-                "SELECT rowid FROM chunks WHERE id = ?1",
-                params![chunk.id],
-                |row| row.get(0),
-            )
-            .map_err(|err| MemoryError::new(format!("chunk rowid lookup failed: {err}")))?;
-
-        conn.execute("DELETE FROM chunks_fts WHERE rowid = ?1", params![rowid])
-            .map_err(|err| MemoryError::new(format!("fts delete failed: {err}")))?;
-
-        conn.execute(
-            "INSERT INTO chunks_fts (rowid, content, path, heading)\
-            VALUES (?1, ?2, ?3, ?4)",
-            params![rowid, chunk.content, chunk.path, chunk.heading],
-        )
-        .map_err(|err| MemoryError::new(format!("fts insert failed: {err}")))?;
+pub fn index_chunks(
+    conn: &Connection,
+    chunks: &[Chunk],
+    config: &HybridSearchConfig,
+) -> Result<(), MemoryError> {
+    if chunks.is_empty() {
+        return Ok(());
     }
+
+    let path_chunks = group_chunks_by_path(chunks);
+    run_atomic(conn, |db| {
+        for chunk in chunks {
+            db.execute(
+                r#"
+                INSERT INTO chunks (id, path, heading, ordinal, content)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ON CONFLICT(id) DO UPDATE SET
+                    path = excluded.path,
+                    heading = excluded.heading,
+                    ordinal = excluded.ordinal,
+                    content = excluded.content
+                "#,
+                params![
+                    chunk.id,
+                    chunk.path,
+                    chunk.heading,
+                    chunk.ordinal,
+                    chunk.content
+                ],
+            )
+            .map_err(|err| MemoryError::new(format!("chunk upsert failed: {err}")))?;
+        }
+
+        for (path, ids) in path_chunks {
+            delete_stale_chunks_for_path(db, &path, &ids)?;
+        }
+
+        rebuild_chunks_fts(db)?;
+        Ok(())
+    })?;
+
+    reembed_missing_vectors(conn, chunks, config)?;
     Ok(())
+}
+
+pub fn delete_chunks_by_path(conn: &Connection, path: &str) -> Result<usize, MemoryError> {
+    let mut removed = 0usize;
+    run_atomic(conn, |db| {
+        let mut stmt = db
+            .prepare("SELECT id FROM chunks WHERE path = ?1")
+            .map_err(|err| MemoryError::new(format!("delete path prepare failed: {err}")))?;
+        let rows = stmt
+            .query_map(params![path], |row| row.get::<_, String>(0))
+            .map_err(|err| MemoryError::new(format!("delete path query failed: {err}")))?;
+
+        let mut stale_ids = Vec::new();
+        for row in rows {
+            let chunk_id =
+                row.map_err(|err| MemoryError::new(format!("delete path row failed: {err}")))?;
+            stale_ids.push(chunk_id);
+        }
+
+        for chunk_id in &stale_ids {
+            db.execute(
+                "DELETE FROM embeddings WHERE chunk_id = ?1",
+                params![chunk_id],
+            )
+            .map_err(|err| MemoryError::new(format!("delete embedding by path failed: {err}")))?;
+        }
+
+        let changed = db
+            .execute("DELETE FROM chunks WHERE path = ?1", params![path])
+            .map_err(|err| MemoryError::new(format!("delete chunks by path failed: {err}")))?;
+        removed = changed;
+        rebuild_chunks_fts(db)?;
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
+pub fn reindex_markdown(
+    conn: &Connection,
+    path: &str,
+    input: &str,
+    config: &HybridSearchConfig,
+) -> Result<Vec<Chunk>, MemoryError> {
+    let chunks = chunk_markdown(path, input, config.max_chunk_bytes);
+    index_chunks(conn, &chunks, config)?;
+    Ok(chunks)
 }
 
 pub fn lexical_search(
@@ -214,13 +310,15 @@ pub fn lexical_search(
 ) -> Result<Vec<(Chunk, f32)>, MemoryError> {
     let mut stmt = conn
         .prepare(
-            "SELECT chunks.id, chunks.path, chunks.heading, chunks.ordinal, chunks.content,\
-            bm25(chunks_fts) as score\
-            FROM chunks_fts\
-            JOIN chunks ON chunks.rowid = chunks_fts.rowid\
-            WHERE chunks_fts MATCH ?1\
-            ORDER BY score ASC\
-            LIMIT ?2",
+            r#"
+            SELECT chunks.id, chunks.path, chunks.heading, chunks.ordinal, chunks.content,
+                   bm25(chunks_fts) as score
+            FROM chunks_fts
+            JOIN chunks ON chunks.rowid = chunks_fts.rowid
+            WHERE chunks_fts MATCH ?1
+            ORDER BY score ASC
+            LIMIT ?2
+            "#,
         )
         .map_err(|err| MemoryError::new(format!("fts prepare failed: {err}")))?;
 
@@ -248,12 +346,100 @@ pub fn lexical_search(
     normalize_results(results)
 }
 
-pub fn semantic_search_stub(
-    _conn: &Connection,
-    _query_embedding: &[f32],
-    _limit: usize,
+pub fn semantic_search(
+    conn: &Connection,
+    query_embedding: &[f32],
+    model: &str,
+    limit: usize,
 ) -> Result<Vec<(Chunk, f32)>, MemoryError> {
-    Ok(Vec::new())
+    if query_embedding.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_blob = encode_embedding_blob(query_embedding);
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT chunks.id, chunks.path, chunks.heading, chunks.ordinal, chunks.content,
+                   CASE
+                       WHEN vec_norm(embeddings.vector) = 0 OR vec_norm(?1) = 0 THEN 0
+                       ELSE vec_dot(embeddings.vector, ?1) /
+                           (vec_norm(embeddings.vector) * vec_norm(?1))
+                   END AS cosine
+            FROM embeddings
+            JOIN chunks ON chunks.id = embeddings.chunk_id
+            WHERE embeddings.model = ?2
+            ORDER BY cosine DESC
+            LIMIT ?3
+            "#,
+        )
+        .map_err(|err| MemoryError::new(format!("semantic prepare failed: {err}")))?;
+
+    let mut rows = stmt
+        .query(params![query_blob, model, limit as i64])
+        .map_err(|err| MemoryError::new(format!("semantic query failed: {err}")))?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| MemoryError::new(format!("semantic row read failed: {err}")))?
+    {
+        let chunk = Chunk {
+            id: row.get(0).map_err(map_row_err("id"))?,
+            path: row.get(1).map_err(map_row_err("path"))?,
+            heading: row.get(2).map_err(map_row_err("heading"))?,
+            ordinal: row.get(3).map_err(map_row_err("ordinal"))?,
+            content: row.get(4).map_err(map_row_err("content"))?,
+        };
+        let cosine = row.get::<_, f32>(5).map_err(map_row_err("cosine"))?;
+        let bounded = ((cosine + 1.0) / 2.0).clamp(0.0, 1.0);
+        results.push((chunk, bounded));
+    }
+
+    normalize_results(results)
+}
+
+pub fn hybrid_search(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    config: &HybridSearchConfig,
+) -> Result<Vec<ScoredChunk>, MemoryError> {
+    let lexical = lexical_search(conn, query, limit)?;
+
+    let query_embedding = embedding_for_text(
+        conn,
+        query,
+        &config.embedding_model,
+        current_time_ms(),
+        config.embedding_cache_ttl_ms,
+        config.embedding_cache_size,
+    );
+
+    let (semantic, had_embedding_error) = match query_embedding {
+        Ok(vector) => (
+            semantic_search(conn, &vector, &config.embedding_model, limit)?,
+            false,
+        ),
+        Err(_) => (Vec::new(), true),
+    };
+
+    let semantic_source = if had_embedding_error {
+        like_fallback_search(conn, query, limit)?
+    } else {
+        semantic
+    };
+
+    let mut fused = hybrid_fusion(
+        lexical,
+        semantic_source,
+        config.vector_weight,
+        config.keyword_weight,
+    );
+    if fused.len() > limit {
+        fused.truncate(limit);
+    }
+    Ok(fused)
 }
 
 pub fn hybrid_fusion(
@@ -262,7 +448,7 @@ pub fn hybrid_fusion(
     semantic_weight: f32,
     lexical_weight: f32,
 ) -> Vec<ScoredChunk> {
-    let mut map = std::collections::HashMap::new();
+    let mut map = HashMap::new();
 
     for (chunk, score) in lexical {
         map.insert(
@@ -658,26 +844,85 @@ fn sync_memory_fts(conn: &Connection, id: i64) -> Result<(), MemoryError> {
 }
 
 fn build_chunk(path: &str, heading: &str, ordinal: u32, content: &str) -> Chunk {
-    let id = chunk_id(path, heading, ordinal, content);
+    let trimmed = content.trim_end().to_string();
+    let id = chunk_id(path, heading, ordinal, &trimmed);
     Chunk {
         id,
         path: path.to_string(),
         heading: heading.to_string(),
         ordinal,
-        content: content.trim_end().to_string(),
+        content: trimmed,
     }
 }
 
-fn is_heading(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with('#')
+fn group_chunks_by_path(chunks: &[Chunk]) -> HashMap<String, HashSet<String>> {
+    let mut out = HashMap::new();
+    for chunk in chunks {
+        out.entry(chunk.path.clone())
+            .or_insert_with(HashSet::new)
+            .insert(chunk.id.clone());
+    }
+    out
 }
 
-fn heading_text(line: &str) -> String {
-    line.trim_start_matches('#').trim().to_string()
+fn delete_stale_chunks_for_path(
+    conn: &Connection,
+    path: &str,
+    keep_ids: &HashSet<String>,
+) -> Result<(), MemoryError> {
+    let mut stale_ids = Vec::new();
+    let mut stmt = conn
+        .prepare("SELECT id FROM chunks WHERE path = ?1")
+        .map_err(|err| MemoryError::new(format!("stale select prepare failed: {err}")))?;
+    let rows = stmt
+        .query_map(params![path], |row| row.get::<_, String>(0))
+        .map_err(|err| MemoryError::new(format!("stale select query failed: {err}")))?;
+
+    for row in rows {
+        let id = row.map_err(|err| MemoryError::new(format!("stale select row failed: {err}")))?;
+        if !keep_ids.contains(&id) {
+            stale_ids.push(id);
+        }
+    }
+
+    for stale_id in stale_ids {
+        conn.execute(
+            "DELETE FROM embeddings WHERE chunk_id = ?1",
+            params![stale_id],
+        )
+        .map_err(|err| MemoryError::new(format!("stale embedding delete failed: {err}")))?;
+        conn.execute("DELETE FROM chunks WHERE id = ?1", params![stale_id])
+            .map_err(|err| MemoryError::new(format!("stale chunk delete failed: {err}")))?;
+    }
+
+    Ok(())
+}
+
+fn parse_heading(line: &str) -> Option<(usize, String)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let mut level = 0usize;
+    for ch in trimmed.chars() {
+        if ch == '#' {
+            level += 1;
+            continue;
+        }
+        break;
+    }
+    if level == 0 || level > 6 {
+        return None;
+    }
+    let text = trimmed[level..].trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some((level, text.to_string()))
 }
 
 fn chunk_id(path: &str, heading: &str, ordinal: u32, content: &str) -> String {
+    let content_hash = digest_hex(content.as_bytes());
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
     hasher.update(b"|");
@@ -685,25 +930,8 @@ fn chunk_id(path: &str, heading: &str, ordinal: u32, content: &str) -> String {
     hasher.update(b"|");
     hasher.update(ordinal.to_be_bytes());
     hasher.update(b"|");
-    hasher.update(content.as_bytes());
+    hasher.update(content_hash.as_bytes());
     to_hex(&hasher.finalize())
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(hex_char(byte >> 4));
-        out.push(hex_char(byte & 0x0f));
-    }
-    out
-}
-
-fn hex_char(nibble: u8) -> char {
-    match nibble {
-        0..=9 => (b'0' + nibble) as char,
-        10..=15 => (b'a' + (nibble - 10)) as char,
-        _ => '0',
-    }
 }
 
 fn normalize_results(results: Vec<(Chunk, f32)>) -> Result<Vec<(Chunk, f32)>, MemoryError> {
@@ -717,10 +945,14 @@ fn normalize_results(results: Vec<(Chunk, f32)>) -> Result<Vec<(Chunk, f32)>, Me
         max = max.max(*score);
     }
     let range = (max - min).max(1e-6);
-    Ok(results
-        .into_iter()
-        .map(|(chunk, score)| (chunk, (score - min) / range))
-        .collect())
+    let mut normalized = Vec::with_capacity(results.len());
+    for (chunk, score) in results {
+        if !score.is_finite() {
+            return Err(MemoryError::new("non-finite score during normalization"));
+        }
+        normalized.push((chunk, (score - min) / range));
+    }
+    Ok(normalized)
 }
 
 fn map_row_err(field: &'static str) -> impl FnOnce(rusqlite::Error) -> MemoryError {
@@ -743,6 +975,421 @@ fn try_load_vector_extension(conn: &Connection) -> Result<(), MemoryError> {
     conn.load_extension_disable()
         .map_err(|err| MemoryError::new(format!("vector extension disable failed: {err}")))?;
     load_result
+}
+
+fn register_vector_sql_functions(conn: &Connection) -> Result<(), MemoryError> {
+    conn.create_scalar_function("vec_dot", 2, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let a = ctx.get_raw(0).as_blob()?;
+        let b = ctx.get_raw(1).as_blob()?;
+        let va = decode_embedding_blob_sql(a)?;
+        let vb = decode_embedding_blob_sql(b)?;
+        if va.len() != vb.len() {
+            return Ok(0.0f64);
+        }
+        let mut dot = 0.0f64;
+        for idx in 0..va.len() {
+            dot += va[idx] as f64 * vb[idx] as f64;
+        }
+        Ok(dot)
+    })
+    .map_err(|err| MemoryError::new(format!("register vec_dot failed: {err}")))?;
+
+    conn.create_scalar_function("vec_norm", 1, FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let a = ctx.get_raw(0).as_blob()?;
+        let va = decode_embedding_blob_sql(a)?;
+        let mut sum = 0.0f64;
+        for value in va {
+            sum += (value as f64) * (value as f64);
+        }
+        Ok(sum.sqrt())
+    })
+    .map_err(|err| MemoryError::new(format!("register vec_norm failed: {err}")))?;
+
+    Ok(())
+}
+
+fn decode_embedding_blob_sql(blob: &[u8]) -> Result<Vec<f32>, rusqlite::types::FromSqlError> {
+    if blob.len() < 4 {
+        return Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+            expected_size: 4,
+            blob_size: blob.len(),
+        });
+    }
+    let mut len_bytes = [0u8; 4];
+    len_bytes.copy_from_slice(&blob[..4]);
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    let expected_size = 4 + len * 4;
+    if blob.len() != expected_size {
+        return Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+            expected_size,
+            blob_size: blob.len(),
+        });
+    }
+
+    let mut out = Vec::with_capacity(len);
+    for idx in 0..len {
+        let start = 4 + idx * 4;
+        let mut item = [0u8; 4];
+        item.copy_from_slice(&blob[start..start + 4]);
+        out.push(f32::from_le_bytes(item));
+    }
+    Ok(out)
+}
+
+fn embedding_for_text(
+    conn: &Connection,
+    text: &str,
+    model: &str,
+    now_ms: u64,
+    ttl_ms: u64,
+    cache_size: usize,
+) -> Result<Vec<f32>, MemoryError> {
+    let text_hash = text_hash(model, text);
+    if let Some(embedding) = embedding_cache_get(conn, &text_hash, now_ms, ttl_ms)? {
+        return Ok(embedding);
+    }
+
+    let embedding = generate_embedding(model, text)?;
+    embedding_cache_put(conn, &text_hash, &embedding, now_ms, ttl_ms, cache_size)?;
+    Ok(embedding)
+}
+
+fn generate_embedding(model: &str, text: &str) -> Result<Vec<f32>, MemoryError> {
+    match model {
+        "text-embedding-3-small" | "simple-384" => Ok(simple_384_embedding(text)),
+        _ => Err(MemoryError::new(format!(
+            "unsupported embedding model: {model}"
+        ))),
+    }
+}
+
+fn simple_384_embedding(text: &str) -> Vec<f32> {
+    let mut vector = vec![0.0f32; DEFAULT_EMBEDDING_DIM];
+    for (token_idx, token) in tokenize_for_embedding(text).into_iter().enumerate() {
+        let digest = Sha256::digest(token.as_bytes());
+        let weight = 1.0f32 / ((token_idx + 1) as f32).sqrt();
+        for offset in 0..6usize {
+            let a = digest[offset * 2] as usize;
+            let b = digest[offset * 2 + 1] as usize;
+            let index = (a * 256 + b + token_idx + offset * 31) % DEFAULT_EMBEDDING_DIM;
+            let sign = if digest[12 + offset] & 1 == 0 {
+                1.0f32
+            } else {
+                -1.0f32
+            };
+            vector[index] += sign * weight;
+        }
+    }
+
+    l2_normalize(vector)
+}
+
+fn tokenize_for_embedding(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for token in text
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .filter(|token| !token.is_empty())
+    {
+        tokens.push(token.to_lowercase());
+    }
+    if tokens.is_empty() {
+        tokens.push("empty".to_string());
+    }
+    tokens
+}
+
+fn l2_normalize(mut vector: Vec<f32>) -> Vec<f32> {
+    let mut sum = 0.0f32;
+    for value in &vector {
+        sum += value * value;
+    }
+    let norm = sum.sqrt();
+    if norm <= 1e-8 {
+        return vector;
+    }
+    for value in &mut vector {
+        *value /= norm;
+    }
+    vector
+}
+
+fn upsert_chunk_embedding(
+    conn: &Connection,
+    chunk_id: &str,
+    model: &str,
+    embedding: &[f32],
+) -> Result<(), MemoryError> {
+    let id = digest_hex(format!("{chunk_id}:{model}").as_bytes());
+    let blob = encode_embedding_blob(embedding);
+    conn.execute(
+        r#"
+        INSERT INTO embeddings (id, chunk_id, vector, model)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(id) DO UPDATE SET
+            vector = excluded.vector,
+            model = excluded.model
+        "#,
+        params![id, chunk_id, blob, model],
+    )
+    .map_err(|err| MemoryError::new(format!("embedding upsert failed: {err}")))?;
+    Ok(())
+}
+
+fn reembed_missing_vectors(
+    conn: &Connection,
+    chunks: &[Chunk],
+    config: &HybridSearchConfig,
+) -> Result<usize, MemoryError> {
+    let mut inserted = 0usize;
+    for chunk in chunks {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM embeddings WHERE chunk_id = ?1 AND model = ?2",
+                params![chunk.id, config.embedding_model],
+                |row| row.get(0),
+            )
+            .map_err(|err| MemoryError::new(format!("embedding exists check failed: {err}")))?;
+        if exists > 0 {
+            continue;
+        }
+        let embedding = embedding_for_text(
+            conn,
+            &chunk.content,
+            &config.embedding_model,
+            current_time_ms(),
+            config.embedding_cache_ttl_ms,
+            config.embedding_cache_size,
+        )?;
+        upsert_chunk_embedding(conn, &chunk.id, &config.embedding_model, &embedding)?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
+fn embedding_cache_get(
+    conn: &Connection,
+    text_hash: &str,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<Option<Vec<f32>>, MemoryError> {
+    let row: Result<(Vec<u8>, i64), rusqlite::Error> = conn.query_row(
+        "SELECT embedding, created_at FROM embedding_cache WHERE text_hash = ?1",
+        params![text_hash],
+        |row| {
+            let blob = row.get::<_, Vec<u8>>(0)?;
+            let created_at = row.get::<_, i64>(1)?;
+            Ok((blob, created_at))
+        },
+    );
+
+    match row {
+        Ok((blob, created_at)) => {
+            let created_at_u64 = if created_at < 0 {
+                0u64
+            } else {
+                created_at as u64
+            };
+            if now_ms.saturating_sub(created_at_u64) > ttl_ms {
+                conn.execute(
+                    "DELETE FROM embedding_cache WHERE text_hash = ?1",
+                    params![text_hash],
+                )
+                .map_err(|err| MemoryError::new(format!("cache ttl delete failed: {err}")))?;
+                return Ok(None);
+            }
+            conn.execute(
+                "UPDATE embedding_cache SET created_at = ?1 WHERE text_hash = ?2",
+                params![now_ms as i64, text_hash],
+            )
+            .map_err(|err| MemoryError::new(format!("cache touch failed: {err}")))?;
+            let embedding = decode_embedding_blob(&blob)?;
+            Ok(Some(embedding))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(MemoryError::new(format!("cache get failed: {err}"))),
+    }
+}
+
+fn embedding_cache_put(
+    conn: &Connection,
+    text_hash: &str,
+    embedding: &[f32],
+    now_ms: u64,
+    ttl_ms: u64,
+    max_entries: usize,
+) -> Result<(), MemoryError> {
+    let blob = encode_embedding_blob(embedding);
+    conn.execute(
+        r#"
+        INSERT INTO embedding_cache (text_hash, embedding, created_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(text_hash) DO UPDATE SET
+            embedding = excluded.embedding,
+            created_at = excluded.created_at
+        "#,
+        params![text_hash, blob, now_ms as i64],
+    )
+    .map_err(|err| MemoryError::new(format!("cache put failed: {err}")))?;
+
+    prune_embedding_cache(conn, now_ms, ttl_ms, max_entries)
+}
+
+fn prune_embedding_cache(
+    conn: &Connection,
+    now_ms: u64,
+    ttl_ms: u64,
+    max_entries: usize,
+) -> Result<(), MemoryError> {
+    let cutoff = now_ms.saturating_sub(ttl_ms);
+    conn.execute(
+        "DELETE FROM embedding_cache WHERE created_at < ?1",
+        params![cutoff as i64],
+    )
+    .map_err(|err| MemoryError::new(format!("cache ttl prune failed: {err}")))?;
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(1) FROM embedding_cache", [], |row| row.get(0))
+        .map_err(|err| MemoryError::new(format!("cache count failed: {err}")))?;
+
+    let count_u = if count < 0 { 0usize } else { count as usize };
+    if count_u <= max_entries {
+        return Ok(());
+    }
+    let remove = count_u - max_entries;
+    conn.execute(
+        "DELETE FROM embedding_cache WHERE id IN (\
+            SELECT id FROM embedding_cache ORDER BY created_at ASC, id ASC LIMIT ?1\
+        )",
+        params![remove as i64],
+    )
+    .map_err(|err| MemoryError::new(format!("cache lru prune failed: {err}")))?;
+    Ok(())
+}
+
+fn like_fallback_search(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(Chunk, f32)>, MemoryError> {
+    let like = format!("%{}%", query.trim());
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT id, path, heading, ordinal, content
+            FROM chunks
+            WHERE content LIKE ?1 OR path LIKE ?1 OR heading LIKE ?1
+            ORDER BY ordinal ASC
+            LIMIT ?2
+            "#,
+        )
+        .map_err(|err| MemoryError::new(format!("like prepare failed: {err}")))?;
+
+    let mut rows = stmt
+        .query(params![like, limit as i64])
+        .map_err(|err| MemoryError::new(format!("like query failed: {err}")))?;
+
+    let mut rank = 0usize;
+    let mut out = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| MemoryError::new(format!("like row read failed: {err}")))?
+    {
+        rank += 1;
+        let score = 1.0f32 / (rank as f32);
+        out.push((
+            Chunk {
+                id: row.get(0).map_err(map_row_err("id"))?,
+                path: row.get(1).map_err(map_row_err("path"))?,
+                heading: row.get(2).map_err(map_row_err("heading"))?,
+                ordinal: row.get(3).map_err(map_row_err("ordinal"))?,
+                content: row.get(4).map_err(map_row_err("content"))?,
+            },
+            score,
+        ));
+    }
+    normalize_results(out)
+}
+
+fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + embedding.len() * 4);
+    out.extend_from_slice(&(embedding.len() as u32).to_le_bytes());
+    for value in embedding {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn decode_embedding_blob(blob: &[u8]) -> Result<Vec<f32>, MemoryError> {
+    decode_embedding_blob_sql(blob)
+        .map_err(|err| MemoryError::new(format!("blob decode failed: {err}")))
+}
+
+fn text_hash(model: &str, text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(model.as_bytes());
+    hasher.update(b"|");
+    hasher.update(text.as_bytes());
+    to_hex(&hasher.finalize())
+}
+
+fn run_atomic<T, F>(conn: &Connection, op: F) -> Result<T, MemoryError>
+where
+    F: FnOnce(&Connection) -> Result<T, MemoryError>,
+{
+    conn.execute_batch("begin immediate transaction")
+        .map_err(|err| MemoryError::new(format!("begin transaction failed: {err}")))?;
+
+    let op_result = op(conn);
+    match op_result {
+        Ok(value) => {
+            conn.execute_batch("commit")
+                .map_err(|err| MemoryError::new(format!("commit failed: {err}")))?;
+            Ok(value)
+        }
+        Err(err) => {
+            let rollback_result = conn.execute_batch("rollback");
+            if let Err(rollback_err) = rollback_result {
+                return Err(MemoryError::new(format!(
+                    "rollback failed after error: {err}; rollback error: {rollback_err}"
+                )));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn rebuild_chunks_fts(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute("DELETE FROM chunks_fts", [])
+        .map_err(|err| MemoryError::new(format!("chunks fts clear failed: {err}")))?;
+    conn.execute(
+        "INSERT INTO chunks_fts (rowid, content, path, heading)\
+        SELECT rowid, content, path, heading FROM chunks",
+        [],
+    )
+    .map_err(|err| MemoryError::new(format!("chunks fts repopulate failed: {err}")))?;
+    Ok(())
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    to_hex(&digest)
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(hex_char(byte >> 4));
+        out.push(hex_char(byte & 0x0f));
+    }
+    out
+}
+
+fn hex_char(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'a' + (nibble - 10)) as char,
+        _ => '0',
+    }
 }
 
 fn fts_query_from_text(input: &str) -> String {
@@ -805,61 +1452,4 @@ fn rebuild_memory_fts(conn: &Connection) -> Result<(), MemoryError> {
 }
 
 #[cfg(test)]
-mod test {
-    use rusqlite::Connection;
-
-    use super::{
-        initialize_schema, maybe_summarize_session, redact_secrets, retrieve_memories,
-        upsert_memory, NewMemory,
-    };
-
-    #[test]
-    fn summary_cadence_triggers_at_twenty_messages() {
-        let conn = Connection::open_in_memory().expect("open memory db");
-        initialize_schema(&conn).expect("init schema");
-
-        let nineteen = (0..19).map(|idx| format!("m{idx}")).collect::<Vec<_>>();
-        let first = maybe_summarize_session(&conn, "owner", "telegram-1", &nineteen, 1)
-            .expect("maybe summarize");
-        assert!(first.is_none());
-
-        let twenty = (0..20).map(|idx| format!("m{idx}")).collect::<Vec<_>>();
-        let second = maybe_summarize_session(&conn, "owner", "telegram-1", &twenty, 2)
-            .expect("maybe summarize");
-        assert!(second.is_some());
-    }
-
-    #[test]
-    fn retrieval_includes_pinned_memory() {
-        let conn = Connection::open_in_memory().expect("open memory db");
-        initialize_schema(&conn).expect("init schema");
-
-        upsert_memory(
-            &conn,
-            10,
-            &NewMemory {
-                user_id: "owner".to_string(),
-                importance: 90,
-                pinned: true,
-                kind: "preference".to_string(),
-                text: "user prefers rust and sqlite".to_string(),
-                tags_json: "[\"pref\"]".to_string(),
-                source_json: "{}".to_string(),
-            },
-        )
-        .expect("upsert pinned");
-
-        let found = retrieve_memories(&conn, "owner", "rust", 10, 100).expect("retrieve");
-        assert!(!found.is_empty());
-        assert!(found[0].memory.pinned);
-    }
-
-    #[test]
-    fn redacts_key_like_strings() {
-        let input = "token sk-abc12345678901234567890 api_key=secret";
-        let redacted = redact_secrets(input);
-        assert!(!redacted.contains("sk-abc12345678901234567890"));
-        assert!(redacted.contains("[redacted]"));
-        assert!(redacted.contains("api_key=[redacted]"));
-    }
-}
+mod lib_test;

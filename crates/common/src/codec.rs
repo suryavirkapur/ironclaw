@@ -17,8 +17,8 @@ impl ProtoCodec {
             .encode(&mut payload)
             .map_err(|e| CodecError::new(format!("encode failed: {e}")))?;
 
-        let len = u32::try_from(payload.len())
-            .map_err(|_| CodecError::new("frame length overflow"))?;
+        let len =
+            u32::try_from(payload.len()).map_err(|_| CodecError::new("frame length overflow"))?;
         let mut out = Vec::with_capacity(4 + payload.len());
         out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(&payload);

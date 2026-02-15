@@ -1,10 +1,28 @@
+0.6.1 2026-02-15
+- implemented sqlite blob vector storage in `embeddings(id, chunk_id, vector, model)` with
+  pure-sql cosine ranking via registered sqlite scalar functions
+- added hybrid retrieval pipeline combining fts5 bm25 and vector similarity with configurable
+  weighted fusion (`vector_weight`, `keyword_weight`)
+- added sqlite-backed embedding cache with lru + ttl eviction in `embedding_cache`
+- upgraded markdown chunking to preserve heading hierarchy and stable chunk ids from
+  `(path, heading, ordinal, hash(content))`
+- implemented safe reindex operations with atomic fts rebuild, chunk upsert/delete by path,
+  and re-embedding of missing vectors
+- added like-based fallback search path when embedding generation fails
+- added guest indexing config keys: `embedding_model`, `vector_weight`, `keyword_weight`,
+  `embedding_cache_size`, and kept backward-compatible aliases for old weight keys
+- added memory crate unit tests for sql cosine/vector storage, fusion scoring, lru eviction,
+  markdown hierarchy chunking, plus migrated tests to adjacent `_test` file
+
 0.3.2 2026-02-15
 - routed whatsapp, telegram, and websocket ingress through owner-keyed agent identity resolution
-- completed whatsapp guest routing flow with vm check/start, wake, vsock forward, and streamed responses
+- completed whatsapp guest routing flow with vm check/start, wake, vsock forward,
+  and streamed responses
 - added channel routing assertions to verify owner-keyed identity behavior across channels
 
 0.3.1 2026-02-15
-- fixed host jobtrigger handling to wake sleeping guest agent, run scheduled job, and send jobstatus with debug tracing
+- fixed host jobtrigger handling to wake sleeping guest agent, run scheduled job,
+  and send jobstatus with debug tracing
 - added vm running-state checks to vm manager and host vm spawn logging
 - added integration-style test for cron jobtrigger wake+run flow
 
@@ -18,7 +36,8 @@
 - added host `idle_timeout_minutes` config (default `5`) and idle sleep signaling
 - added websocket and telegram wake flow integration for user message and cron triggers
 - added unit/integration coverage for idle-timeout gating and cron wake-up job flow
-- gated `common` firecracker roundtrip example behind `firecracker` feature to keep workspace tests green
+- gated `common` firecracker roundtrip example behind `firecracker` feature
+  to keep workspace tests green
 
 0.5.0 2026-02-14
 - added host soul guard monitor for `soul.md` changes via `crates/ironclawd/src/soul_guard.rs`

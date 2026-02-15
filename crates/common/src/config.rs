@@ -201,9 +201,36 @@ pub struct GuestToolsConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GuestIndexingConfig {
+    #[serde(default = "default_max_chunk_bytes")]
     pub max_chunk_bytes: usize,
-    pub semantic_weight: f32,
-    pub lexical_weight: f32,
+    #[serde(default = "default_embedding_model", alias = "embedding_model_name")]
+    pub embedding_model: String,
+    #[serde(default = "default_vector_weight", alias = "semantic_weight")]
+    pub vector_weight: f32,
+    #[serde(default = "default_keyword_weight", alias = "lexical_weight")]
+    pub keyword_weight: f32,
+    #[serde(default = "default_embedding_cache_size")]
+    pub embedding_cache_size: usize,
+}
+
+fn default_max_chunk_bytes() -> usize {
+    2048
+}
+
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+
+fn default_vector_weight() -> f32 {
+    0.7
+}
+
+fn default_keyword_weight() -> f32 {
+    0.3
+}
+
+fn default_embedding_cache_size() -> usize {
+    1000
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -220,9 +247,11 @@ impl Default for GuestConfig {
                 allow_file: true,
             },
             indexing: GuestIndexingConfig {
-                max_chunk_bytes: 2048,
-                semantic_weight: 0.7,
-                lexical_weight: 0.3,
+                max_chunk_bytes: default_max_chunk_bytes(),
+                embedding_model: default_embedding_model(),
+                vector_weight: default_vector_weight(),
+                keyword_weight: default_keyword_weight(),
+                embedding_cache_size: default_embedding_cache_size(),
             },
             scheduler: GuestSchedulerConfig {
                 jobs_path: PathBuf::from("/mnt/brain/cron/jobs.toml"),

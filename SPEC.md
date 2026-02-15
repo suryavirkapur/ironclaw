@@ -337,3 +337,41 @@ phase c: ui (/ui)
 
 optional switch later
 - embeddings computed locally inside vm vs via provider
+
+---
+
+16. gap analysis: ironclaw vs openclaw
+
+ironclaw prioritizes security/isolation (vm-based) over convenience/extensibility compared to openclaw (process-based).
+
+16.1 missing integrations
+openclaw supports a wide array of messaging channels out-of-the-box.
+ironclaw currently supports only telegram.
+
+missing:
+- whatsapp
+- slack
+
+16.2 missing high-level skills
+openclaw has specialized skills for common productivity apps.
+ironclaw relies on generic `bash` or `browser` tools for these, lacking optimized, structured interfaces.
+
+missing:
+- calendar (read/write events)
+- email (send/receive/draft)
+- github (issue/pr management via api, not just git cli)
+
+16.3 dynamic extensibility
+openclaw can "autonomously generate and install new skills" and has a community ecosystem.
+ironclaw tools are compiled into the strict `irowclaw` guest binary.
+- missing: dynamic skill loading/generation at runtime.
+- missing: plugin/extension system.
+
+16.4 platform support
+openclaw runs on macos, windows, and linux.
+ironclaw is strictly linux-only due to firecracker/kvm dependency.
+
+16.5 configuration philosophy
+openclaw is "conversation-first" (config via chat).
+ironclaw is "configuration-as-code" (explicit toml files).
+- missing: natural language configuration/setup wizard.

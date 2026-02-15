@@ -3,8 +3,9 @@ use common::config::{GuestConfig, JobsConfig};
 use common::proto::ironclaw::{agent_control, message_envelope, AgentState, MessageEnvelope};
 use common::transport::Transport;
 use memory::{
-    forget_memories_by_query, forget_memory_by_id, hybrid_fusion, index_chunks, initialize_schema,
-    lexical_search, list_pinned_memories, redact_secrets, upsert_memory, Chunk, NewMemory,
+    forget_memories_by_query, forget_memory_by_id, hybrid_search, initialize_schema,
+    list_pinned_memories, redact_secrets, reindex_markdown, upsert_memory, Chunk,
+    HybridSearchConfig, NewMemory,
 };
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -94,34 +95,38 @@ impl Runtime {
     }
 
     pub fn index_markdown(&self, path: &str, contents: &str) -> Result<Vec<Chunk>, IrowclawError> {
-        let chunks = memory::chunk_markdown(path, contents, self.config.indexing.max_chunk_bytes);
-        index_chunks(&self.db, &chunks)
+        let chunks = reindex_markdown(&self.db, path, contents, &self.hybrid_search_config())
             .map_err(|err| IrowclawError::new(format!("index failed: {err}")))?;
         Ok(chunks)
     }
 
     pub fn hybrid_retrieval(&self, query: &str, limit: usize) -> Result<String, IrowclawError> {
-        let lexical = lexical_search(&self.db, query, limit)
-            .map_err(|err| IrowclawError::new(format!("lexical search failed: {err}")))?;
-        let semantic = memory::semantic_search_stub(&self.db, &[], limit)
-            .map_err(|err| IrowclawError::new(format!("semantic search failed: {err}")))?;
-        let results = hybrid_fusion(
-            lexical,
-            semantic,
-            self.config.indexing.semantic_weight,
-            self.config.indexing.lexical_weight,
-        );
+        let results = hybrid_search(&self.db, query, limit, &self.hybrid_search_config())
+            .map_err(|err| IrowclawError::new(format!("hybrid search failed: {err}")))?;
         let mut summary = String::new();
         for result in results {
+            let excerpt = result.chunk.content.replace('\n', " ");
             summary.push_str(&format!(
-                "{path}::{heading}::{ordinal} score={score:.3}\n",
+                "{path}::{heading}::{ordinal} score={score:.3} text={text}\n",
                 path = result.chunk.path,
                 heading = result.chunk.heading,
                 ordinal = result.chunk.ordinal,
-                score = result.score
+                score = result.score,
+                text = truncate_text(&excerpt, 180),
             ));
         }
         Ok(summary)
+    }
+
+    fn hybrid_search_config(&self) -> HybridSearchConfig {
+        HybridSearchConfig {
+            embedding_model: self.config.indexing.embedding_model.clone(),
+            vector_weight: self.config.indexing.vector_weight,
+            keyword_weight: self.config.indexing.keyword_weight,
+            embedding_cache_size: self.config.indexing.embedding_cache_size,
+            max_chunk_bytes: self.config.indexing.max_chunk_bytes,
+            embedding_cache_ttl_ms: 86_400_000,
+        }
     }
 
     pub fn execute_tool_checked(&self, tool: &str, input: &str) -> ToolResult {
@@ -222,6 +227,17 @@ impl Runtime {
 
         Ok(None)
     }
+}
+
+fn truncate_text(input: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in input.chars() {
+        if out.chars().count() >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub async fn run_with_transport<T: Transport + 'static>(

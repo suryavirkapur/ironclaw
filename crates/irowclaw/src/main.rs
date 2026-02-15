@@ -74,7 +74,8 @@ impl common::transport::Transport for StdioTransport {
 
     async fn recv(
         &mut self,
-    ) -> Result<Option<common::proto::ironclaw::MessageEnvelope>, common::transport::TransportError> {
+    ) -> Result<Option<common::proto::ironclaw::MessageEnvelope>, common::transport::TransportError>
+    {
         use tokio::io::AsyncReadExt;
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];

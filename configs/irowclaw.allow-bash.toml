@@ -6,8 +6,10 @@ allow_file = true
 
 [indexing]
 max_chunk_bytes = 2048
-semantic_weight = 0.7
-lexical_weight = 0.3
+embedding_model = "text-embedding-3-small"
+vector_weight = 0.7
+keyword_weight = 0.3
+embedding_cache_size = 1000
 
 [scheduler]
 jobs_path = "/mnt/brain/cron/jobs.toml"
