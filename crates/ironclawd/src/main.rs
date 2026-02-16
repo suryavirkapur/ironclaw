@@ -9,7 +9,7 @@ mod whatsapp;
 
 use auth_transport::AuthenticatedTransport;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -20,6 +20,7 @@ use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 use common::logging::{init_logging, LoggingConfig, LoggingHandle};
 use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
+use daemon::GatewayCommand;
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
@@ -30,6 +31,9 @@ use memory::{
     upsert_memory, NewMemory,
 };
 use rusqlite::Connection;
+use security::auth::{channel_allowed, validate_webhook_secret};
+use security::pairing::PairingManager;
+use security::rate_limiter::{RateLimitConfig, RateLimiter};
 use serde::Deserialize;
 use serde::Serialize;
 use soul_guard::{
@@ -58,6 +62,11 @@ async fn main() -> Result<(), IronclawError> {
     let cli = daemon::CliArgs::parse()?;
     let config_path = host_config_path()?;
     let config = load_host_config_from_path(&config_path)?;
+
+    if let Some(command) = cli.gateway_command.clone() {
+        return run_gateway_cli(&config, command);
+    }
+
     let pid_file = resolve_pid_file(&cli, &config)?;
 
     if cli.stop {
@@ -115,6 +124,13 @@ async fn run_server(
     let state = AppState::new(config)?;
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/gateway/pair/start", post(gateway_pair_start_handler))
+        .route(
+            "/api/gateway/pair/verify",
+            post(gateway_pair_verify_handler),
+        )
+        .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/webhooks/{channel}", post(webhook_handler))
         .route("/ui", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))
         .route("/api/soul-guard/pending", get(soul_guard_pending_handler))
@@ -378,6 +394,7 @@ struct AppState {
     execution_mode: RuntimeExecutionMode,
     guest_allow_bash: bool,
     soul_guard_db_path: Arc<PathBuf>,
+    security_db_path: Arc<PathBuf>,
 }
 
 impl AppState {
@@ -427,6 +444,7 @@ impl AppState {
         };
         let execution_mode = RuntimeExecutionMode::from_config(&config);
         let soul_guard_db = soul_guard_db_path(&config.storage.users_root);
+        let security_db = security_db_path(&config.storage.users_root);
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -437,6 +455,7 @@ impl AppState {
             execution_mode,
             guest_allow_bash,
             soul_guard_db_path: Arc::new(soul_guard_db),
+            security_db_path: Arc::new(security_db),
         })
     }
 
@@ -495,6 +514,7 @@ impl IronclawError {
 struct WsQuery {
     user_id: Option<String>,
     session_id: Option<String>,
+    node_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,9 +534,28 @@ fn resolve_owner_user_id(source: ChannelSource, inbound_user_id: Option<&str>) -
 async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<WsQuery>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(err) = ensure_channel_allowed(&state, "websocket") {
+        tracing::warn!("websocket denied by channel allowlist: {err}");
+        return (StatusCode::FORBIDDEN, "channel not allowed").into_response();
+    }
+    if let Err(err) = ensure_gateway_request_authorized(&state, &query, Some(&headers)) {
+        tracing::warn!("websocket denied by gateway auth: {err}");
+        return (StatusCode::UNAUTHORIZED, "unauthorized gateway").into_response();
+    }
+    let user_id = resolve_owner_user_id(ChannelSource::WebSocket, query.user_id.as_deref());
+    if let Err(err) = enforce_rate_limit(&state, &user_id, "websocket", 0) {
+        tracing::warn!(
+            "rate limit hit user_id={} channel=websocket err={}",
+            user_id,
+            err
+        );
+        return (StatusCode::TOO_MANY_REQUESTS, "429 too many requests").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state, query))
+        .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
@@ -633,6 +672,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             ws_msg = receiver.next() => {
                 let Some(Ok(message)) = ws_msg else { break; };
                 if let Message::Text(text) = message {
+                    if let Err(err) = enforce_rate_limit(&state, &user_id, "websocket", 0) {
+                        tracing::warn!(
+                            "rate limit hit user_id={} channel=websocket err={}",
+                            user_id,
+                            err
+                        );
+                        let _ = sender
+                            .send(Message::Text("429 too many requests".to_string().into()))
+                            .await;
+                        break;
+                    }
                     last_user_activity = std::time::Instant::now();
                     match has_pending_approval_for_user(&state.soul_guard_db_path, &user_id) {
                         Ok(true) => {
@@ -1140,6 +1190,299 @@ async fn soul_guard_decision_handler(
     Ok(Json(SoulGuardDecisionResponse { updated }))
 }
 
+#[derive(Deserialize)]
+struct GatewayPairStartRequest {
+    node_id: String,
+}
+
+#[derive(Serialize)]
+struct GatewayPairStartResponse {
+    node_id: String,
+    otp: String,
+    expires_at: i64,
+}
+
+#[derive(Deserialize)]
+struct GatewayPairVerifyRequest {
+    node_id: String,
+    otp: String,
+}
+
+#[derive(Serialize)]
+struct GatewayPairVerifyResponse {
+    node_id: String,
+    bearer_token: String,
+}
+
+#[derive(Deserialize)]
+struct GatewayStatusQuery {
+    node_id: String,
+}
+
+#[derive(Serialize)]
+struct GatewayStatusResponse {
+    node_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct WebhookResponse {
+    accepted: bool,
+}
+
+async fn gateway_pair_start_handler(
+    State(state): State<AppState>,
+    Json(request): Json<GatewayPairStartRequest>,
+) -> Result<Json<GatewayPairStartResponse>, (StatusCode, String)> {
+    if !state.host_config.gateway.pairing.enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "gateway pairing disabled".to_string(),
+        ));
+    }
+    enforce_rate_limit(&state, &request.node_id, "gateway", 0).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "429 too many requests".to_string(),
+        )
+    })?;
+    let now_seconds =
+        now_epoch_seconds().map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let conn = open_security_db(&state)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let manager = PairingManager::new(state.host_config.gateway.pairing.otp_expiry_seconds);
+    let otp = manager
+        .begin_pairing(&conn, &request.node_id, now_seconds)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+    let expires_at =
+        now_seconds.saturating_add(state.host_config.gateway.pairing.otp_expiry_seconds as i64);
+    Ok(Json(GatewayPairStartResponse {
+        node_id: request.node_id,
+        otp,
+        expires_at,
+    }))
+}
+
+async fn gateway_pair_verify_handler(
+    State(state): State<AppState>,
+    Json(request): Json<GatewayPairVerifyRequest>,
+) -> Result<Json<GatewayPairVerifyResponse>, (StatusCode, String)> {
+    if !state.host_config.gateway.pairing.enabled {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "gateway pairing disabled".to_string(),
+        ));
+    }
+    enforce_rate_limit(&state, &request.node_id, "gateway", 0).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "429 too many requests".to_string(),
+        )
+    })?;
+    let now_seconds =
+        now_epoch_seconds().map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let conn = open_security_db(&state)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let manager = PairingManager::new(state.host_config.gateway.pairing.otp_expiry_seconds);
+    let token = manager
+        .verify_otp_and_issue_bearer(&conn, &request.node_id, &request.otp, now_seconds)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+    let Some(bearer_token) = token else {
+        return Err((StatusCode::UNAUTHORIZED, "invalid otp".to_string()));
+    };
+    Ok(Json(GatewayPairVerifyResponse {
+        node_id: request.node_id,
+        bearer_token,
+    }))
+}
+
+async fn gateway_status_handler(
+    State(state): State<AppState>,
+    Query(query): Query<GatewayStatusQuery>,
+) -> Result<Json<GatewayStatusResponse>, (StatusCode, String)> {
+    enforce_rate_limit(&state, &query.node_id, "gateway", 0).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "429 too many requests".to_string(),
+        )
+    })?;
+    let now_seconds =
+        now_epoch_seconds().map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let conn = open_security_db(&state)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    let manager = PairingManager::new(state.host_config.gateway.pairing.otp_expiry_seconds);
+    let status = manager
+        .current_status(&conn, &query.node_id, now_seconds)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))?;
+    Ok(Json(GatewayStatusResponse {
+        node_id: query.node_id,
+        status: pairing_status_name(status).to_string(),
+    }))
+}
+
+async fn webhook_handler(
+    Path(channel): Path<String>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WebhookResponse>, (StatusCode, String)> {
+    ensure_channel_allowed(&state, &channel)
+        .map_err(|_| (StatusCode::FORBIDDEN, "channel not allowed".to_string()))?;
+
+    let secret = headers
+        .get("x-webhook-secret")
+        .and_then(|value| value.to_str().ok());
+    if !validate_webhook_secret(&state.host_config.security.webhook_secret, secret) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "invalid webhook secret".to_string(),
+        ));
+    }
+
+    let user_id = headers
+        .get("x-user-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("webhook");
+    enforce_rate_limit(&state, user_id, &channel, 0).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "429 too many requests".to_string(),
+        )
+    })?;
+    Ok(Json(WebhookResponse { accepted: true }))
+}
+
+fn run_gateway_cli(config: &HostConfig, command: GatewayCommand) -> Result<(), IronclawError> {
+    if !config.gateway.pairing.enabled {
+        return Err(IronclawError::new("gateway pairing disabled in config"));
+    }
+    let db_path = security_db_path(&config.storage.users_root);
+    let conn = open_security_db_path(&db_path)?;
+    let now_seconds = now_epoch_seconds()?;
+    let manager = PairingManager::new(config.gateway.pairing.otp_expiry_seconds);
+
+    match command {
+        GatewayCommand::Pair { node_id, otp } => {
+            if let Some(value) = otp {
+                let token = manager
+                    .verify_otp_and_issue_bearer(&conn, &node_id, &value, now_seconds)
+                    .map_err(IronclawError::new)?;
+                if let Some(bearer_token) = token {
+                    println!("node_id={node_id}");
+                    println!("status=paired");
+                    println!("bearer_token={bearer_token}");
+                    return Ok(());
+                }
+                return Err(IronclawError::new("invalid or expired otp"));
+            }
+            let issued = manager
+                .begin_pairing(&conn, &node_id, now_seconds)
+                .map_err(IronclawError::new)?;
+            let expires_at =
+                now_seconds.saturating_add(config.gateway.pairing.otp_expiry_seconds as i64);
+            println!("node_id={node_id}");
+            println!("status=pairing");
+            println!("otp={issued}");
+            println!("expires_at={expires_at}");
+            Ok(())
+        }
+        GatewayCommand::Status { node_id } => {
+            let status = manager
+                .current_status(&conn, &node_id, now_seconds)
+                .map_err(IronclawError::new)?;
+            println!("node_id={node_id}");
+            println!("status={}", pairing_status_name(status));
+            Ok(())
+        }
+    }
+}
+
+fn pairing_status_name(status: security::pairing::PairingStatus) -> &'static str {
+    match status {
+        security::pairing::PairingStatus::Unpaired => "unpaired",
+        security::pairing::PairingStatus::Pairing => "pairing",
+        security::pairing::PairingStatus::Paired => "paired",
+    }
+}
+
+fn ensure_channel_allowed(state: &AppState, channel: &str) -> Result<(), IronclawError> {
+    if channel_allowed(&state.host_config.security.allowed_channels, channel) {
+        return Ok(());
+    }
+    Err(IronclawError::new(format!("channel denied: {channel}")))
+}
+
+fn ensure_gateway_request_authorized(
+    state: &AppState,
+    query: &WsQuery,
+    headers: Option<&HeaderMap>,
+) -> Result<(), IronclawError> {
+    if !state.host_config.gateway.pairing.enabled {
+        return Ok(());
+    }
+    let node_id = query
+        .node_id
+        .as_ref()
+        .map(|value| value.as_str())
+        .or_else(|| {
+            headers.and_then(|all| {
+                all.get("x-gateway-node-id")
+                    .and_then(|value| value.to_str().ok())
+            })
+        })
+        .ok_or_else(|| IronclawError::new("missing gateway node id"))?;
+
+    let bearer = headers.and_then(extract_bearer_token);
+    let Some(token) = bearer else {
+        return Err(IronclawError::new("missing bearer token"));
+    };
+
+    let conn = open_security_db(state)?;
+    let manager = PairingManager::new(state.host_config.gateway.pairing.otp_expiry_seconds);
+    let valid = manager
+        .validate_bearer(&conn, node_id, token)
+        .map_err(IronclawError::new)?;
+    if valid {
+        return Ok(());
+    }
+    Err(IronclawError::new("invalid bearer token"))
+}
+
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+}
+
+fn enforce_rate_limit(
+    state: &AppState,
+    user_id: &str,
+    channel: &str,
+    request_cost: u64,
+) -> Result<(), IronclawError> {
+    let conn = open_security_db(state)?;
+    let limiter = RateLimiter::new(RateLimitConfig {
+        requests_per_minute: state.host_config.security.rate_limit.requests_per_minute,
+        requests_per_hour: state.host_config.security.rate_limit.requests_per_hour,
+        cost_per_day_cap: state.host_config.security.rate_limit.cost_per_day_cap,
+    });
+    let now_seconds = now_epoch_seconds()?;
+    let decision = limiter
+        .check_and_record(&conn, user_id, channel, now_seconds, request_cost)
+        .map_err(IronclawError::new)?;
+    if decision.allowed {
+        return Ok(());
+    }
+    let reason = decision
+        .reason
+        .unwrap_or_else(|| "rate limit exceeded".to_string());
+    Err(IronclawError::new(format!(
+        "{reason}; retry_after_seconds={}",
+        decision.retry_after_seconds
+    )))
+}
+
 fn ui_file_response(path: &str) -> Response {
     match UI_DIR.get_file(path) {
         Some(file) => {
@@ -1196,12 +1539,31 @@ fn brain_db_path(root: &StdPath, user_id: &str) -> Result<PathBuf, IronclawError
     Ok(db_dir.join("ironclaw.db"))
 }
 
+fn security_db_path(root: &StdPath) -> PathBuf {
+    root.join("security.db")
+}
+
 fn open_memory_db(state: &AppState, user_id: &str) -> Result<Connection, IronclawError> {
     let db_path = brain_db_path(&state.host_config.storage.users_root, user_id)?;
     let conn = Connection::open(db_path)
         .map_err(|err| IronclawError::new(format!("memory db open failed: {err}")))?;
     initialize_schema(&conn)
         .map_err(|err| IronclawError::new(format!("memory db schema failed: {err}")))?;
+    Ok(conn)
+}
+
+fn open_security_db(state: &AppState) -> Result<Connection, IronclawError> {
+    open_security_db_path(&state.security_db_path)
+}
+
+fn open_security_db_path(path: &StdPath) -> Result<Connection, IronclawError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| IronclawError::new(format!("create security db dir failed: {err}")))?;
+    }
+    let conn = Connection::open(path)
+        .map_err(|err| IronclawError::new(format!("security db open failed: {err}")))?;
+    security::initialize_schema(&conn).map_err(IronclawError::new)?;
     Ok(conn)
 }
 
@@ -1323,6 +1685,10 @@ fn now_ms() -> Result<u64, IronclawError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|err| IronclawError::new(format!("time error: {err}")))
         .map(|duration| duration.as_millis() as u64)
+}
+
+fn now_epoch_seconds() -> Result<i64, IronclawError> {
+    now_ms().map(|value| (value / 1000) as i64)
 }
 
 fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::Payload, u64) {
@@ -1801,6 +2167,10 @@ async fn run_telegram_loop(
     settings: TelegramSettings,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), IronclawError> {
+    if let Err(err) = ensure_channel_allowed(&state, "telegram") {
+        tracing::warn!("telegram disabled by channel allowlist: {err}");
+        return Ok(());
+    }
     tracing::info!(
         "telegram loop started owner_chat_id={} offset_file={}",
         settings.owner_chat_id,
@@ -1853,6 +2223,17 @@ async fn run_telegram_loop(
                     let Some(session) = sessions.get_mut(&message.chat.id) else {
                         continue;
                     };
+                    if let Err(err) = enforce_rate_limit(&state, &session.user_id, "telegram", 0) {
+                        tracing::warn!(
+                            "rate limit hit user_id={} channel=telegram err={}",
+                            session.user_id,
+                            err
+                        );
+                        let _ = client
+                            .send_message(session.chat_id, "429 too many requests")
+                            .await;
+                        continue;
+                    }
                     if let Err(err) =
                         handle_telegram_text(&state, &client, session, text.as_str()).await
                     {
@@ -2420,6 +2801,10 @@ async fn run_whatsapp_loop(
     config: common::config::HostWhatsAppConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), IronclawError> {
+    if let Err(err) = ensure_channel_allowed(&state, "whatsapp") {
+        tracing::warn!("whatsapp disabled by channel allowlist: {err}");
+        return Ok(());
+    }
     tracing::info!(
         "whatsapp: starting bot (session_dir={}, qr_timeout_ms={})",
         config.session_dir,
@@ -2467,6 +2852,19 @@ async fn run_whatsapp_loop(
                 let Some(session) = sessions.get_mut(&incoming.sender_jid) else {
                     continue;
                 };
+                if let Err(err) = enforce_rate_limit(&state, &session.user_id, "whatsapp", 0) {
+                    tracing::warn!(
+                        "rate limit hit user_id={} channel=whatsapp err={}",
+                        session.user_id,
+                        err
+                    );
+                    let _ = whatsapp::send_whatsapp_message(
+                        &client,
+                        &session.sender_jid,
+                        "429 too many requests",
+                    ).await;
+                    continue;
+                }
                 tracing::debug!(
                     "channel route source=whatsapp sender={} user_id={} session_id={} event=ingress",
                     incoming.sender_jid,

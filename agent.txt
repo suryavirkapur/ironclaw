@@ -1,27 +1,28 @@
 current context:
-- completed rust-native whatsapp channel config and startup auth flow in `ironclawd`
-- whatsapp config now supports `session_dir`, `auth_method`, `qr_timeout_ms`
-- added runtime env override `WHATSAPP_SESSION_PATH` and session db resolution to `session.db`
-- whatsapp startup now enforces md5 auth method and qr login timeout handling
-- daemon cli now accepts and forwards `--whatsapp` and `--telegram` in daemon-child mode
-- added whatsapp message parsing tests and setup docs in `docs/whatsapp_setup.txt`
+- implemented security layer in `ironclawd` with a new `crates/security` crate
+- added gateway pairing flow with sqlite-backed otp lifecycle and bearer token validation
+- websocket can require gateway node id + bearer token when `gateway.pairing.enabled = true`
+- added sliding-window rate limiting backed by sqlite and wired checks into websocket,
+  telegram, whatsapp, webhook, and gateway api handlers
+- added channel allowlist and webhook secret auth gate enforcement
 
 pending tasks:
-- run live whatsapp send/receive validation with a real account and qr scan
-- validate restart reconnection timing and session reuse behavior under real network conditions
-- add integration coverage for daemon child propagation of `--whatsapp`/`--telegram`
+- decide whether to add an `openclaw` binary alias that proxies `gateway pair/status`
+- evaluate and fix flaky/hanging `daemon_exits_on_sigterm_and_cleans_pid_file` behavior in this environment
+- add external e2e coverage for gateway pairing endpoints with real http client flows
 
 important decisions:
-- standardized whatsapp session storage on directory-first config (`session_dir`)
-- kept backward compatibility for old `session_db_path` config via serde alias
-- implemented auth method guard as explicit `md5` requirement
+- kept pairing and rate limiting in a dedicated crate (`crates/security`) for reuse and isolation
+- stored bearer tokens hashed (`sha256`) while keeping otp values transient and cleared after pairing
+- used constant-time comparisons for otp and webhook/bearer secret checks
+- applied rate limiting at ingress points before request handling rather than after processing
 
 architectural notes:
-- whatsapp event loop signals auth states (`starting`, `qr`, `paired`, `connected`, `pair_failed`)
-- host waits up to `whatsapp.qr_timeout_ms` before failing startup if auth is not ready
-- dm ingress path remains whatsapp -> user session routing -> runtime -> whatsapp send
+- security sqlite db path is host-scoped at `users_root/security.db`
+- pairing schema includes required columns plus bearer hash metadata
+- rate limiter uses second-level buckets in `rate_limits` for sliding minute/hour sums
+- webhook auth uses header `x-webhook-secret`; optional user id for limits uses `x-user-id`
 
 plan:
-- run manual e2e whatsapp checklist:
-  send/receive, session persistence, restart reconnection
-- consider adding synthetic whatsapp transport tests with mocked event stream
+- monitor runtime behavior and tune default limits if production traffic patterns require it
+- add metrics export around rate-limit and auth-denied events if observability scope increases

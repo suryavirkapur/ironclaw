@@ -1,3 +1,24 @@
+0.8.0 2026-02-16
+- added new `security` crate with sqlite schema init for `pairing`, `rate_limits`, and `rate_limit_costs`
+- implemented gateway pairing state machine (`unpaired` -> `pairing` -> `paired`) with 6-digit otp,
+  5-minute default expiry, constant-time otp checks, and bearer token issuance/validation
+- added host config sections:
+  `gateway.pairing.enabled`, `gateway.pairing.otp_expiry_seconds` (alias `otpExpirySeconds`),
+  `security.allowed_channels`, `security.webhook_secret`, and
+  `security.rate_limit.{requests_per_minute,requests_per_hour,cost_per_day_cap}`
+- added gateway cli commands in `ironclawd`:
+  `gateway pair --node-id <id> [--otp <code>]` and
+  `gateway status --node-id <id>`
+- added http endpoints:
+  `POST /api/gateway/pair/start`, `POST /api/gateway/pair/verify`,
+  `GET /api/gateway/status`, and `POST /webhooks/{channel}`
+- added auth gate checks for channel allowlists, webhook secret validation, and optional gateway
+  bearer auth on websocket upgrade when pairing is enabled
+- added sliding-window rate limiting (per user/channel) before websocket, telegram, whatsapp,
+  webhook, and gateway-api request handling with `429` responses and warning logs on limit hits
+- added security unit tests for otp generation/validation, rate limiting behavior,
+  auth-gate helpers, and integration test for full pairing flow
+
 0.7.1 2026-02-16
 - completed rust-native whatsapp channel wiring in `ironclawd` using `whatsapp-rust`
 - added whatsapp auth config keys:
