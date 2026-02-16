@@ -21,6 +21,10 @@ pub struct HostConfig {
     pub log_level: LogLevel,
     #[serde(default)]
     pub daemon: HostDaemonConfig,
+    #[serde(default)]
+    pub gateway: HostGatewayConfig,
+    #[serde(default)]
+    pub security: HostSecurityConfig,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -244,6 +248,94 @@ impl HostConfig {
             idle_timeout_minutes: default_idle_timeout_minutes(),
             log_level: default_log_level(),
             daemon: HostDaemonConfig::default(),
+            gateway: HostGatewayConfig::default(),
+            security: HostSecurityConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostGatewayConfig {
+    #[serde(default)]
+    pub pairing: HostGatewayPairingConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostGatewayPairingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(
+        default = "default_gateway_pairing_otp_expiry_seconds",
+        alias = "otpExpirySeconds"
+    )]
+    pub otp_expiry_seconds: u64,
+}
+
+fn default_gateway_pairing_otp_expiry_seconds() -> u64 {
+    300
+}
+
+impl Default for HostGatewayPairingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otp_expiry_seconds: default_gateway_pairing_otp_expiry_seconds(),
+        }
+    }
+}
+
+impl Default for HostGatewayConfig {
+    fn default() -> Self {
+        Self {
+            pairing: HostGatewayPairingConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostSecurityConfig {
+    #[serde(default)]
+    pub allowed_channels: Vec<String>,
+    #[serde(default)]
+    pub webhook_secret: String,
+    #[serde(default)]
+    pub rate_limit: HostRateLimitConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostRateLimitConfig {
+    #[serde(default = "default_requests_per_minute")]
+    pub requests_per_minute: u32,
+    #[serde(default = "default_requests_per_hour")]
+    pub requests_per_hour: u32,
+    #[serde(default)]
+    pub cost_per_day_cap: u64,
+}
+
+fn default_requests_per_minute() -> u32 {
+    60
+}
+
+fn default_requests_per_hour() -> u32 {
+    1000
+}
+
+impl Default for HostRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: default_requests_per_minute(),
+            requests_per_hour: default_requests_per_hour(),
+            cost_per_day_cap: 0,
+        }
+    }
+}
+
+impl Default for HostSecurityConfig {
+    fn default() -> Self {
+        Self {
+            allowed_channels: Vec::new(),
+            webhook_secret: String::new(),
+            rate_limit: HostRateLimitConfig::default(),
         }
     }
 }

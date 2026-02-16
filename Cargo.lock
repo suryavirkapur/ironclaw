@@ -1349,6 +1349,7 @@ dependencies = [
  "rand",
  "reqwest",
  "rusqlite",
+ "security",
  "serde",
  "serde_json",
  "sha2",
@@ -2312,6 +2313,18 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "security"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "rand",
+ "rusqlite",
+ "serde",
+ "sha2",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "semver"

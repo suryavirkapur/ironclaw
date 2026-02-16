@@ -9,6 +9,18 @@ pub struct CliArgs {
     pub telegram: bool,
     pub whatsapp: bool,
     pub pid_file: Option<PathBuf>,
+    pub gateway_command: Option<GatewayCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GatewayCommand {
+    Pair {
+        node_id: String,
+        otp: Option<String>,
+    },
+    Status {
+        node_id: String,
+    },
 }
 
 impl CliArgs {
@@ -23,6 +35,9 @@ impl CliArgs {
                 "--stop" => cli.stop = true,
                 "--telegram" => cli.telegram = true,
                 "--whatsapp" => cli.whatsapp = true,
+                "gateway" => {
+                    cli.gateway_command = Some(parse_gateway_subcommand(&mut args)?);
+                }
                 "--pid-file" => {
                     let Some(path) = args.next() else {
                         return Err(IronclawError::new("missing value for --pid-file"));
@@ -39,7 +54,61 @@ impl CliArgs {
     }
 
     pub fn should_spawn_daemon(&self) -> bool {
-        self.daemon && !self.daemon_child
+        self.daemon && !self.daemon_child && self.gateway_command.is_none()
+    }
+}
+
+fn parse_gateway_subcommand(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<GatewayCommand, IronclawError> {
+    let Some(subcommand) = args.next() else {
+        return Err(IronclawError::new("missing gateway subcommand"));
+    };
+    match subcommand.as_str() {
+        "pair" => {
+            let mut node_id: Option<String> = None;
+            let mut otp: Option<String> = None;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--node-id" => {
+                        let Some(value) = args.next() else {
+                            return Err(IronclawError::new("missing value for --node-id"));
+                        };
+                        node_id = Some(value);
+                    }
+                    "--otp" => {
+                        let Some(value) = args.next() else {
+                            return Err(IronclawError::new("missing value for --otp"));
+                        };
+                        otp = Some(value);
+                    }
+                    _ => {
+                        return Err(IronclawError::new(format!(
+                            "unknown gateway pair argument: {flag}"
+                        )));
+                    }
+                }
+            }
+            let node_id = node_id.ok_or_else(|| IronclawError::new("missing --node-id"))?;
+            Ok(GatewayCommand::Pair { node_id, otp })
+        }
+        "status" => {
+            let Some(flag) = args.next() else {
+                return Err(IronclawError::new("missing --node-id"));
+            };
+            if flag != "--node-id" {
+                return Err(IronclawError::new(format!(
+                    "unknown gateway status argument: {flag}"
+                )));
+            }
+            let Some(node_id) = args.next() else {
+                return Err(IronclawError::new("missing value for --node-id"));
+            };
+            Ok(GatewayCommand::Status { node_id })
+        }
+        _ => Err(IronclawError::new(format!(
+            "unknown gateway subcommand: {subcommand}"
+        ))),
     }
 }
 
@@ -161,5 +230,6 @@ mod tests {
         assert!(!cli.telegram);
         assert!(!cli.whatsapp);
         assert!(cli.pid_file.is_none());
+        assert!(cli.gateway_command.is_none());
     }
 }

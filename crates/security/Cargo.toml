@@ -1,0 +1,14 @@
+[package]
+name = "security"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hex = "*"
+rand = "*"
+rusqlite = { version = "*", features = ["bundled"] }
+serde = { version = "*", features = ["derive"] }
+sha2 = "*"
+thiserror = "*"
+

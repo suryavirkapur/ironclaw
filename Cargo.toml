@@ -3,6 +3,7 @@ members = [
   "crates/ironclawd",
   "crates/irowclaw",
   "crates/common",
+  "crates/security",
   "crates/tools",
   "crates/memory",
 ]
