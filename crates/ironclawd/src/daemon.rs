@@ -6,6 +6,8 @@ pub struct CliArgs {
     pub daemon: bool,
     pub daemon_child: bool,
     pub stop: bool,
+    pub telegram: bool,
+    pub whatsapp: bool,
     pub pid_file: Option<PathBuf>,
 }
 
@@ -19,6 +21,8 @@ impl CliArgs {
                 "--daemon" => cli.daemon = true,
                 "--daemon-child" => cli.daemon_child = true,
                 "--stop" => cli.stop = true,
+                "--telegram" => cli.telegram = true,
+                "--whatsapp" => cli.whatsapp = true,
                 "--pid-file" => {
                     let Some(path) = args.next() else {
                         return Err(IronclawError::new("missing value for --pid-file"));
@@ -64,6 +68,12 @@ pub fn spawn_daemon_child(cli: &CliArgs) -> Result<(), IronclawError> {
 
     if let Some(path) = &cli.pid_file {
         command.arg("--pid-file").arg(path);
+    }
+    if cli.telegram {
+        command.arg("--telegram");
+    }
+    if cli.whatsapp {
+        command.arg("--whatsapp");
     }
 
     let _child = command
@@ -136,4 +146,20 @@ fn read_pid(path: &Path) -> Result<i32, IronclawError> {
     trimmed
         .parse::<i32>()
         .map_err(|err| IronclawError::new(format!("parse pid failed: {err}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_args_defaults() {
+        let cli = CliArgs::default();
+        assert!(!cli.daemon);
+        assert!(!cli.daemon_child);
+        assert!(!cli.stop);
+        assert!(!cli.telegram);
+        assert!(!cli.whatsapp);
+        assert!(cli.pid_file.is_none());
+    }
 }

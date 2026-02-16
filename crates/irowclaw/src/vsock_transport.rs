@@ -39,3 +39,7 @@ impl Transport for VsockTransport {
         self.inner.recv().await
     }
 }
+
+#[cfg(test)]
+#[path = "vsock_transport_test.rs"]
+mod vsock_transport_test;

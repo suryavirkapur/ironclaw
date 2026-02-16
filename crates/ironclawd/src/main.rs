@@ -2421,8 +2421,9 @@ async fn run_whatsapp_loop(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), IronclawError> {
     tracing::info!(
-        "whatsapp: starting bot (session_db={})",
-        config.session_db_path
+        "whatsapp: starting bot (session_dir={}, qr_timeout_ms={})",
+        config.session_dir,
+        config.qr_timeout_ms
     );
 
     let (client, mut rx) = whatsapp::start_whatsapp_bot(&config).await?;
@@ -2855,8 +2856,9 @@ mod tests {
         load_telegram_offset, load_telegram_transcript, resolve_owner_user_id,
         save_telegram_offset, save_telegram_transcript, should_enter_idle_sleep,
         split_telegram_chunks, telegram_firecracker_requirement_error, telegram_transcript_path,
-        ChannelSource, RuntimeExecutionMode, TelegramTranscript, TelegramTranscriptMessage,
-        ToolPlan, TELEGRAM_TRANSCRIPT_MAX_TURNS,
+        ws_text_to_guest_payload, ChannelSource, RuntimeExecutionMode, TelegramApiResponse,
+        TelegramTranscript, TelegramTranscriptMessage, TelegramUpdate, ToolPlan,
+        TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
     use common::proto::ironclaw::{message_envelope, MessageEnvelope};
     use common::transport::{LocalTransport, Transport};
@@ -3011,6 +3013,64 @@ mod tests {
             resolve_owner_user_id(ChannelSource::WebSocket, Some("alice")),
             "alice".to_string()
         );
+    }
+
+    #[test]
+    fn telegram_update_json_parses_text_message() {
+        let json = r#"{
+            "ok": true,
+            "result": [
+                {
+                    "update_id": 77,
+                    "message": {
+                        "text": "hello from telegram",
+                        "chat": { "id": 12345 }
+                    }
+                }
+            ]
+        }"#;
+        let parsed: TelegramApiResponse<Vec<TelegramUpdate>> = match serde_json::from_str(json) {
+            Ok(value) => value,
+            Err(err) => panic!("telegram parse failed: {err}"),
+        };
+
+        assert!(parsed.ok);
+        assert_eq!(parsed.result.len(), 1);
+        let update = &parsed.result[0];
+        assert_eq!(update.update_id, 77);
+        let message = match &update.message {
+            Some(value) => value,
+            None => panic!("message missing"),
+        };
+        assert_eq!(message.chat.id, 12345);
+        assert_eq!(message.text.as_deref(), Some("hello from telegram"));
+    }
+
+    #[test]
+    fn websocket_toolcall_messages_route_as_tool_calls() {
+        let (payload, next_msg_id) =
+            ws_text_to_guest_payload("!toolcall file_read\nnotes/a.txt", 9);
+        assert_eq!(next_msg_id, 10);
+        match payload {
+            message_envelope::Payload::ToolCallRequest(request) => {
+                assert_eq!(request.call_id, 9);
+                assert_eq!(request.tool, "file_read");
+                assert_eq!(request.input, "notes/a.txt");
+            }
+            _ => panic!("expected tool call request"),
+        }
+    }
+
+    #[test]
+    fn websocket_plain_text_routes_as_user_message() {
+        let (payload, next_msg_id) = ws_text_to_guest_payload("hello guest", 41);
+        assert_eq!(next_msg_id, 42);
+        match payload {
+            message_envelope::Payload::UserMessage(message) => {
+                assert_eq!(message.text, "hello guest");
+            }
+            _ => panic!("expected user message payload"),
+        }
     }
 
     #[tokio::test]

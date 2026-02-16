@@ -1,26 +1,27 @@
 current context:
-- added shared logging stack in `crates/common/src/logging.rs` with dynamic level reload support
-- host and guest config now include `log_level` with default `info`
-- ironclawd now supports daemon lifecycle flags, pid files, and unix signal hooks
-- host daemon config now includes pid/log path, graceful shutdown timeout, and log rotation settings
-- log sink supports size/daily rotation with gzip compression and retention trimming
+- completed rust-native whatsapp channel config and startup auth flow in `ironclawd`
+- whatsapp config now supports `session_dir`, `auth_method`, `qr_timeout_ms`
+- added runtime env override `WHATSAPP_SESSION_PATH` and session db resolution to `session.db`
+- whatsapp startup now enforces md5 auth method and qr login timeout handling
+- daemon cli now accepts and forwards `--whatsapp` and `--telegram` in daemon-child mode
+- added whatsapp message parsing tests and setup docs in `docs/whatsapp_setup.txt`
 
 pending tasks:
-- validate daemon behavior against a real network-enabled runtime environment
-- decide if stop flow should actively wait for full process exit in non-sandbox deployments
-- expand config reload scope beyond logging to full runtime mutable settings
+- run live whatsapp send/receive validation with a real account and qr scan
+- validate restart reconnection timing and session reuse behavior under real network conditions
+- add integration coverage for daemon child propagation of `--whatsapp`/`--telegram`
 
 important decisions:
-- implemented shared logging in `common` so host and guest use one level model
-- used runtime reload handle for log level changes on sighup
-- added a no-bind daemon test mode (`IRONCLAWD_TEST_NO_BIND=1`) for integration tests under sandbox restrictions
+- standardized whatsapp session storage on directory-first config (`session_dir`)
+- kept backward compatibility for old `session_db_path` config via serde alias
+- implemented auth method guard as explicit `md5` requirement
 
 architectural notes:
-- logging initialization now happens before host runtime startup and before guest transport loop startup
-- daemon start flow forks by spawning a detached child with `--daemon-child`
-- stop flow reads pid file and sends sigterm; pid file cleanup is handled in stop and normal daemon teardown
-- signal model: sigterm triggers shutdown path, sighup reloads host config for logging level, sigusr1 rotates logs
+- whatsapp event loop signals auth states (`starting`, `qr`, `paired`, `connected`, `pair_failed`)
+- host waits up to `whatsapp.qr_timeout_ms` before failing startup if auth is not ready
+- dm ingress path remains whatsapp -> user session routing -> runtime -> whatsapp send
 
 plan:
-- monitor log rotation behavior and tune default max size/retention values from production data
-- add richer daemon health probes if service supervision tooling is introduced
+- run manual e2e whatsapp checklist:
+  send/receive, session persistence, restart reconnection
+- consider adding synthetic whatsapp transport tests with mocked event stream

@@ -11,6 +11,7 @@ use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use wacore::types::events::Event;
 use wacore_binary::jid::Jid;
 use waproto::whatsapp as wa;
@@ -32,22 +33,38 @@ pub struct IncomingWhatsAppMessage {
 pub async fn start_whatsapp_bot(
     config: &HostWhatsAppConfig,
 ) -> Result<(Arc<Client>, mpsc::Receiver<IncomingWhatsAppMessage>), IronclawError> {
-    let (tx, rx) = mpsc::channel::<IncomingWhatsAppMessage>(256);
+    if !config.auth_method.eq_ignore_ascii_case("md5") {
+        return Err(IronclawError::new(format!(
+            "unsupported whatsapp auth method: {}",
+            config.auth_method
+        )));
+    }
 
-    let db_path = &config.session_db_path;
-    if let Some(parent) = StdPath::new(db_path).parent() {
+    let (tx, rx) = mpsc::channel::<IncomingWhatsAppMessage>(256);
+    let (auth_tx, mut auth_rx) = watch::channel(AuthState::Starting);
+
+    let session_dir = resolve_session_dir(config);
+    std::fs::create_dir_all(&session_dir)
+        .map_err(|err| IronclawError::new(format!("whatsapp session dir create failed: {err}")))?;
+    let db_path = session_db_path(&session_dir);
+
+    if let Some(parent) = StdPath::new(&db_path).parent() {
         std::fs::create_dir_all(parent).map_err(|err| {
             IronclawError::new(format!("whatsapp session dir create failed: {err}"))
         })?;
     }
 
+    let db_path_str = db_path
+        .to_str()
+        .ok_or_else(|| IronclawError::new("whatsapp session path is not valid utf-8"))?;
     let backend = Arc::new(
-        whatsapp_rust::store::SqliteStore::new(db_path)
+        whatsapp_rust::store::SqliteStore::new(db_path_str)
             .await
             .map_err(|err| IronclawError::new(format!("whatsapp sqlite store failed: {err}")))?,
     );
 
     let event_tx = tx.clone();
+    let auth_event_tx = auth_tx.clone();
 
     let mut bot = Bot::builder()
         .with_backend(backend)
@@ -55,9 +72,11 @@ pub async fn start_whatsapp_bot(
         .with_http_client(whatsapp_rust::transport::UreqHttpClient::new())
         .on_event(move |event, _client| {
             let tx = event_tx.clone();
+            let auth_tx = auth_event_tx.clone();
             async move {
                 match event {
                     Event::PairingQrCode { code, .. } => {
+                        let _ = auth_tx.send(AuthState::QrShown);
                         tracing::info!("whatsapp: scan this qr code to login");
                         if let Err(err) = qr2term::print_qr(&code) {
                             tracing::error!("whatsapp qr render failed: {err}");
@@ -65,6 +84,7 @@ pub async fn start_whatsapp_bot(
                         }
                     }
                     Event::PairSuccess(ref pair_success) => {
+                        let _ = auth_tx.send(AuthState::Paired);
                         tracing::info!(
                             "whatsapp: paired successfully with {} ({})",
                             pair_success.id,
@@ -72,9 +92,11 @@ pub async fn start_whatsapp_bot(
                         );
                     }
                     Event::PairError(ref error) => {
+                        let _ = auth_tx.send(AuthState::PairFailed(error.error.clone()));
                         tracing::error!("whatsapp pairing failed: {}", error.error);
                     }
                     Event::Connected(_) => {
+                        let _ = auth_tx.send(AuthState::Connected);
                         tracing::info!("whatsapp: connected");
                     }
                     Event::Message(ref msg, ref info) => {
@@ -115,6 +137,37 @@ pub async fn start_whatsapp_bot(
             }
         }
     });
+
+    let qr_timeout = std::time::Duration::from_millis(config.qr_timeout_ms);
+    let ready = tokio::time::timeout(qr_timeout, async {
+        loop {
+            let current = auth_rx.borrow().clone();
+            match current {
+                AuthState::Connected | AuthState::Paired => break Ok(()),
+                AuthState::PairFailed(reason) => {
+                    break Err(IronclawError::new(format!(
+                        "whatsapp pairing failed: {reason}"
+                    )));
+                }
+                AuthState::Starting | AuthState::QrShown => {
+                    if auth_rx.changed().await.is_err() {
+                        break Err(IronclawError::new("whatsapp auth event channel closed"));
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    match ready {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(IronclawError::new(format!(
+                "whatsapp qr login timed out after {} ms",
+                config.qr_timeout_ms
+            )))
+        }
+    }
 
     Ok((client, rx))
 }
@@ -161,7 +214,8 @@ pub fn is_allowed(config: &HostWhatsAppConfig, sender_jid: &str) -> bool {
     if config.allowlist.is_empty() {
         return config.self_chat_enabled;
     }
-    // Extract the phone number part from JID (e.g., "15551234567" from "15551234567@s.whatsapp.net")
+    // Extract the phone number part from JID.
+    // Example: "15551234567" from "15551234567@s.whatsapp.net".
     let sender_number = sender_jid
         .split('@')
         .next()
@@ -180,6 +234,31 @@ pub fn should_enable_whatsapp(config: &common::config::HostConfig) -> bool {
         return true;
     }
     config.whatsapp.enabled
+}
+
+fn resolve_session_dir(config: &HostWhatsAppConfig) -> PathBuf {
+    if let Ok(value) = std::env::var("WHATSAPP_SESSION_PATH") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    PathBuf::from(&config.session_dir)
+}
+
+fn session_db_path(session_dir: &StdPath) -> PathBuf {
+    if session_dir.extension().is_some_and(|ext| ext == "db") {
+        return session_dir.to_path_buf();
+    }
+    session_dir.join("session.db")
+}
+
+#[derive(Clone, Debug)]
+enum AuthState {
+    Starting,
+    QrShown,
+    Paired,
+    Connected,
+    PairFailed(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -430,5 +509,47 @@ mod tests {
         assert_eq!(chunks[0].len(), 4096);
         assert_eq!(chunks[1].len(), 4096);
         assert_eq!(chunks[2].len(), 808);
+    }
+
+    #[test]
+    fn parse_message_conversation_text() {
+        let msg = wa::Message {
+            conversation: Some("hello".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(extract_text_from_message(&msg), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn parse_message_extended_text() {
+        let msg = wa::Message {
+            extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
+                text: Some("hello ext".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_text_from_message(&msg),
+            Some("hello ext".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_message_missing_text() {
+        let msg = wa::Message::default();
+        assert_eq!(extract_text_from_message(&msg), None);
+    }
+
+    #[test]
+    fn session_db_path_from_dir_and_file() {
+        assert_eq!(
+            session_db_path(StdPath::new("data/whatsapp")),
+            PathBuf::from("data/whatsapp/session.db")
+        );
+        assert_eq!(
+            session_db_path(StdPath::new("data/whatsapp/session.db")),
+            PathBuf::from("data/whatsapp/session.db")
+        );
     }
 }

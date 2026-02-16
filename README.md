@@ -99,6 +99,50 @@ test:
   `data/users/telegram-<chat_id>/telegram.transcript.json` (or your configured `users_root`)
 - planning uses a rolling context window of the last 50 turns per telegram session
 
+## whatsapp quickstart
+
+the host supports a native rust whatsapp channel using `whatsapp-rust` (not baileys).
+
+required behavior:
+
+- `auth_method = "md5"` in host config (`[whatsapp]`)
+- terminal qr pairing on first login
+- session persistence in sqlite under `whatsapp.session_dir`
+
+config keys:
+
+```toml
+[whatsapp]
+enabled = true
+session_dir = "data/whatsapp"
+auth_method = "md5"
+qr_timeout_ms = 120000
+allowlist = ["+15551234567"]
+self_chat_enabled = false
+```
+
+env override:
+
+- `WHATSAPP_SESSION_PATH` overrides `whatsapp.session_dir`
+
+run:
+
+```bash
+cargo run -p ironclawd -- --whatsapp
+```
+
+first run prints a qr code in terminal.
+scan from whatsapp mobile app:
+
+1. settings
+2. linked devices
+3. link a device
+4. scan terminal qr
+
+dm flow:
+
+- incoming whatsapp dm -> `ironclawd` session routing -> agent response -> whatsapp reply
+
 ## config
 
 host config path resolution:

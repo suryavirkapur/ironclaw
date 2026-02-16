@@ -1,0 +1,41 @@
+whatsapp setup for ironclawd
+
+prerequisites
+- rust toolchain installed
+- valid host config at ~/.config/ironclaw/ironclawd.toml or IRONCLAWD_CONFIG
+
+host config
+[whatsapp]
+enabled = true
+session_dir = "data/whatsapp"
+auth_method = "md5"
+qr_timeout_ms = 120000
+allowlist = ["+15551234567"]
+self_chat_enabled = false
+
+environment overrides
+- WHATSAPP_SESSION_PATH: overrides whatsapp.session_dir
+
+run command
+cargo run -p ironclawd -- --whatsapp
+
+qr login flow
+1. start ironclawd with --whatsapp
+2. wait for terminal qr rendering
+3. in mobile whatsapp, open settings > linked devices > link a device
+4. scan the terminal qr code
+5. wait for pairing success and connected logs
+
+session persistence
+- credentials are persisted in sqlite at <session_dir>/session.db
+- if session_dir ends with .db, that file path is used directly
+
+message flow
+- incoming personal chat dm is received from whatsapp websocket events
+- ironclawd routes message into user session and runtime
+- final assistant output is sent back to sender jid
+
+testing checklist
+- send/receive: send a dm and verify reply
+- persistence: restart ironclawd and verify no new qr required
+- reconnection: restart ironclawd and verify message loop resumes

@@ -161,16 +161,28 @@ fn default_telegram_poll_timeout_seconds() -> u64 {
 pub struct HostWhatsAppConfig {
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_whatsapp_session_db_path")]
-    pub session_db_path: String,
+    #[serde(default = "default_whatsapp_session_dir", alias = "session_db_path")]
+    pub session_dir: String,
+    #[serde(default = "default_whatsapp_auth_method")]
+    pub auth_method: String,
+    #[serde(default = "default_whatsapp_qr_timeout_ms")]
+    pub qr_timeout_ms: u64,
     #[serde(default)]
     pub allowlist: Vec<String>,
     #[serde(default = "default_whatsapp_self_chat")]
     pub self_chat_enabled: bool,
 }
 
-fn default_whatsapp_session_db_path() -> String {
-    "data/whatsapp_session.db".to_string()
+fn default_whatsapp_session_dir() -> String {
+    "data/whatsapp".to_string()
+}
+
+fn default_whatsapp_auth_method() -> String {
+    "md5".to_string()
+}
+
+fn default_whatsapp_qr_timeout_ms() -> u64 {
+    120_000
 }
 
 fn default_whatsapp_self_chat() -> bool {
@@ -181,7 +193,9 @@ impl Default for HostWhatsAppConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            session_db_path: default_whatsapp_session_db_path(),
+            session_dir: default_whatsapp_session_dir(),
+            auth_method: default_whatsapp_auth_method(),
+            qr_timeout_ms: default_whatsapp_qr_timeout_ms(),
             allowlist: vec![],
             self_chat_enabled: default_whatsapp_self_chat(),
         }

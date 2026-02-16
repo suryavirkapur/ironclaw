@@ -48,6 +48,10 @@ fn host_workspace_root(user_id: &str) -> Result<PathBuf, String> {
 async fn run_bash(cwd: &Path, cmd: &str) -> Result<String, String> {
     use tokio::process::Command;
 
+    if let Some(pattern) = blocked_bash_pattern(cmd) {
+        return Err(format!("bash blocked by policy: contains '{pattern}'"));
+    }
+
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         Command::new("bash")
@@ -71,6 +75,15 @@ async fn run_bash(cwd: &Path, cmd: &str) -> Result<String, String> {
     } else {
         Err(out)
     }
+}
+
+fn blocked_bash_pattern(cmd: &str) -> Option<&'static str> {
+    let lower = cmd.to_lowercase();
+    [
+        "rm ", "sudo", "curl ", "wget ", "ssh ", "scp ", "nc ", "netcat",
+    ]
+    .into_iter()
+    .find(|pattern| lower.contains(pattern))
 }
 
 async fn file_read(root: &Path, path: &str) -> Result<String, String> {
@@ -118,4 +131,49 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
         return Err("path escapes workspace".to_string());
     }
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blocked_bash_pattern, file_read, file_write};
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("ironclaw-host-tools-{name}-{stamp}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn bash_policy_blocks_sudo_and_rm() {
+        assert_eq!(blocked_bash_pattern("sudo ls"), Some("sudo"));
+        assert_eq!(blocked_bash_pattern("rm -rf /tmp/demo"), Some("rm "));
+        assert_eq!(blocked_bash_pattern("echo safe"), None);
+    }
+
+    #[tokio::test]
+    async fn file_tools_reject_path_escape() {
+        let root = temp_root("escape");
+        let read_result = file_read(&root, "../etc/passwd").await;
+        assert!(read_result.is_err());
+
+        let write_result = file_write(&root, "../outside.txt\nblocked").await;
+        assert!(write_result.is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_tools_write_and_read_inside_root() {
+        let root = temp_root("roundtrip");
+        let write = file_write(&root, "notes/a.txt\nhello").await;
+        assert!(write.is_ok());
+
+        let read = file_read(&root, "notes/a.txt").await;
+        assert_eq!(read.ok().as_deref(), Some("hello"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

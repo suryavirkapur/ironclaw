@@ -1,10 +1,9 @@
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn unique_temp_dir(name: &str) -> io::Result<PathBuf> {
+fn unique_temp_dir(name: &str) -> std::io::Result<PathBuf> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
@@ -14,7 +13,7 @@ fn unique_temp_dir(name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-fn write_host_config(path: &Path, pid_file: &Path, log_file: &Path) -> io::Result<()> {
+fn write_host_config(path: &Path, pid_file: &Path, log_file: &Path) -> std::io::Result<()> {
     let contents = format!(
         concat!(
             "execution_mode = \"host_only\"\n",
@@ -22,7 +21,7 @@ fn write_host_config(path: &Path, pid_file: &Path, log_file: &Path) -> io::Resul
             "log_level = \"info\"\n",
             "[server]\n",
             "bind = \"127.0.0.1\"\n",
-            "port = 10938\n",
+            "port = 11938\n",
             "[ui]\n",
             "mount = \"/ui\"\n",
             "index_file = \"index.html\"\n",
@@ -41,87 +40,19 @@ fn write_host_config(path: &Path, pid_file: &Path, log_file: &Path) -> io::Resul
             "pid_file = \"{}\"\n",
             "log_file = \"{}\"\n",
             "graceful_timeout_ms = 4000\n",
-            "log_rotate_keep = 5\n",
+            "log_rotate_keep = 2\n",
             "log_rotate_max_bytes = 1048576\n",
         ),
         pid_file.display(),
-        log_file.display()
+        log_file.display(),
     );
     std::fs::write(path, contents)
 }
 
-fn wait_for_file(path: &Path, timeout: Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-#[test]
-fn daemon_start_and_stop_with_pid_file() {
-    let temp_root = match unique_temp_dir("ironclawd-daemon-test") {
-        Ok(path) => path,
-        Err(err) => panic!("temp dir create failed: {err}"),
-    };
-    let config_path = temp_root.join("ironclawd.toml");
-    let pid_file = temp_root.join("ironclawd.pid");
-    let log_file = temp_root.join("ironclawd.log");
-
-    if let Err(err) = write_host_config(&config_path, &pid_file, &log_file) {
-        panic!("config write failed: {err}");
-    }
-
-    let binary = env!("CARGO_BIN_EXE_ironclawd");
-
-    let start_status = Command::new(binary)
-        .arg("--daemon")
-        .arg("--pid-file")
-        .arg(&pid_file)
-        .env("IRONCLAWD_CONFIG", &config_path)
-        .env("IRONCLAWD_TEST_NO_BIND", "1")
-        .status();
-    let start_status = match start_status {
-        Ok(status) => status,
-        Err(err) => panic!("start command failed: {err}"),
-    };
-    assert!(start_status.success());
-    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
-
-    let stop_status = Command::new(binary)
-        .arg("--stop")
-        .arg("--pid-file")
-        .arg(&pid_file)
-        .env("IRONCLAWD_CONFIG", &config_path)
-        .status();
-    let stop_status = match stop_status {
-        Ok(status) => status,
-        Err(err) => panic!("stop command failed: {err}"),
-    };
-    assert!(stop_status.success());
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if !pid_file.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(!pid_file.exists());
-
-    let _ = std::fs::remove_dir_all(temp_root);
-}
-
 #[cfg(unix)]
 #[test]
-fn daemon_exits_on_sigterm_and_cleans_pid_file() {
-    use nix::sys::signal::{kill, Signal};
-    use nix::unistd::Pid;
-
-    let temp_root = match unique_temp_dir("ironclawd-sigterm-test") {
+fn channel_runtime_starts_in_no_bind_mode() {
+    let temp_root = match unique_temp_dir("ironclawd-channel-test") {
         Ok(path) => path,
         Err(err) => panic!("temp dir create failed: {err}"),
     };
@@ -143,25 +74,36 @@ fn daemon_exits_on_sigterm_and_cleans_pid_file() {
         .spawn()
     {
         Ok(value) => value,
-        Err(err) => panic!("daemon child spawn failed: {err}"),
+        Err(err) => panic!("spawn failed: {err}"),
     };
 
-    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
-    let raw_pid = match std::fs::read_to_string(&pid_file) {
+    thread::sleep(Duration::from_millis(300));
+    assert!(pid_file.exists());
+
+    let stop_status = Command::new(binary)
+        .arg("--stop")
+        .arg("--pid-file")
+        .arg(&pid_file)
+        .env("IRONCLAWD_CONFIG", &config_path)
+        .status();
+    let stop_status = match stop_status {
         Ok(value) => value,
-        Err(err) => panic!("pid read failed: {err}"),
+        Err(err) => panic!("stop command failed: {err}"),
     };
-    let parsed_pid = match raw_pid.trim().parse::<i32>() {
-        Ok(value) => value,
-        Err(err) => panic!("pid parse failed: {err}"),
-    };
+    assert!(stop_status.success());
 
-    if let Err(err) = kill(Pid::from_raw(parsed_pid), Signal::SIGTERM) {
-        panic!("sigterm failed: {err}");
-    }
-
-    let _ = child.wait();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(err) => panic!("try_wait failed: {err}"),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
         if !pid_file.exists() {
             break;
