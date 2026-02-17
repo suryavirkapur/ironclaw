@@ -276,7 +276,7 @@ mod tests {
         async fn execute(
             &self,
             _args: serde_json::Value,
-        ) -> anyhow::Result<crate::tools::ToolResult> {
+        ) -> Result<crate::tools::ToolResult, Box<dyn std::error::Error + Send + Sync>> {
             Ok(crate::tools::ToolResult {
                 success: true,
                 output: "ok".into(),

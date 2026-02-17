@@ -1,31 +1,35 @@
 current context:
-- implemented guest browser tooling with headless chromium/chrome execution in
-  `crates/tools/src/browser.rs`
-- browser tool supports `fetch`, `screenshot`, and `evaluate` actions with input parsing from
-  json or compact command strings
-- added browser safety controls: allowlisted domains, dangerous scheme blocking, timeout
-  enforcement, and linux process resource limits
-- wired browser registration in guest runtime and host tool allowlist exposure for guest sessions
-- updated guest rootfs builder to install chromium when available and warn gracefully when absent
+- expanded ironclaw to v0.10.0 with channel gateway, heartbeat, and admin api foundations
+- removed thiserror and anyhow from all crates; all errors use hand-written impls
+- added `crates/channels` for telegram + whatsapp cloud api webhook parsing
+- added `crates/heartbeat` for tokio-based periodic scheduler (30-min default interval)
+- added `crates/ironclawd/src/api.rs` with utoipa-annotated openapi routing module
+- scalar api docs ui served at `/api/docs`
+- added tokio-postgres + deadpool-postgres + askama + askama_web deps to ironclawd
+- new api routes merged into existing axum app via `Router::merge`
 
 pending tasks:
-- run full cargo test coverage for browser integration once crates.io/network access is available
-- validate browser tool behavior inside firecracker vm with a chromium-enabled rootfs image
-- decide whether to add a dedicated host config gate for enabling/disabling browser tool exposure
+- wire channel webhook handlers to actually route inbound messages to guest via vsock/ipc
+- implement postgres connection pool in appstate and wire admin endpoints
+- implement postgres memory schema (memories, context_windows tables)
+- build solid.js admin panel ui under `ui/` with vm monitoring, key management, memory view
+- implement heartbeat scheduler startup in ironclawd main server loop
+- add askama templates for server-rendered admin views
+- create dockerfile for single-binary build with embedded ui assets
+- implement skill sandboxing: parse third-party skill.md strictly on guest side only
 
 important decisions:
-- kept browser as a single guest tool (`browser`) with action-dispatch input
-  instead of separate tool names to minimize protocol churn
-- defaulted browser allowlist to empty so all domains are denied until explicitly configured
-- enforced browser sandbox controls in-process via linux `setrlimit` + `prctl(no_new_privs)`
-  without adding extra guest daemons
+- kept existing legacy routes (ws, gateway, webhooks, soul-guard) intact; new api module
+  adds routes alongside via router merge rather than replacing
+- chose utoipa 5 + scalar for openapi; spec auto-generated from annotated handlers
+- chose askama 0.15 + askama_web 0.15 for server-rendered templates (axum-0.8 feature)
+- chose tokio-postgres + deadpool (no orm) for host-side postgres
+- all error types are now manual impls — no thiserror or anyhow anywhere in workspace
 
 architectural notes:
-- guest browser config is now part of `common::config::GuestConfig` under `[browser]`
-- host runtime now includes `browser` in tool allowlists sent to guest runtimes
-- rootfs builder installs `/usr/bin/chromium` from host `chromium/chromium-browser/google-chrome`
-  binaries when present
-
-plan:
-- run vm smoke tests for browser fetch/screenshot using allowlisted domains
-- add evaluate integration tests against real chromium once network + package cache is available
+- api module (`api.rs`) owns all new endpoints; legacy routes stay in `main.rs`
+- channel crate parses raw webhook payloads into `InboundMessage` structs
+- heartbeat crate is standalone; ironclawd owns the callback wiring
+- host-side api keys stored in postgres, never exposed to guest runtime
+- memory entries stored on host in postgres; context window injected into guest per execution
+- whatsapp cloud api uses get verification + post webhook pattern

@@ -1,5 +1,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 
+mod api;
 mod auth_transport;
 mod daemon;
 mod host_tools;
@@ -122,7 +123,7 @@ async fn run_server(
     };
     let addr = format!("{}:{}", config.server.bind, config.server.port);
     let state = AppState::new(config)?;
-    let app = Router::new()
+    let legacy_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/gateway/pair/start", post(gateway_pair_start_handler))
         .route(
@@ -139,6 +140,9 @@ async fn run_server(
             post(soul_guard_decision_handler),
         )
         .with_state(state.clone());
+
+    let api_routes = api::build_router(state.clone());
+    let app = legacy_routes.merge(api_routes);
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -496,11 +500,18 @@ impl RuntimeExecutionMode {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("ironclawd error: {message}")]
+#[derive(Debug)]
 pub struct IronclawError {
     message: String,
 }
+
+impl std::fmt::Display for IronclawError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ironclawd error: {}", self.message)
+    }
+}
+
+impl std::error::Error for IronclawError {}
 
 impl IronclawError {
     fn new(message: impl Into<String>) -> Self {

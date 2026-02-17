@@ -10,5 +10,4 @@ rand = "*"
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
 sha2 = "*"
-thiserror = "*"
 

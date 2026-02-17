@@ -9,11 +9,18 @@ pub trait Transport: Send {
     async fn recv(&mut self) -> Result<Option<MessageEnvelope>, TransportError>;
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("transport error: {message}")]
+#[derive(Debug)]
 pub struct TransportError {
     message: String,
 }
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "transport error: {}", self.message)
+    }
+}
+
+impl std::error::Error for TransportError {}
 
 impl TransportError {
     pub fn new(message: impl Into<String>) -> Self {

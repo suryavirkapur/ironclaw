@@ -619,7 +619,10 @@ mod tests {
             serde_json::json!({"type": "object"})
         }
 
-        async fn execute(&self, _args: serde_json::Value) -> Result<crate::tools::ToolResult> {
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Result<crate::tools::ToolResult, Box<dyn std::error::Error + Send + Sync>> {
             Ok(crate::tools::ToolResult {
                 success: true,
                 output: "tool-out".into(),

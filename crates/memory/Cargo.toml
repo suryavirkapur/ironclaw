@@ -8,4 +8,4 @@ license.workspace = true
 rusqlite = { version = "*", features = ["bundled", "load_extension", "functions"] }
 serde_json = "*"
 sha2 = "*"
-thiserror = "*"
+

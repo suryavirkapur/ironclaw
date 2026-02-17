@@ -1,3 +1,23 @@
+0.10.0 2026-02-17
+- bumped workspace version from 0.1.0 to 0.10.0
+- removed `thiserror` dependency from all 6 workspace crates; replaced 10 error types
+  with hand-written `std::fmt::Display` + `std::error::Error` impls
+- removed `anyhow` from `crates/tools`; replaced tool trait return with
+  `Result<ToolResult, Box<dyn std::error::Error + Send + Sync>>`
+- added `crates/channels` crate: telegram + whatsapp cloud api webhook receivers
+  with `ChannelError` enum, axum `IntoResponse` impl, and inbound message parsers
+- added `crates/heartbeat` crate: tokio-based periodic scheduler with configurable
+  interval, async callbacks, graceful shutdown, and drop cleanup
+- added `crates/ironclawd/src/api.rs`: utoipa-annotated axum routing module with
+  openapi 3.1 spec generation, scalar ui at `/api/docs`, and endpoint stubs for:
+  health/readiness, telegram/whatsapp channel webhooks, admin vm management,
+  host-side api key management, memory listing, and heartbeat status
+- added ironclawd dependencies: channels, heartbeat, utoipa, utoipa-scalar,
+  tokio-postgres, deadpool-postgres, askama, askama_web, chrono
+- merged new api router into existing ironclawd axum app via `Router::merge`
+- added unit tests: openapi spec generation, api error serialization,
+  heartbeat tick firing, heartbeat double-start rejection
+
 0.9.0 2026-02-16
 - added guest `browser` tool in `crates/tools/src/browser.rs` with headless chromium/chrome support
   for `fetch`, `screenshot`, and `evaluate` actions

@@ -14,11 +14,18 @@ pub struct ConversationMessage {
     pub text: String,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("llm client error: {message}")]
+#[derive(Debug)]
 pub struct LlmClientError {
     message: String,
 }
+
+impl std::fmt::Display for LlmClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "llm client error: {}", self.message)
+    }
+}
+
+impl std::error::Error for LlmClientError {}
 
 impl LlmClientError {
     fn new(message: impl Into<String>) -> Self {

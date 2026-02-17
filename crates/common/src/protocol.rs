@@ -62,11 +62,18 @@ impl FrameCodec {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("protocol error: {message}")]
+#[derive(Debug)]
 pub struct ProtocolError {
     message: String,
 }
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "protocol error: {}", self.message)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
 
 impl ProtocolError {
     fn serialize(err: serde_json::Error) -> Self {

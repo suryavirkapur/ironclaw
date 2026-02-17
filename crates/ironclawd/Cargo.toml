@@ -19,7 +19,6 @@ reqwest = { version = "*", default-features = false, features = ["json", "rustls
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
-thiserror = "*"
 tokio = { version = "*", features = [
   "macros",
   "rt-multi-thread",
@@ -41,6 +40,15 @@ waproto = "0.2"
 wacore-binary = "0.2"
 qr2term = "0.3"
 log = "0.4"
+channels = { path = "../channels" }
+heartbeat = { path = "../heartbeat" }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+deadpool-postgres = "0.14"
+askama = "0.15"
+askama_web = { version = "0.15", features = ["axum-0.8"] }
+chrono = "*"
 
 [features]
 firecracker = ["common/firecracker"]

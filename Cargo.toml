@@ -6,10 +6,12 @@ members = [
   "crates/security",
   "crates/tools",
   "crates/memory",
+  "crates/channels",
+  "crates/heartbeat",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.10.0"
 edition = "2021"
 license = "unlicense"

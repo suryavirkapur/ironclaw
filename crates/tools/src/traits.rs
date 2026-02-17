@@ -48,7 +48,10 @@ pub trait Tool: Send + Sync {
     fn parameters_schema(&self) -> serde_json::Value;
 
     /// Execute the tool with given arguments
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<ToolResult, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get the full spec for LLM registration
     fn spec(&self) -> ToolSpec {

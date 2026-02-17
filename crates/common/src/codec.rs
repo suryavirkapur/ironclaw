@@ -46,11 +46,18 @@ impl ProtoCodec {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("codec error: {message}")]
+#[derive(Debug)]
 pub struct CodecError {
     message: String,
 }
+
+impl std::fmt::Display for CodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "codec error: {}", self.message)
+    }
+}
+
+impl std::error::Error for CodecError {}
 
 impl CodecError {
     fn new(message: impl Into<String>) -> Self {

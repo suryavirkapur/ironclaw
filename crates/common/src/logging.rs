@@ -77,12 +77,34 @@ impl Default for LoggingConfig {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum LoggingError {
-    #[error("logging init failed: {0}")]
     Init(String),
-    #[error("logging io failed: {0}")]
-    Io(#[from] io::Error),
+    Io(io::Error),
+}
+
+impl std::fmt::Display for LoggingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Init(msg) => write!(f, "logging init failed: {msg}"),
+            Self::Io(err) => write!(f, "logging io failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for LoggingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for LoggingError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
 }
 
 #[derive(Clone)]

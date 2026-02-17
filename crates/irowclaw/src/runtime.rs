@@ -18,11 +18,18 @@ use tools::{
     ToolResult,
 };
 
-#[derive(Debug, thiserror::Error)]
-#[error("irowclaw error: {message}")]
+#[derive(Debug)]
 pub struct IrowclawError {
     message: String,
 }
+
+impl std::fmt::Display for IrowclawError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "irowclaw error: {}", self.message)
+    }
+}
+
+impl std::error::Error for IrowclawError {}
 
 impl IrowclawError {
     pub fn new(message: impl Into<String>) -> Self {

@@ -27,11 +27,18 @@ pub trait VmManager: Send + Sync {
     async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError>;
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("vm error: {message}")]
+#[derive(Debug)]
 pub struct VmError {
     message: String,
 }
+
+impl std::fmt::Display for VmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "vm error: {}", self.message)
+    }
+}
+
+impl std::error::Error for VmError {}
 
 impl VmError {
     pub fn new(message: impl Into<String>) -> Self {

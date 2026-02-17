@@ -85,11 +85,18 @@ impl Default for HybridSearchConfig {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("memory error: {message}")]
+#[derive(Debug)]
 pub struct MemoryError {
     message: String,
 }
+
+impl std::fmt::Display for MemoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "memory error: {}", self.message)
+    }
+}
+
+impl std::error::Error for MemoryError {}
 
 impl MemoryError {
     fn new(message: impl Into<String>) -> Self {

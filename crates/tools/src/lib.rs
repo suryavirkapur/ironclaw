@@ -7,11 +7,18 @@ use std::path::{Component, Path, PathBuf};
 pub use browser::{BrowserTool, BrowserToolConfig};
 pub use traits::{Tool as ToolAsync, ToolResult as ToolResultAsync, ToolSpec as ToolSpecAsync};
 
-#[derive(Debug, thiserror::Error)]
-#[error("tool error: {message}")]
+#[derive(Debug)]
 pub struct ToolError {
     message: String,
 }
+
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "tool error: {}", self.message)
+    }
+}
+
+impl std::error::Error for ToolError {}
 
 impl ToolError {
     pub fn new(message: impl Into<String>) -> Self {
