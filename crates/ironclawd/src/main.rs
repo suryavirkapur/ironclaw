@@ -3,11 +3,11 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 mod api;
 mod auth_transport;
 mod daemon;
+mod host_tools;
 mod llm_client;
 mod soul_guard;
 mod whatsapp;
 
-use askama::Template;
 use auth_transport::AuthenticatedTransport;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -23,7 +23,7 @@ use common::logging::{init_logging, LoggingConfig, LoggingHandle};
 use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
 use daemon::GatewayCommand;
 use futures::{SinkExt, StreamExt};
-use heartbeat::{HeartbeatConfig, HeartbeatScheduler};
+use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
 use llm_client::{ConversationMessage, LlmClient, ToolPlan};
 use memory::{
@@ -43,13 +43,10 @@ use soul_guard::{
 };
 use std::cmp::min;
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path as StdPath, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use whatsapp::should_enable_whatsapp;
 
@@ -60,8 +57,6 @@ const TELEGRAM_RETRY_MAX_ATTEMPTS: usize = 2;
 const MEMORY_RETRIEVAL_LIMIT: usize = 10;
 const MEMORY_PROMPT_BUDGET_CHARS: usize = 3200;
 const IDLE_CHECK_SECONDS: u64 = 10;
-const HEARTBEAT_INTERVAL_SECONDS: u64 = 30 * 60;
-const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
@@ -128,30 +123,7 @@ async fn run_server(
     };
     let addr = format!("{}:{}", config.server.bind, config.server.port);
     let state = AppState::new(config)?;
-    let mut heartbeat_scheduler = HeartbeatScheduler::new(HeartbeatConfig {
-        interval: Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS),
-        label: "cron-heartbeat".to_string(),
-    });
-    let heartbeat_state = state.clone();
-    let heartbeat_metrics = state.heartbeat_state.clone();
-    let heartbeat_callback = Arc::new(move || {
-        let heartbeat_state = heartbeat_state.clone();
-        let heartbeat_metrics = heartbeat_metrics.clone();
-        Box::pin(async move {
-            let timestamp_ms = now_ms().map_err(|err| err.to_string())?;
-            heartbeat_metrics.record_tick(timestamp_ms);
-            trigger_heartbeat_tick(&heartbeat_state)
-                .await
-                .map_err(|err| err.to_string())
-        })
-            as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
-    });
-    heartbeat_scheduler
-        .start(heartbeat_callback)
-        .map_err(|err| IronclawError::new(format!("heartbeat scheduler start failed: {err}")))?;
-    state.heartbeat_state.set_running(true);
     let legacy_routes = Router::new()
-        .route("/", get(home_handler))
         .route("/ws", get(ws_handler))
         .route("/api/gateway/pair/start", post(gateway_pair_start_handler))
         .route(
@@ -229,7 +201,7 @@ async fn run_server(
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|err| IronclawError::new(format!("sigterm signal setup failed: {err}")))?;
 
-    let shutdown_result = tokio::select! {
+    tokio::select! {
         result = &mut server_task => {
             let _ = shutdown_tx.send(true);
             join_server_task_result(result)
@@ -272,10 +244,7 @@ async fn run_server(
             )
             .await
         }
-    };
-    state.heartbeat_state.set_running(false);
-    heartbeat_scheduler.stop();
-    shutdown_result
+    }
 }
 
 fn test_no_bind_enabled() -> bool {
@@ -419,77 +388,6 @@ async fn await_shutdown(
 }
 
 #[derive(Clone)]
-struct HeartbeatRuntimeState {
-    interval_seconds: u64,
-    running: Arc<AtomicBool>,
-    last_tick_ms: Arc<AtomicU64>,
-    total_ticks: Arc<AtomicU64>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HeartbeatStatusSnapshot {
-    pub running: bool,
-    pub interval_seconds: u64,
-    pub last_tick_at: Option<String>,
-    pub total_ticks: u64,
-}
-
-impl HeartbeatRuntimeState {
-    fn new(interval_seconds: u64) -> Self {
-        Self {
-            interval_seconds,
-            running: Arc::new(AtomicBool::new(false)),
-            last_tick_ms: Arc::new(AtomicU64::new(0)),
-            total_ticks: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    fn set_running(&self, value: bool) {
-        self.running.store(value, Ordering::SeqCst);
-    }
-
-    fn record_tick(&self, timestamp_ms: u64) {
-        self.last_tick_ms.store(timestamp_ms, Ordering::SeqCst);
-        let _ = self.total_ticks.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn snapshot(&self) -> HeartbeatStatusSnapshot {
-        let timestamp = self.last_tick_ms.load(Ordering::SeqCst);
-        HeartbeatStatusSnapshot {
-            running: self.running.load(Ordering::SeqCst),
-            interval_seconds: self.interval_seconds,
-            last_tick_at: if timestamp == 0 {
-                None
-            } else {
-                Some(format_timestamp_ms(timestamp))
-            },
-            total_ticks: self.total_ticks.load(Ordering::SeqCst),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct VmRegistryEntry {
-    vm_id: String,
-    user_id: String,
-    brain_path: String,
-    started_ms: u64,
-    memory_mb: u64,
-    vcpu_count: u32,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct VmSnapshot {
-    pub vm_id: String,
-    pub user_id: String,
-    pub status: String,
-    pub uptime_seconds: u64,
-    pub brain_path: String,
-    pub memory_mb: u64,
-    pub vcpu_count: u32,
-}
-
-#[derive(Clone)]
 struct AppState {
     host_config: Arc<HostConfig>,
     llm_client: Arc<LlmClient>,
@@ -501,8 +399,6 @@ struct AppState {
     guest_allow_bash: bool,
     soul_guard_db_path: Arc<PathBuf>,
     security_db_path: Arc<PathBuf>,
-    vm_registry: Arc<Mutex<HashMap<String, VmRegistryEntry>>>,
-    heartbeat_state: Arc<HeartbeatRuntimeState>,
 }
 
 impl AppState {
@@ -553,7 +449,6 @@ impl AppState {
         let execution_mode = RuntimeExecutionMode::from_config(&config);
         let soul_guard_db = soul_guard_db_path(&config.storage.users_root);
         let security_db = security_db_path(&config.storage.users_root);
-        let heartbeat_state = Arc::new(HeartbeatRuntimeState::new(HEARTBEAT_INTERVAL_SECONDS));
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -565,81 +460,11 @@ impl AppState {
             guest_allow_bash,
             soul_guard_db_path: Arc::new(soul_guard_db),
             security_db_path: Arc::new(security_db),
-            vm_registry: Arc::new(Mutex::new(HashMap::new())),
-            heartbeat_state,
         })
     }
 
     fn idle_timeout_duration(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.host_config.idle_timeout_minutes.saturating_mul(60))
-    }
-
-    async fn note_vm_started(&self, user_id: &str, brain_path: &StdPath) {
-        let entry = VmRegistryEntry {
-            vm_id: user_id.to_string(),
-            user_id: user_id.to_string(),
-            brain_path: brain_path.display().to_string(),
-            started_ms: now_ms().unwrap_or(0),
-            memory_mb: 256,
-            vcpu_count: 1,
-        };
-        let mut registry = self.vm_registry.lock().await;
-        registry.insert(user_id.to_string(), entry);
-    }
-
-    async fn note_vm_stopped(&self, user_id: &str) {
-        let mut registry = self.vm_registry.lock().await;
-        let _ = registry.remove(user_id);
-    }
-
-    async fn list_vm_snapshots(&self) -> Vec<VmSnapshot> {
-        let now = now_ms().unwrap_or(0);
-        let registry = self.vm_registry.lock().await;
-        registry
-            .values()
-            .map(|entry| VmSnapshot {
-                vm_id: entry.vm_id.clone(),
-                user_id: entry.user_id.clone(),
-                status: "running".to_string(),
-                uptime_seconds: now.saturating_sub(entry.started_ms) / 1000,
-                brain_path: entry.brain_path.clone(),
-                memory_mb: entry.memory_mb,
-                vcpu_count: entry.vcpu_count,
-            })
-            .collect::<Vec<_>>()
-    }
-
-    async fn vm_detail(&self, vm_id: &str) -> Option<VmSnapshot> {
-        let now = now_ms().unwrap_or(0);
-        let registry = self.vm_registry.lock().await;
-        registry.get(vm_id).map(|entry| VmSnapshot {
-            vm_id: entry.vm_id.clone(),
-            user_id: entry.user_id.clone(),
-            status: "running".to_string(),
-            uptime_seconds: now.saturating_sub(entry.started_ms) / 1000,
-            brain_path: entry.brain_path.clone(),
-            memory_mb: entry.memory_mb,
-            vcpu_count: entry.vcpu_count,
-        })
-    }
-
-    async fn stop_vm(&self, vm_id: &str) -> Result<bool, IronclawError> {
-        let removed = {
-            let mut registry = self.vm_registry.lock().await;
-            registry.remove(vm_id)
-        };
-        let Some(entry) = removed else {
-            return Ok(false);
-        };
-        self.vm_manager
-            .stop_vm(&entry.user_id)
-            .await
-            .map_err(|err| IronclawError::new(format!("stop vm failed: {err}")))?;
-        Ok(true)
-    }
-
-    fn heartbeat_snapshot(&self) -> HeartbeatStatusSnapshot {
-        self.heartbeat_state.snapshot()
     }
 }
 
@@ -1028,14 +853,31 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         if let Some(message_envelope::Payload::ToolCallRequest(req)) =
                             envelope.payload.clone()
                         {
-                            let (ok, output) = handle_guest_tool_call_request(
-                                &state,
-                                &tool_user_id,
-                                &req,
-                                &host_allowed_tools,
-                                None,
-                            )
-                            .await;
+                            let (ok, output) = if req.tool == "host_plan" {
+                                match host_plan_tool_response(
+                                    &state,
+                                    &tool_user_id,
+                                    &req.input,
+                                    &host_allowed_tools,
+                                    None,
+                                )
+                                .await {
+                                    Ok(out) => (true, out),
+                                    Err(err) => (false, truncate_tool_output(&err)),
+                                }
+                            } else {
+                                let result = run_host_tool(
+                                    &host_allowed_tools,
+                                    &tool_user_id,
+                                    &req.tool,
+                                    &req.input,
+                                )
+                                .await;
+                                match result {
+                                    Ok(out) => (true, truncate_tool_output(&out)),
+                                    Err(err) => (false, truncate_tool_output(&err)),
+                                }
+                            };
 
                             let resp = MessageEnvelope {
                                 user_id: envelope.user_id,
@@ -1283,7 +1125,6 @@ async fn start_vm_pair(
             let (instance, guest) = manager
                 .start_vm_with_guest(config)
                 .map_err(|err| IronclawError::new(err.to_string()))?;
-            state.note_vm_started(user_id, &instance.brain_path).await;
             tracing::debug!(
                 "channel route user_id={} event=vm_spawned mode=local_guest",
                 user_id
@@ -1296,34 +1137,11 @@ async fn start_vm_pair(
         .start_vm(config)
         .await
         .map_err(|err| IronclawError::new(err.to_string()))?;
-    state.note_vm_started(user_id, &instance.brain_path).await;
     tracing::debug!(
         "channel route user_id={} event=vm_spawned mode=firecracker",
         user_id
     );
     Ok((instance, None))
-}
-
-#[derive(Template)]
-#[template(path = "home.html")]
-struct HomeTemplate;
-
-async fn home_handler() -> Response {
-    match HomeTemplate.render() {
-        Ok(html) => {
-            let mut response = Response::new(html.into());
-            response.headers_mut().insert(
-                "content-type",
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            );
-            response
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("template render failed: {err}"),
-        )
-            .into_response(),
-    }
 }
 
 async fn ui_index_handler() -> Response {
@@ -1541,19 +1359,6 @@ async fn webhook_handler(
             "429 too many requests".to_string(),
         )
     })?;
-    if let Some(text) = headers
-        .get("x-webhook-text")
-        .and_then(|value| value.to_str().ok())
-    {
-        route_webhook_message_to_guest(&state, &channel, user_id, text)
-            .await
-            .map_err(|err| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("webhook route failed: {err}"),
-                )
-            })?;
-    }
     Ok(Json(WebhookResponse { accepted: true }))
 }
 
@@ -1770,223 +1575,7 @@ fn open_security_db_path(path: &StdPath) -> Result<Connection, IronclawError> {
     let conn = Connection::open(path)
         .map_err(|err| IronclawError::new(format!("security db open failed: {err}")))?;
     security::initialize_schema(&conn).map_err(IronclawError::new)?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS host_api_keys (\
-            name TEXT PRIMARY KEY,\
-            value TEXT NOT NULL,\
-            updated_ms INTEGER NOT NULL\
-        );",
-    )
-    .map_err(|err| IronclawError::new(format!("host schema init failed: {err}")))?;
     Ok(conn)
-}
-
-pub(crate) fn check_sqlite_ready(state: &AppState) -> bool {
-    if open_security_db(state).is_err() {
-        return false;
-    }
-    open_memory_db(state, "owner").is_ok()
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HostApiKeyEntry {
-    pub name: String,
-    pub masked_value: String,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HostMemoryListEntry {
-    pub id: i64,
-    pub kind: String,
-    pub preview: String,
-    pub updated_at: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HostMemoryDetailEntry {
-    pub id: i64,
-    pub kind: String,
-    pub content: String,
-    pub metadata: serde_json::Value,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-pub(crate) fn list_host_api_keys(state: &AppState) -> Result<Vec<HostApiKeyEntry>, IronclawError> {
-    let conn = open_security_db(state)?;
-    let mut stmt = conn
-        .prepare("SELECT name, value, updated_ms FROM host_api_keys ORDER BY name ASC")
-        .map_err(|err| IronclawError::new(format!("api key list prepare failed: {err}")))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|err| IronclawError::new(format!("api key list query failed: {err}")))?;
-    let mut output = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| IronclawError::new(format!("api key list read failed: {err}")))?
-    {
-        let name: String = row
-            .get(0)
-            .map_err(|err| IronclawError::new(format!("api key row name failed: {err}")))?;
-        let value: String = row
-            .get(1)
-            .map_err(|err| IronclawError::new(format!("api key row value failed: {err}")))?;
-        let updated_ms: i64 = row
-            .get(2)
-            .map_err(|err| IronclawError::new(format!("api key row timestamp failed: {err}")))?;
-        output.push(HostApiKeyEntry {
-            name,
-            masked_value: mask_secret(&value),
-            updated_at: format_timestamp_ms(updated_ms.max(0) as u64),
-        });
-    }
-    Ok(output)
-}
-
-pub(crate) fn set_host_api_key(
-    state: &AppState,
-    key_name: &str,
-    value: &str,
-) -> Result<(), IronclawError> {
-    let timestamp_ms = now_ms().unwrap_or(0) as i64;
-    let conn = open_security_db(state)?;
-    conn.execute(
-        r#"
-        INSERT INTO host_api_keys (name, value, updated_ms)
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(name) DO UPDATE SET
-            value = excluded.value,
-            updated_ms = excluded.updated_ms
-        "#,
-        rusqlite::params![key_name, value, timestamp_ms],
-    )
-    .map_err(|err| IronclawError::new(format!("api key set failed: {err}")))?;
-    Ok(())
-}
-
-pub(crate) fn delete_host_api_key(state: &AppState, key_name: &str) -> Result<bool, IronclawError> {
-    let conn = open_security_db(state)?;
-    let count = conn
-        .execute(
-            "DELETE FROM host_api_keys WHERE name = ?1",
-            rusqlite::params![key_name],
-        )
-        .map_err(|err| IronclawError::new(format!("api key delete failed: {err}")))?;
-    Ok(count > 0)
-}
-
-pub(crate) fn list_host_memories(
-    state: &AppState,
-    user_id: &str,
-    limit: usize,
-) -> Result<Vec<HostMemoryListEntry>, IronclawError> {
-    let conn = open_memory_db(state, user_id)?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT id, kind, text, updated_ms
-            FROM memories
-            WHERE user_id = ?1 AND disabled = 0
-            ORDER BY updated_ms DESC
-            LIMIT ?2
-            "#,
-        )
-        .map_err(|err| IronclawError::new(format!("memory list prepare failed: {err}")))?;
-    let mut rows = stmt
-        .query(rusqlite::params![user_id, limit as i64])
-        .map_err(|err| IronclawError::new(format!("memory list query failed: {err}")))?;
-    let mut output = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| IronclawError::new(format!("memory list read failed: {err}")))?
-    {
-        let id: i64 = row
-            .get(0)
-            .map_err(|err| IronclawError::new(format!("memory row id failed: {err}")))?;
-        let kind: String = row
-            .get(1)
-            .map_err(|err| IronclawError::new(format!("memory row kind failed: {err}")))?;
-        let text: String = row
-            .get(2)
-            .map_err(|err| IronclawError::new(format!("memory row text failed: {err}")))?;
-        let updated_ms: i64 = row
-            .get(3)
-            .map_err(|err| IronclawError::new(format!("memory row timestamp failed: {err}")))?;
-        let preview = if text.chars().count() > 120 {
-            format!("{}...", text.chars().take(120).collect::<String>())
-        } else {
-            text
-        };
-        output.push(HostMemoryListEntry {
-            id,
-            kind,
-            preview,
-            updated_at: format_timestamp_ms(updated_ms.max(0) as u64),
-        });
-    }
-    Ok(output)
-}
-
-pub(crate) fn get_host_memory(
-    state: &AppState,
-    user_id: &str,
-    id: i64,
-) -> Result<Option<HostMemoryDetailEntry>, IronclawError> {
-    let conn = open_memory_db(state, user_id)?;
-    let mut stmt = conn
-        .prepare(
-            r#"
-            SELECT id, kind, text, tags, source, created_ms, updated_ms
-            FROM memories
-            WHERE user_id = ?1 AND id = ?2 AND disabled = 0
-            "#,
-        )
-        .map_err(|err| IronclawError::new(format!("memory detail prepare failed: {err}")))?;
-    let mut rows = stmt
-        .query(rusqlite::params![user_id, id])
-        .map_err(|err| IronclawError::new(format!("memory detail query failed: {err}")))?;
-    let Some(row) = rows
-        .next()
-        .map_err(|err| IronclawError::new(format!("memory detail read failed: {err}")))?
-    else {
-        return Ok(None);
-    };
-    let tags_json: String = row
-        .get(3)
-        .map_err(|err| IronclawError::new(format!("memory detail tags failed: {err}")))?;
-    let source_json: String = row
-        .get(4)
-        .map_err(|err| IronclawError::new(format!("memory detail source failed: {err}")))?;
-    let tags = serde_json::from_str::<serde_json::Value>(&tags_json)
-        .unwrap_or_else(|_| serde_json::json!([]));
-    let source = serde_json::from_str::<serde_json::Value>(&source_json)
-        .unwrap_or_else(|_| serde_json::json!({}));
-    Ok(Some(HostMemoryDetailEntry {
-        id: row
-            .get(0)
-            .map_err(|err| IronclawError::new(format!("memory detail id failed: {err}")))?,
-        kind: row
-            .get(1)
-            .map_err(|err| IronclawError::new(format!("memory detail kind failed: {err}")))?,
-        content: row
-            .get(2)
-            .map_err(|err| IronclawError::new(format!("memory detail text failed: {err}")))?,
-        metadata: serde_json::json!({
-            "tags": tags,
-            "source": source,
-        }),
-        created_at: format_timestamp_ms(
-            row.get::<_, i64>(5)
-                .map_err(|err| IronclawError::new(format!("memory created failed: {err}")))?
-                .max(0) as u64,
-        ),
-        updated_at: format_timestamp_ms(
-            row.get::<_, i64>(6)
-                .map_err(|err| IronclawError::new(format!("memory updated failed: {err}")))?
-                .max(0) as u64,
-        ),
-    }))
 }
 
 fn load_memory_block(
@@ -2070,16 +1659,6 @@ fn execute_memory_command(
                 },
             )
             .map_err(|err| IronclawError::new(format!("remember failed: {err}")))?;
-            persist_memory_files(
-                state,
-                user_id,
-                serde_json::json!({
-                    "event": "remember",
-                    "session_id": session_id,
-                    "memory_id": memory_id,
-                    "timestamp_ms": now_ms().unwrap_or(0),
-                }),
-            )?;
             Ok(format!("remembered pinned memory id={memory_id}"))
         }
         MemoryCommand::Pins => {
@@ -2098,17 +1677,6 @@ fn execute_memory_command(
             if let Ok(id) = target.parse::<i64>() {
                 let removed = forget_memory_by_id(&conn, user_id, id)
                     .map_err(|err| IronclawError::new(format!("forget failed: {err}")))?;
-                persist_memory_files(
-                    state,
-                    user_id,
-                    serde_json::json!({
-                        "event": "forget",
-                        "session_id": session_id,
-                        "memory_id": id,
-                        "removed": removed,
-                        "timestamp_ms": now_ms().unwrap_or(0),
-                    }),
-                )?;
                 if removed {
                     Ok(format!("forgot memory id={id}"))
                 } else {
@@ -2117,60 +1685,10 @@ fn execute_memory_command(
             } else {
                 let removed = forget_memories_by_query(&conn, user_id, &target, 10)
                     .map_err(|err| IronclawError::new(format!("forget failed: {err}")))?;
-                persist_memory_files(
-                    state,
-                    user_id,
-                    serde_json::json!({
-                        "event": "forget_query",
-                        "session_id": session_id,
-                        "query": target,
-                        "removed": removed,
-                        "timestamp_ms": now_ms().unwrap_or(0),
-                    }),
-                )?;
                 Ok(format!("forgot {removed} memories"))
             }
         }
     }
-}
-
-fn persist_memory_files(
-    state: &AppState,
-    user_id: &str,
-    event: serde_json::Value,
-) -> Result<(), IronclawError> {
-    let memory_dir = state
-        .host_config
-        .storage
-        .users_root
-        .join(user_id)
-        .join("memory");
-    std::fs::create_dir_all(&memory_dir)
-        .map_err(|err| IronclawError::new(format!("memory dir create failed: {err}")))?;
-
-    let conn = open_memory_db(state, user_id)?;
-    let pinned = list_pinned_memories(&conn, user_id, 100)
-        .map_err(|err| IronclawError::new(format!("memory snapshot failed: {err}")))?;
-    let mut markdown = String::new();
-    markdown.push_str("# host memory snapshot\n\n");
-    if pinned.is_empty() {
-        markdown.push_str("- no pinned memories\n");
-    } else {
-        for item in pinned {
-            markdown.push_str(format!("- {}: {}\n", item.id, item.text).as_str());
-        }
-    }
-    std::fs::write(memory_dir.join("memory.md"), markdown)
-        .map_err(|err| IronclawError::new(format!("memory markdown write failed: {err}")))?;
-
-    let mut events_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(memory_dir.join("events.jsonl"))
-        .map_err(|err| IronclawError::new(format!("memory jsonl open failed: {err}")))?;
-    writeln!(events_file, "{event}")
-        .map_err(|err| IronclawError::new(format!("memory jsonl write failed: {err}")))?;
-    Ok(())
 }
 
 fn now_ms() -> Result<u64, IronclawError> {
@@ -2182,32 +1700,6 @@ fn now_ms() -> Result<u64, IronclawError> {
 
 fn now_epoch_seconds() -> Result<i64, IronclawError> {
     now_ms().map(|value| (value / 1000) as i64)
-}
-
-fn format_timestamp_ms(timestamp_ms: u64) -> String {
-    let seconds = (timestamp_ms / 1000) as i64;
-    let nanos = ((timestamp_ms % 1000) * 1_000_000) as u32;
-    if let Some(utc) = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos) {
-        return utc.to_rfc3339();
-    }
-    "1970-01-01T00:00:00+00:00".to_string()
-}
-
-fn mask_secret(value: &str) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    if chars.len() <= 8 {
-        return "*".repeat(chars.len().max(4));
-    }
-    let prefix = chars.iter().take(4).collect::<String>();
-    let suffix = chars
-        .iter()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{prefix}***{suffix}")
 }
 
 fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::Payload, u64) {
@@ -2277,24 +1769,6 @@ async fn host_plan_tool_response(
     };
 
     tool_plan_to_json(&plan)
-}
-
-async fn handle_guest_tool_call_request(
-    state: &AppState,
-    user_id: &str,
-    req: &common::proto::ironclaw::ToolCallRequest,
-    allowed_tools: &[String],
-    history: Option<&[ConversationMessage]>,
-) -> (bool, String) {
-    if req.tool == "host_plan" {
-        return match host_plan_tool_response(state, user_id, &req.input, allowed_tools, history)
-            .await
-        {
-            Ok(output) => (true, output),
-            Err(err) => (false, truncate_tool_output(&err)),
-        };
-    }
-    (false, deny_host_tool_execution(&req.tool))
 }
 
 fn deterministic_guest_tools_plan(user_text: &str, allowed_tools: &[String]) -> Option<ToolPlan> {
@@ -2389,22 +1863,6 @@ fn tool_plan_to_json(plan: &ToolPlan) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn truncate_tool_output(output: &str) -> String {
-    if output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
-        return output.to_string();
-    }
-    let mut truncated = String::new();
-    for ch in output.chars().take(MAX_TOOL_OUTPUT_CHARS) {
-        truncated.push(ch);
-    }
-    truncated.push_str("\n[output truncated]");
-    truncated
-}
-
-fn deny_host_tool_execution(tool: &str) -> String {
-    format!("host tool execution denied by isolation policy: {tool}")
-}
-
 async fn run_host_turn(
     state: &AppState,
     user_id: &str,
@@ -2430,12 +1888,17 @@ async fn run_host_turn(
             Ok(text)
         }
         ToolPlan::Tool { tool, input } => {
-            tracing::warn!("host tool execution blocked by isolation policy tool={tool}");
-            let output = deny_host_tool_execution(&tool);
+            tracing::info!("tool plan action=tool tool={tool}");
+            let tool_result = run_host_tool(allowed_tools, user_id, &tool, &input).await;
+            let (ok, raw_output) = match tool_result {
+                Ok(output) => (true, output),
+                Err(output) => (false, output),
+            };
+            let output = truncate_tool_output(&raw_output);
             tracing::info!(
                 "tool execution tool={} ok={} output_len={}",
                 tool,
-                false,
+                ok,
                 output.len()
             );
             state
@@ -2444,7 +1907,7 @@ async fn run_host_turn(
                     user_text,
                     &tool,
                     &input,
-                    false,
+                    ok,
                     &output,
                     Some(memory_block.as_str()),
                     history,
@@ -2894,7 +2357,6 @@ async fn handle_telegram_text(
                 session.transport = None;
                 session.guest_sleeping = false;
                 let _ = state.vm_manager.stop_vm(&session.user_id).await;
-                state.note_vm_stopped(&session.user_id).await;
                 let delay = session.transport_backoff();
                 tracing::warn!(
                     "telegram transport restart user_id={} backoff_ms={}",
@@ -3017,14 +2479,27 @@ async fn handle_telegram_text_once(
             continue;
         }
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
-            let (ok, output) = handle_guest_tool_call_request(
-                state,
-                &session.user_id,
-                &req,
-                &host_allowed_tools,
-                Some(history),
-            )
-            .await;
+            let (ok, output) = if req.tool == "host_plan" {
+                match host_plan_tool_response(
+                    state,
+                    &session.user_id,
+                    &req.input,
+                    &host_allowed_tools,
+                    Some(history),
+                )
+                .await
+                {
+                    Ok(out) => (true, out),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            } else {
+                match run_host_tool(&host_allowed_tools, &session.user_id, &req.tool, &req.input)
+                    .await
+                {
+                    Ok(out) => (true, truncate_tool_output(&out)),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            };
             let resp = MessageEnvelope {
                 user_id: envelope.user_id,
                 session_id: envelope.session_id,
@@ -3104,18 +2579,26 @@ async fn send_guest_auth_challenge(
     }
 }
 
-async fn open_guest_session_transport(
+async fn ensure_telegram_session_transport(
     state: &AppState,
-    user_id: &str,
-    session_id: &str,
-) -> Result<Box<dyn common::transport::Transport>, IronclawError> {
-    if state.local_guest && state.execution_mode != RuntimeExecutionMode::HostOnly {
-        return Err(IronclawError::new(
-            "firecracker required for guest tool execution",
-        ));
+    session: &mut TelegramSession,
+) -> Result<(), IronclawError> {
+    if session.transport.is_some() {
+        return Ok(());
     }
 
-    let (vm_instance, guest_transport) = start_vm_pair(state, user_id).await?;
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        return Err(IronclawError::new(message));
+    }
+
+    let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
+    tracing::debug!(
+        "channel route source=telegram user_id={} session_id={} event=transport_create",
+        session.user_id,
+        session.session_id
+    );
     let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
     let cap_token = {
         use rand::RngCore;
@@ -3127,7 +2610,7 @@ async fn open_guest_session_transport(
     let mut transport = vm_instance.transport;
     if state.local_guest {
         if let Some(guest_transport) = guest_transport {
-            let guest_user_id = user_id.to_string();
+            let guest_user_id = session.user_id.clone();
             let users_root = state.host_config.storage.users_root.clone();
             let guest_config_path = (*state.guest_config_path).clone();
             tokio::spawn(async move {
@@ -3146,149 +2629,14 @@ async fn open_guest_session_transport(
     }
     send_guest_auth_challenge(
         &mut transport,
-        user_id,
-        session_id,
+        &session.user_id,
+        &session.session_id,
         &cap_token,
         &guest_allowed_tools,
         state.execution_mode,
     )
     .await?;
-    Ok(Box::new(AuthenticatedTransport::new(transport, cap_token)))
-}
-
-pub(crate) async fn route_webhook_message_to_guest(
-    state: &AppState,
-    channel: &str,
-    sender_id: &str,
-    text: &str,
-) -> Result<(), IronclawError> {
-    if channel == "telegram" || channel == "whatsapp" {
-        ensure_channel_allowed(state, channel)?;
-    }
-    if state.execution_mode == RuntimeExecutionMode::HostOnly {
-        return Err(IronclawError::new(
-            "webhook guest routing unavailable in host_only mode",
-        ));
-    }
-    let source = match channel {
-        "telegram" => ChannelSource::Telegram,
-        "whatsapp" => ChannelSource::WhatsApp,
-        _ => ChannelSource::WebSocket,
-    };
-    let user_id = resolve_owner_user_id(source, Some(sender_id));
-    enforce_rate_limit(state, &user_id, channel, 0)?;
-    let session_id = format!("{channel}-webhook-{sender_id}");
-    let host_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
-    let mut transport = open_guest_session_transport(state, &user_id, &session_id).await?;
-    transport
-        .send(MessageEnvelope {
-            user_id: user_id.clone(),
-            session_id: session_id.clone(),
-            msg_id: 1,
-            timestamp_ms: now_ms().unwrap_or(0),
-            cap_token: String::new(),
-            payload: Some(message_envelope::Payload::UserMessage(
-                common::proto::ironclaw::UserMessage {
-                    text: text.to_string(),
-                },
-            )),
-        })
-        .await
-        .map_err(|err| IronclawError::new(format!("webhook send failed: {err}")))?;
-
-    let mut msg_id = 2u64;
-    let mut guest_sleeping = false;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-        loop {
-            let maybe = transport
-                .recv()
-                .await
-                .map_err(|err| IronclawError::new(format!("webhook recv failed: {err}")))?;
-            let Some(envelope) = maybe else {
-                return Ok(());
-            };
-            if let Some(message_envelope::Payload::JobTrigger(trigger)) = envelope.payload.clone() {
-                handle_guest_job_trigger(
-                    &mut transport,
-                    &user_id,
-                    &session_id,
-                    &mut msg_id,
-                    &mut guest_sleeping,
-                    trigger,
-                    channel,
-                )
-                .await?;
-                continue;
-            }
-            if matches!(
-                envelope.payload,
-                Some(message_envelope::Payload::AgentState(_))
-            ) {
-                continue;
-            }
-            if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone()
-            {
-                let (ok, output) = handle_guest_tool_call_request(
-                    state,
-                    &user_id,
-                    &req,
-                    &host_allowed_tools,
-                    None,
-                )
-                .await;
-                let response = MessageEnvelope {
-                    user_id: envelope.user_id,
-                    session_id: envelope.session_id,
-                    msg_id: envelope.msg_id,
-                    timestamp_ms: envelope.timestamp_ms,
-                    cap_token: String::new(),
-                    payload: Some(message_envelope::Payload::ToolCallResponse(
-                        common::proto::ironclaw::ToolCallResponse {
-                            call_id: req.call_id,
-                            ok,
-                            output,
-                        },
-                    )),
-                };
-                transport.send(response).await.map_err(|err| {
-                    IronclawError::new(format!("webhook tool response failed: {err}"))
-                })?;
-                continue;
-            }
-            if let Some(message_envelope::Payload::StreamDelta(delta)) = envelope.payload {
-                if delta.done {
-                    return Ok(());
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| IronclawError::new("webhook guest routing timed out"))??;
-    Ok(())
-}
-
-async fn trigger_heartbeat_tick(state: &AppState) -> Result<(), IronclawError> {
-    if state.execution_mode == RuntimeExecutionMode::HostOnly {
-        return Ok(());
-    }
-    route_webhook_message_to_guest(state, "heartbeat", "owner", "cron heartbeat tick").await
-}
-
-async fn ensure_telegram_session_transport(
-    state: &AppState,
-    session: &mut TelegramSession,
-) -> Result<(), IronclawError> {
-    if session.transport.is_some() {
-        return Ok(());
-    }
-    tracing::debug!(
-        "channel route source=telegram user_id={} session_id={} event=transport_create",
-        session.user_id,
-        session.session_id
-    );
-    let transport =
-        open_guest_session_transport(state, &session.user_id, &session.session_id).await?;
-    session.transport = Some(transport);
+    session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
     session.guest_sleeping = false;
     Ok(())
 }
@@ -3656,7 +3004,6 @@ async fn handle_whatsapp_text(
                 session.transport = None;
                 session.guest_sleeping = false;
                 let _ = state.vm_manager.stop_vm(&session.user_id).await;
-                state.note_vm_stopped(&session.user_id).await;
                 let delay = session.transport_backoff();
                 tracing::warn!(
                     "whatsapp transport restart user_id={} backoff_ms={}",
@@ -3777,14 +3124,27 @@ async fn handle_whatsapp_text_once(
             continue;
         }
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
-            let (ok, output) = handle_guest_tool_call_request(
-                state,
-                &session.user_id,
-                &req,
-                &host_allowed_tools,
-                Some(history),
-            )
-            .await;
+            let (ok, output) = if req.tool == "host_plan" {
+                match host_plan_tool_response(
+                    state,
+                    &session.user_id,
+                    &req.input,
+                    &host_allowed_tools,
+                    Some(history),
+                )
+                .await
+                {
+                    Ok(out) => (true, out),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            } else {
+                match run_host_tool(&host_allowed_tools, &session.user_id, &req.tool, &req.input)
+                    .await
+                {
+                    Ok(out) => (true, truncate_tool_output(&out)),
+                    Err(err) => (false, truncate_tool_output(&err)),
+                }
+            };
             let resp = MessageEnvelope {
                 user_id: envelope.user_id,
                 session_id: envelope.session_id,
@@ -3832,14 +3192,55 @@ async fn ensure_whatsapp_session_transport(
     if session.transport.is_some() {
         return Ok(());
     }
+    if let Some(message) =
+        telegram_firecracker_requirement_error(state.execution_mode, state.local_guest)
+    {
+        return Err(IronclawError::new(message));
+    }
+    let (vm_instance, guest_transport) = start_vm_pair(state, &session.user_id).await?;
     tracing::debug!(
         "channel route source=whatsapp user_id={} session_id={} event=transport_create",
         session.user_id,
         session.session_id
     );
-    let transport =
-        open_guest_session_transport(state, &session.user_id, &session.session_id).await?;
-    session.transport = Some(transport);
+    let guest_allowed_tools = allowed_tools_for_runtime(state.local_guest, state.guest_allow_bash);
+    let cap_token = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+
+    let mut transport = vm_instance.transport;
+    if state.local_guest {
+        if let Some(guest_transport) = guest_transport {
+            let guest_user_id = session.user_id.clone();
+            let users_root = state.host_config.storage.users_root.clone();
+            let guest_config_path = (*state.guest_config_path).clone();
+            tokio::spawn(async move {
+                let brain_root = users_root.join(&guest_user_id).join("guest");
+                if let Err(err) = std::fs::create_dir_all(&brain_root) {
+                    tracing::warn!("create brain root failed: {err}");
+                }
+                std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+                if let Err(err) =
+                    irowclaw::runtime::run_with_transport(guest_transport, guest_config_path).await
+                {
+                    tracing::error!("guest runtime failed: {err}");
+                }
+            });
+        }
+    }
+    send_guest_auth_challenge(
+        &mut transport,
+        &session.user_id,
+        &session.session_id,
+        &cap_token,
+        &guest_allowed_tools,
+        state.execution_mode,
+    )
+    .await?;
+    session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
     session.guest_sleeping = false;
     Ok(())
 }

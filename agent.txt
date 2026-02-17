@@ -1,52 +1,35 @@
 current context:
-- workspace version is now `0.10.1`
-- `ironclawd` api router is now fully wired for:
-  `/api/health`, `/api/ready`,
-  `/api/channels/telegram/webhook`,
-  `/api/channels/whatsapp/webhook`,
-  `/api/admin/vms`,
-  `/api/admin/keys`,
-  `/api/admin/memory`,
-  `/api/admin/heartbeat`,
-  and scalar docs at `/api/docs`
-- webhook endpoints now validate `x-webhook-secret` and route inbound messages
-  into guest transport sessions with auth challenge/ack
-- heartbeat scheduler now starts with a 30-minute interval and triggers guest
-  heartbeat execution through the same isolated transport path
-- host-side tool execution for guest tool calls is blocked by policy
-  (only `host_plan` is allowed on host)
-- host sqlite now stores api keys in `host_api_keys` and admin api returns
-  masked values only
-- host memory admin list/detail now reads from sqlite memories and writes
-  markdown/jsonl snapshots under `data/users/<user>/memory/`
-- askama-rendered home page added at `/` with template
-  `crates/ironclawd/templates/home.html`
-- embedded `/ui` assets now expose an interactive admin dashboard for
-  heartbeat, vm management, api keys, and memory inspection
-- root `Dockerfile` added for single-binary container deployment
+- expanded ironclaw to v0.10.0 with channel gateway, heartbeat, and admin api foundations
+- removed thiserror and anyhow from all crates; all errors use hand-written impls
+- added `crates/channels` for telegram + whatsapp cloud api webhook parsing
+- added `crates/heartbeat` for tokio-based periodic scheduler (30-min default interval)
+- added `crates/ironclawd/src/api.rs` with utoipa-annotated openapi routing module
+- scalar api docs ui served at `/api/docs`
+- added tokio-postgres + deadpool-postgres + askama + askama_web deps to ironclawd
+- new api routes merged into existing axum app via `Router::merge`
 
 pending tasks:
-- migrate current embedded admin ui implementation to a bun + solid.js build
-  pipeline while preserving single-binary embedding through `include_dir`
-- add stronger webhook signature validation for provider-native schemes
-  (telegram secret-token + whatsapp cloud signature header)
-- add integration tests for webhook-to-guest routing and heartbeat tick behavior
-- optionally split large `crates/ironclawd/src/main.rs` helpers into modules
-  (`runtime`, `admin_store`, `webhook_router`) for maintainability
+- wire channel webhook handlers to actually route inbound messages to guest via vsock/ipc
+- implement postgres connection pool in appstate and wire admin endpoints
+- implement postgres memory schema (memories, context_windows tables)
+- build solid.js admin panel ui under `ui/` with vm monitoring, key management, memory view
+- implement heartbeat scheduler startup in ironclawd main server loop
+- add askama templates for server-rendered admin views
+- create dockerfile for single-binary build with embedded ui assets
+- implement skill sandboxing: parse third-party skill.md strictly on guest side only
 
 important decisions:
-- sqlite is currently accepted for host persistence in this phase
-- no orm introduced; all persistence is explicit sql
-- host never executes guest-requested shell/file tools
-- existing legacy routes were kept; new api routes are merged alongside them
-- askama is used for server-rendered static view (`/`), while admin ui remains
-  served from embedded static assets at `/ui`
+- kept existing legacy routes (ws, gateway, webhooks, soul-guard) intact; new api module
+  adds routes alongside via router merge rather than replacing
+- chose utoipa 5 + scalar for openapi; spec auto-generated from annotated handlers
+- chose askama 0.15 + askama_web 0.15 for server-rendered templates (axum-0.8 feature)
+- chose tokio-postgres + deadpool (no orm) for host-side postgres
+- all error types are now manual impls — no thiserror or anyhow anywhere in workspace
 
 architectural notes:
-- guest session setup is centralized via `open_guest_session_transport`
-- webhook ingress path uses `route_webhook_message_to_guest` and keeps traffic
-  on host/guest transport boundaries
-- vm runtime visibility for admin api is backed by in-memory vm registry state
-  tracked from vm startup/shutdown points
-- heartbeat runtime metrics are tracked in `HeartbeatRuntimeState` and exposed
-  by `/api/admin/heartbeat`
+- api module (`api.rs`) owns all new endpoints; legacy routes stay in `main.rs`
+- channel crate parses raw webhook payloads into `InboundMessage` structs
+- heartbeat crate is standalone; ironclawd owns the callback wiring
+- host-side api keys stored in postgres, never exposed to guest runtime
+- memory entries stored on host in postgres; context window injected into guest per execution
+- whatsapp cloud api uses get verification + post webhook pattern

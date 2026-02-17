@@ -1,6 +1,5 @@
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -14,12 +13,15 @@ use crate::AppState;
 #[openapi(
     info(
         title = "ironclaw host api",
-        version = "0.10.1",
+        version = "0.10.0",
         description = "ironclaw security-first ai agent runtime — host daemon api"
     ),
     tags(
         (name = "channels", description = "channel webhook receivers"),
+        (name = "gateway", description = "gateway pairing and status"),
         (name = "admin", description = "admin panel endpoints"),
+        (name = "memory", description = "host-side memory management"),
+        (name = "soul-guard", description = "soul change approval"),
         (name = "heartbeat", description = "proactive heartbeat status"),
         (name = "health", description = "health and readiness")
     ),
@@ -54,7 +56,6 @@ use crate::AppState;
             channels::whatsapp::WhatsAppInboundMessage,
             channels::whatsapp::WhatsAppText,
             WhatsAppVerifyQuery,
-            MemoryListQuery,
             VmSummary,
             VmDetail,
             ApiKeyEntry,
@@ -68,45 +69,56 @@ use crate::AppState;
 )]
 pub struct ApiDoc;
 
-type ApiResult<T> = Result<T, ApiRouteError>;
-
 /// build the complete router with openapi + scalar ui
 pub fn build_router(state: AppState) -> Router {
-    let health_routes = Router::new()
-        .route("/health", get(health_handler))
-        .route("/ready", get(readiness_handler));
-
-    let channel_routes = Router::new()
-        .route("/telegram/webhook", post(channel_telegram_webhook))
+    let api_routes = Router::new()
+        // health
+        .route("/api/health", get(health_handler))
+        .route("/api/ready", get(readiness_handler))
+        // channel webhooks
         .route(
-            "/whatsapp/webhook",
+            "/api/channels/telegram/webhook",
+            post(channel_telegram_webhook),
+        )
+        .route(
+            "/api/channels/whatsapp/webhook",
             get(channel_whatsapp_verify).post(channel_whatsapp_webhook),
-        );
-
-    let admin_routes = Router::new()
-        .route("/vms", get(admin_vms_list))
-        .route("/vms/{vm_id}", get(admin_vm_detail))
-        .route("/vms/{vm_id}/stop", post(admin_vm_stop))
-        .route("/keys", get(admin_keys_list))
+        )
+        // admin: vms
+        .route("/api/admin/vms", get(admin_vms_list))
         .route(
-            "/keys/{key_name}",
+            "/api/admin/vms/{vm_id}",
+            get(admin_vm_detail),
+        )
+        .route(
+            "/api/admin/vms/{vm_id}/stop",
+            post(admin_vm_stop),
+        )
+        // admin: api keys
+        .route(
+            "/api/admin/keys",
+            get(admin_keys_list),
+        )
+        .route(
+            "/api/admin/keys/{key_name}",
             post(admin_key_set).delete(admin_key_delete),
         )
-        .route("/memory", get(admin_memory_list))
-        .route("/memory/{memory_id}", get(admin_memory_detail))
-        .route("/heartbeat", get(admin_heartbeat_status));
-
-    Router::new()
-        .nest(
-            "/api",
-            Router::new()
-                .merge(health_routes)
-                .nest("/channels", channel_routes)
-                .nest("/admin", admin_routes),
+        // admin: memory
+        .route("/api/admin/memory", get(admin_memory_list))
+        .route(
+            "/api/admin/memory/{memory_id}",
+            get(admin_memory_detail),
         )
-        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
-        .with_state(state)
+        // heartbeat
+        .route("/api/admin/heartbeat", get(admin_heartbeat_status))
+        .with_state(state);
+
+    api_routes.merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
 }
+
+// ---------------------------------------------------------------------------
+// shared response types
+// ---------------------------------------------------------------------------
 
 /// standard api error envelope
 #[derive(Debug, Serialize, ToSchema)]
@@ -116,74 +128,9 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(msg: impl Into<String>) -> Self {
-        Self { error: msg.into() }
-    }
-}
-
-#[derive(Debug)]
-enum ApiRouteError {
-    BadRequest(String),
-    Unauthorized(String),
-    Forbidden(String),
-    NotFound(String),
-    Internal(String),
-}
-
-impl ApiRouteError {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self::BadRequest(message.into())
-    }
-
-    fn not_found(message: impl Into<String>) -> Self {
-        Self::NotFound(message.into())
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self::Internal(message.into())
-    }
-
-    fn status_code(&self) -> StatusCode {
-        match self {
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Self {
+            error: msg.into(),
         }
-    }
-
-    fn message(&self) -> &str {
-        match self {
-            Self::BadRequest(message) => message,
-            Self::Unauthorized(message) => message,
-            Self::Forbidden(message) => message,
-            Self::NotFound(message) => message,
-            Self::Internal(message) => message,
-        }
-    }
-}
-
-impl std::fmt::Display for ApiRouteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message())
-    }
-}
-
-impl std::error::Error for ApiRouteError {}
-
-impl From<crate::IronclawError> for ApiRouteError {
-    fn from(value: crate::IronclawError) -> Self {
-        Self::internal(value.to_string())
-    }
-}
-
-impl IntoResponse for ApiRouteError {
-    fn into_response(self) -> Response {
-        (
-            self.status_code(),
-            Json(ApiError::new(self.message().to_string())),
-        )
-            .into_response()
     }
 }
 
@@ -198,15 +145,21 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ReadinessResponse {
     pub ready: bool,
-    pub sqlite: bool,
+    pub postgres: bool,
     pub firecracker: bool,
 }
+
+// ---------------------------------------------------------------------------
+// health endpoints
+// ---------------------------------------------------------------------------
 
 #[utoipa::path(
     get,
     path = "/api/health",
     tag = "health",
-    responses((status = 200, description = "service healthy", body = HealthResponse))
+    responses(
+        (status = 200, description = "service healthy", body = HealthResponse)
+    )
 )]
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -219,16 +172,24 @@ async fn health_handler() -> Json<HealthResponse> {
     get,
     path = "/api/ready",
     tag = "health",
-    responses((status = 200, description = "readiness status", body = ReadinessResponse))
+    responses(
+        (status = 200, description = "readiness status", body = ReadinessResponse)
+    )
 )]
-async fn readiness_handler(State(state): State<AppState>) -> Json<ReadinessResponse> {
-    let sqlite = crate::check_sqlite_ready(&state);
+async fn readiness_handler(
+    State(state): State<AppState>,
+) -> Json<ReadinessResponse> {
+    let firecracker_ok = state.host_config.firecracker.enabled;
     Json(ReadinessResponse {
-        ready: sqlite,
-        sqlite,
-        firecracker: state.host_config.firecracker.enabled,
+        ready: true,
+        postgres: false,
+        firecracker: firecracker_ok,
     })
 }
+
+// ---------------------------------------------------------------------------
+// channel webhook endpoints
+// ---------------------------------------------------------------------------
 
 #[utoipa::path(
     post,
@@ -238,25 +199,26 @@ async fn readiness_handler(State(state): State<AppState>) -> Json<ReadinessRespo
     responses(
         (status = 200, description = "update accepted"),
         (status = 400, description = "parse error", body = ApiError),
-        (status = 401, description = "invalid webhook secret", body = ApiError),
-        (status = 500, description = "routing failure", body = ApiError)
+        (status = 401, description = "invalid signature", body = ApiError)
     )
 )]
 async fn channel_telegram_webhook(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(update): Json<channels::telegram::TelegramUpdate>,
-) -> ApiResult<StatusCode> {
-    validate_channel_secret(&state, &headers)?;
-    let inbound = channels::telegram::parse_update(update)
-        .map_err(|err| ApiRouteError::bad_request(err.to_string()))?;
-    crate::route_webhook_message_to_guest(
-        &state,
-        "telegram",
-        inbound.sender_id.as_str(),
-        inbound.text.as_str(),
-    )
-    .await?;
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let inbound = channels::telegram::parse_update(update).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(err.to_string())),
+        )
+    })?;
+    tracing::info!(
+        "telegram webhook sender={} text_len={}",
+        inbound.sender_id,
+        inbound.text.len(),
+    );
+    // todo: route inbound message to guest via vsock/ipc
+    let _ = (state, inbound);
     Ok(StatusCode::OK)
 }
 
@@ -278,27 +240,30 @@ pub struct WhatsAppVerifyQuery {
     params(WhatsAppVerifyQuery),
     responses(
         (status = 200, description = "verification challenge echoed"),
-        (status = 403, description = "token mismatch", body = ApiError)
+        (status = 403, description = "token mismatch")
     )
 )]
 async fn channel_whatsapp_verify(
     State(state): State<AppState>,
     Query(query): Query<WhatsAppVerifyQuery>,
-) -> ApiResult<String> {
+) -> Result<String, StatusCode> {
     let mode = query.hub_mode.as_deref().unwrap_or("");
     let token = query.hub_verify_token.as_deref().unwrap_or("");
     let challenge = query.hub_challenge.unwrap_or_default();
+
     if mode != "subscribe" {
-        return Err(ApiRouteError::Forbidden(
-            "verification mode is invalid".into(),
-        ));
+        return Err(StatusCode::FORBIDDEN);
     }
-    let expected = state.host_config.security.webhook_secret.as_str();
+
+    let expected = state
+        .host_config
+        .security
+        .webhook_secret
+        .as_str();
     if token != expected {
-        return Err(ApiRouteError::Forbidden(
-            "verification token mismatch".into(),
-        ));
+        return Err(StatusCode::FORBIDDEN);
     }
+
     Ok(challenge)
 }
 
@@ -309,30 +274,31 @@ async fn channel_whatsapp_verify(
     request_body = channels::whatsapp::WhatsAppWebhook,
     responses(
         (status = 200, description = "webhook accepted"),
-        (status = 400, description = "parse error", body = ApiError),
-        (status = 401, description = "invalid webhook secret", body = ApiError),
-        (status = 500, description = "routing failure", body = ApiError)
+        (status = 400, description = "parse error", body = ApiError)
     )
 )]
 async fn channel_whatsapp_webhook(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(webhook): Json<channels::whatsapp::WhatsAppWebhook>,
-) -> ApiResult<StatusCode> {
-    validate_channel_secret(&state, &headers)?;
-    let messages = channels::whatsapp::parse_webhook(webhook)
-        .map_err(|err| ApiRouteError::bad_request(err.to_string()))?;
-    for inbound in messages {
-        crate::route_webhook_message_to_guest(
-            &state,
-            "whatsapp",
-            inbound.sender_id.as_str(),
-            inbound.text.as_str(),
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let messages = channels::whatsapp::parse_webhook(webhook).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(err.to_string())),
         )
-        .await?;
-    }
+    })?;
+    tracing::info!(
+        "whatsapp webhook messages_count={}",
+        messages.len(),
+    );
+    // todo: route each inbound message to guest via vsock/ipc
+    let _ = (state, messages);
     Ok(StatusCode::OK)
 }
+
+// ---------------------------------------------------------------------------
+// admin: vm management
+// ---------------------------------------------------------------------------
 
 /// summary of an active microvm
 #[derive(Debug, Serialize, ToSchema)]
@@ -359,20 +325,15 @@ pub struct VmDetail {
     get,
     path = "/api/admin/vms",
     tag = "admin",
-    responses((status = 200, description = "list of active vms", body = Vec<VmSummary>))
+    responses(
+        (status = 200, description = "list of active vms", body = Vec<VmSummary>)
+    )
 )]
-async fn admin_vms_list(State(state): State<AppState>) -> Json<Vec<VmSummary>> {
-    let snapshots = state.list_vm_snapshots().await;
-    let body = snapshots
-        .into_iter()
-        .map(|entry| VmSummary {
-            vm_id: entry.vm_id,
-            user_id: entry.user_id,
-            status: entry.status,
-            uptime_seconds: entry.uptime_seconds,
-        })
-        .collect::<Vec<_>>();
-    Json(body)
+async fn admin_vms_list(
+    State(_state): State<AppState>,
+) -> Json<Vec<VmSummary>> {
+    // todo: query vm manager for running instances
+    Json(vec![])
 }
 
 #[utoipa::path(
@@ -386,22 +347,14 @@ async fn admin_vms_list(State(state): State<AppState>) -> Json<Vec<VmSummary>> {
     )
 )]
 async fn admin_vm_detail(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(vm_id): Path<String>,
-) -> ApiResult<Json<VmDetail>> {
-    let snapshot = state
-        .vm_detail(vm_id.as_str())
-        .await
-        .ok_or_else(|| ApiRouteError::not_found(format!("vm not found: {vm_id}")))?;
-    Ok(Json(VmDetail {
-        vm_id: snapshot.vm_id,
-        user_id: snapshot.user_id,
-        status: snapshot.status,
-        uptime_seconds: snapshot.uptime_seconds,
-        brain_path: snapshot.brain_path,
-        memory_mb: snapshot.memory_mb,
-        vcpu_count: snapshot.vcpu_count,
-    }))
+) -> Result<Json<VmDetail>, (StatusCode, Json<ApiError>)> {
+    // todo: look up vm by id
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ApiError::new(format!("vm not found: {vm_id}"))),
+    ))
 }
 
 #[utoipa::path(
@@ -415,15 +368,20 @@ async fn admin_vm_detail(
     )
 )]
 async fn admin_vm_stop(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(vm_id): Path<String>,
-) -> ApiResult<StatusCode> {
-    let stopped = state.stop_vm(vm_id.as_str()).await?;
-    if !stopped {
-        return Err(ApiRouteError::not_found(format!("vm not found: {vm_id}")));
-    }
-    Ok(StatusCode::OK)
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // todo: stop vm via vm_manager
+    tracing::info!("admin stop vm={vm_id}");
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ApiError::new(format!("vm not found: {vm_id}"))),
+    ))
 }
+
+// ---------------------------------------------------------------------------
+// admin: api key management (host-side only, never leaves host)
+// ---------------------------------------------------------------------------
 
 /// api key entry visible in admin panel
 #[derive(Debug, Serialize, ToSchema)]
@@ -443,19 +401,15 @@ pub struct ApiKeySetRequest {
     get,
     path = "/api/admin/keys",
     tag = "admin",
-    responses((status = 200, description = "list of api keys", body = Vec<ApiKeyEntry>))
+    responses(
+        (status = 200, description = "list of api keys", body = Vec<ApiKeyEntry>)
+    )
 )]
-async fn admin_keys_list(State(state): State<AppState>) -> ApiResult<Json<Vec<ApiKeyEntry>>> {
-    let entries = crate::list_host_api_keys(&state)?;
-    let body = entries
-        .into_iter()
-        .map(|entry| ApiKeyEntry {
-            name: entry.name,
-            masked_value: entry.masked_value,
-            updated_at: entry.updated_at,
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(body))
+async fn admin_keys_list(
+    State(_state): State<AppState>,
+) -> Json<Vec<ApiKeyEntry>> {
+    // todo: read from postgres host key store
+    Json(vec![])
 }
 
 #[utoipa::path(
@@ -470,14 +424,18 @@ async fn admin_keys_list(State(state): State<AppState>) -> ApiResult<Json<Vec<Ap
     )
 )]
 async fn admin_key_set(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(key_name): Path<String>,
     Json(req): Json<ApiKeySetRequest>,
-) -> ApiResult<StatusCode> {
-    if req.value.trim().is_empty() {
-        return Err(ApiRouteError::bad_request("key value must not be empty"));
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    if req.value.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new("key value must not be empty")),
+        ));
     }
-    crate::set_host_api_key(&state, key_name.as_str(), req.value.as_str())?;
+    // todo: store in postgres, never expose raw value again
+    tracing::info!("admin key set name={key_name}");
     Ok(StatusCode::OK)
 }
 
@@ -492,17 +450,20 @@ async fn admin_key_set(
     )
 )]
 async fn admin_key_delete(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(key_name): Path<String>,
-) -> ApiResult<StatusCode> {
-    let deleted = crate::delete_host_api_key(&state, key_name.as_str())?;
-    if !deleted {
-        return Err(ApiRouteError::not_found(format!(
-            "key not found: {key_name}"
-        )));
-    }
-    Ok(StatusCode::OK)
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // todo: delete from postgres
+    tracing::info!("admin key delete name={key_name}");
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ApiError::new(format!("key not found: {key_name}"))),
+    ))
 }
+
+// ---------------------------------------------------------------------------
+// admin: memory management (host-side, injected into guest per execution)
+// ---------------------------------------------------------------------------
 
 /// summary of a memory entry
 #[derive(Debug, Serialize, ToSchema)]
@@ -524,42 +485,25 @@ pub struct MemoryDetail {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize, IntoParams, ToSchema)]
-pub struct MemoryListQuery {
-    pub user_id: Option<String>,
-    pub limit: Option<u32>,
-}
-
 #[utoipa::path(
     get,
     path = "/api/admin/memory",
-    tag = "admin",
-    params(MemoryListQuery),
-    responses((status = 200, description = "list of memory entries", body = Vec<MemorySummary>))
+    tag = "memory",
+    responses(
+        (status = 200, description = "list of memory entries", body = Vec<MemorySummary>)
+    )
 )]
 async fn admin_memory_list(
-    State(state): State<AppState>,
-    Query(query): Query<MemoryListQuery>,
-) -> ApiResult<Json<Vec<MemorySummary>>> {
-    let user_id = query.user_id.unwrap_or_else(|| "owner".to_string());
-    let limit = query.limit.unwrap_or(50).clamp(1, 200) as usize;
-    let rows = crate::list_host_memories(&state, user_id.as_str(), limit)?;
-    let body = rows
-        .into_iter()
-        .map(|row| MemorySummary {
-            id: row.id.to_string(),
-            kind: row.kind,
-            preview: row.preview,
-            updated_at: row.updated_at,
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(body))
+    State(_state): State<AppState>,
+) -> Json<Vec<MemorySummary>> {
+    // todo: query postgres memory store
+    Json(vec![])
 }
 
 #[utoipa::path(
     get,
     path = "/api/admin/memory/{memory_id}",
-    tag = "admin",
+    tag = "memory",
     params(("memory_id" = String, Path, description = "memory entry id")),
     responses(
         (status = 200, description = "memory detail", body = MemoryDetail),
@@ -567,23 +511,21 @@ async fn admin_memory_list(
     )
 )]
 async fn admin_memory_detail(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(memory_id): Path<String>,
-) -> ApiResult<Json<MemoryDetail>> {
-    let id = memory_id
-        .parse::<i64>()
-        .map_err(|_| ApiRouteError::bad_request("memory id must be an integer"))?;
-    let row = crate::get_host_memory(&state, "owner", id)?
-        .ok_or_else(|| ApiRouteError::not_found(format!("memory not found: {memory_id}")))?;
-    Ok(Json(MemoryDetail {
-        id: row.id.to_string(),
-        kind: row.kind,
-        content: row.content,
-        metadata: row.metadata,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }))
+) -> Result<Json<MemoryDetail>, (StatusCode, Json<ApiError>)> {
+    // todo: query postgres memory store
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ApiError::new(format!(
+            "memory not found: {memory_id}"
+        ))),
+    ))
 }
+
+// ---------------------------------------------------------------------------
+// heartbeat status
+// ---------------------------------------------------------------------------
 
 /// heartbeat scheduler status
 #[derive(Debug, Serialize, ToSchema)]
@@ -598,33 +540,36 @@ pub struct HeartbeatStatus {
     get,
     path = "/api/admin/heartbeat",
     tag = "heartbeat",
-    responses((status = 200, description = "heartbeat status", body = HeartbeatStatus))
+    responses(
+        (status = 200, description = "heartbeat status", body = HeartbeatStatus)
+    )
 )]
-async fn admin_heartbeat_status(State(state): State<AppState>) -> Json<HeartbeatStatus> {
-    let status = state.heartbeat_snapshot();
+async fn admin_heartbeat_status(
+    State(_state): State<AppState>,
+) -> Json<HeartbeatStatus> {
+    // todo: read from heartbeat scheduler state
     Json(HeartbeatStatus {
-        running: status.running,
-        interval_seconds: status.interval_seconds,
-        last_tick_at: status.last_tick_at,
-        total_ticks: status.total_ticks,
+        running: false,
+        interval_seconds: 30 * 60,
+        last_tick_at: None,
+        total_ticks: 0,
     })
-}
-
-fn validate_channel_secret(state: &AppState, headers: &HeaderMap) -> ApiResult<()> {
-    let secret = headers
-        .get("x-webhook-secret")
-        .and_then(|value| value.to_str().ok());
-    if security::auth::validate_webhook_secret(&state.host_config.security.webhook_secret, secret) {
-        return Ok(());
-    }
-    Err(ApiRouteError::Unauthorized(
-        "invalid webhook secret".to_string(),
-    ))
 }
 
 #[cfg(test)]
 mod api_test {
     use super::*;
+
+    #[test]
+    fn health_response_version() {
+        let resp = HealthResponse {
+            status: "ok".into(),
+            version: "0.10.0".into(),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["version"], "0.10.0");
+    }
 
     #[test]
     fn api_error_serializes() {
