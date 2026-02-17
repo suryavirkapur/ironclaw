@@ -1,9 +1,11 @@
 mod browser;
+mod traits;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 pub use browser::{BrowserTool, BrowserToolConfig};
+pub use traits::{Tool as ToolAsync, ToolResult as ToolResultAsync, ToolSpec as ToolSpecAsync};
 
 #[derive(Debug, thiserror::Error)]
 #[error("tool error: {message}")]

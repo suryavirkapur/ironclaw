@@ -12,3 +12,5 @@ scraper = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 thiserror = "*"
+anyhow = "*"
+async-trait = "*"
