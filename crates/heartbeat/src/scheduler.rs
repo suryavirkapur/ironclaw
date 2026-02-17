@@ -24,9 +24,11 @@ impl Default for HeartbeatConfig {
 }
 
 /// async callback invoked on each heartbeat tick
-pub type HeartbeatCallback =
-    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>
-    + Send>> + Send + Sync>;
+pub type HeartbeatCallback = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// tokio-based periodic heartbeat scheduler
 pub struct HeartbeatScheduler {

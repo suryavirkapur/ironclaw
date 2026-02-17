@@ -1,3 +1,26 @@
+0.10.1 2026-02-17
+- bumped workspace version from 0.10.0 to 0.10.1
+- completed `ironclawd` api routing in `crates/ironclawd/src/api.rs`:
+  webhook receivers for telegram/whatsapp, admin vm/key/memory endpoints,
+  readiness checks, and heartbeat status
+- replaced tuple-style api failures with manual `ApiRouteError` enum +
+  custom `IntoResponse` mapping to consistent json error envelopes
+- wired validated webhook ingress to guest runtime via authenticated transport
+  handshakes and one-shot vsock/ipc message routing
+- enabled heartbeat scheduler startup in host runtime with 30-minute interval
+  and guest heartbeat trigger dispatch
+- added host sqlite persistence for admin api key management
+  (`host_api_keys` table with masked value responses)
+- implemented host memory admin listing/detail from sqlite and added
+  markdown/jsonl persistence snapshots under `data/users/<user>/memory/`
+- added askama-rendered host home page (`/`) and new template file
+  `crates/ironclawd/templates/home.html`
+- replaced placeholder embedded ui with interactive admin dashboard views
+  for heartbeat, vm control, api keys, and memory browsing
+- added root `Dockerfile` for release build + runtime image packaging
+- removed unused postgres-related deps from `crates/ironclawd/Cargo.toml`
+  (`tokio-postgres`, `deadpool-postgres`, `askama_web`)
+
 0.10.0 2026-02-17
 - bumped workspace version from 0.1.0 to 0.10.0
 - removed `thiserror` dependency from all 6 workspace crates; replaced 10 error types

@@ -73,9 +73,7 @@ pub fn parse_webhook(
                 }
                 let text = msg
                     .text
-                    .ok_or_else(|| {
-                        ChannelError::ParseFailed("text message missing body".into())
-                    })?;
+                    .ok_or_else(|| ChannelError::ParseFailed("text message missing body".into()))?;
                 let ts: i64 = msg.timestamp.parse().unwrap_or(0);
                 messages.push(super::telegram::InboundMessage {
                     channel: "whatsapp".into(),
