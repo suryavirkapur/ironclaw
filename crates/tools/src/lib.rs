@@ -1,5 +1,9 @@
+mod browser;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+
+pub use browser::{BrowserTool, BrowserToolConfig};
 
 #[derive(Debug, thiserror::Error)]
 #[error("tool error: {message}")]
@@ -137,10 +141,20 @@ impl Tool for RestrictedBashTool {
             return Err(ToolError::new("bash tool disabled"));
         }
 
-        // Very small guardrails. This is still dangerous; enable explicitly.
+        // very small guardrails. this is still dangerous; enable explicitly.
         let lower = input.to_lowercase();
         for banned in [
-            "rm ", "sudo", "curl ", "wget ", "ssh ", "scp ", "nc ", "netcat",
+            "rm ",
+            "sudo",
+            "curl ",
+            "wget ",
+            "ssh ",
+            "scp ",
+            "nc ",
+            "netcat",
+            "file://",
+            "data:",
+            "javascript:",
         ] {
             if lower.contains(banned) {
                 return Err(ToolError::new(format!(
@@ -149,8 +163,8 @@ impl Tool for RestrictedBashTool {
             }
         }
 
-        // Firecracker guest rootfs uses busybox; bash may not exist.
-        // Use sh for portability.
+        // firecracker guest rootfs uses busybox; bash may not exist.
+        // use sh for portability.
         let out = std::process::Command::new("sh")
             .arg("-lc")
             .arg(input)

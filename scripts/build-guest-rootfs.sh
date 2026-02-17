@@ -22,6 +22,25 @@ require_bin() {
   fi
 }
 
+find_browser_bin() {
+  if [[ -n "${CHROME_BIN:-}" ]]; then
+    if [[ -x "${CHROME_BIN}" ]]; then
+      echo "${CHROME_BIN}"
+      return 0
+    fi
+    echo "configured CHROME_BIN is not executable: ${CHROME_BIN}" >&2
+    return 1
+  fi
+
+  for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      command -v "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 copy_binary_deps() {
   local bin_path
   bin_path="$1"
@@ -122,6 +141,15 @@ fi
 popd >/dev/null
 
 install -m 0755 "${IROWCLAW_BIN}" "${ROOT_DIR}/bin/irowclaw"
+
+if CHROME_SRC="$(find_browser_bin)"; then
+  install -m 0755 "${CHROME_SRC}" "${ROOT_DIR}/usr/bin/chromium"
+  ln -sf chromium "${ROOT_DIR}/usr/bin/chromium-browser"
+  ln -sf chromium "${ROOT_DIR}/usr/bin/google-chrome"
+  copy_binary_deps "${ROOT_DIR}/usr/bin/chromium"
+else
+  echo "warning: chromium/google-chrome not found; browser tool will return an error" >&2
+fi
 
 copy_binary_deps "${ROOT_DIR}/bin/busybox"
 copy_binary_deps "${ROOT_DIR}/bin/irowclaw"

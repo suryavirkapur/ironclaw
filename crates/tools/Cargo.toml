@@ -5,4 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "*"
+libc = "*"
+reqwest = { version = "*", default-features = false, features = ["rustls-tls"] }
+scraper = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
 thiserror = "*"

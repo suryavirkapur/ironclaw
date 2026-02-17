@@ -1,28 +1,31 @@
 current context:
-- implemented security layer in `ironclawd` with a new `crates/security` crate
-- added gateway pairing flow with sqlite-backed otp lifecycle and bearer token validation
-- websocket can require gateway node id + bearer token when `gateway.pairing.enabled = true`
-- added sliding-window rate limiting backed by sqlite and wired checks into websocket,
-  telegram, whatsapp, webhook, and gateway api handlers
-- added channel allowlist and webhook secret auth gate enforcement
+- implemented guest browser tooling with headless chromium/chrome execution in
+  `crates/tools/src/browser.rs`
+- browser tool supports `fetch`, `screenshot`, and `evaluate` actions with input parsing from
+  json or compact command strings
+- added browser safety controls: allowlisted domains, dangerous scheme blocking, timeout
+  enforcement, and linux process resource limits
+- wired browser registration in guest runtime and host tool allowlist exposure for guest sessions
+- updated guest rootfs builder to install chromium when available and warn gracefully when absent
 
 pending tasks:
-- decide whether to add an `openclaw` binary alias that proxies `gateway pair/status`
-- evaluate and fix flaky/hanging `daemon_exits_on_sigterm_and_cleans_pid_file` behavior in this environment
-- add external e2e coverage for gateway pairing endpoints with real http client flows
+- run full cargo test coverage for browser integration once crates.io/network access is available
+- validate browser tool behavior inside firecracker vm with a chromium-enabled rootfs image
+- decide whether to add a dedicated host config gate for enabling/disabling browser tool exposure
 
 important decisions:
-- kept pairing and rate limiting in a dedicated crate (`crates/security`) for reuse and isolation
-- stored bearer tokens hashed (`sha256`) while keeping otp values transient and cleared after pairing
-- used constant-time comparisons for otp and webhook/bearer secret checks
-- applied rate limiting at ingress points before request handling rather than after processing
+- kept browser as a single guest tool (`browser`) with action-dispatch input
+  instead of separate tool names to minimize protocol churn
+- defaulted browser allowlist to empty so all domains are denied until explicitly configured
+- enforced browser sandbox controls in-process via linux `setrlimit` + `prctl(no_new_privs)`
+  without adding extra guest daemons
 
 architectural notes:
-- security sqlite db path is host-scoped at `users_root/security.db`
-- pairing schema includes required columns plus bearer hash metadata
-- rate limiter uses second-level buckets in `rate_limits` for sliding minute/hour sums
-- webhook auth uses header `x-webhook-secret`; optional user id for limits uses `x-user-id`
+- guest browser config is now part of `common::config::GuestConfig` under `[browser]`
+- host runtime now includes `browser` in tool allowlists sent to guest runtimes
+- rootfs builder installs `/usr/bin/chromium` from host `chromium/chromium-browser/google-chrome`
+  binaries when present
 
 plan:
-- monitor runtime behavior and tune default limits if production traffic patterns require it
-- add metrics export around rate-limit and auth-denied events if observability scope increases
+- run vm smoke tests for browser fetch/screenshot using allowlisted domains
+- add evaluate integration tests against real chromium once network + package cache is available

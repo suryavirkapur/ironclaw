@@ -87,5 +87,8 @@ fn restricted_bash_blocks_dangerous_commands() {
     let rm = bash.run("rm -rf /tmp/something");
     assert!(rm.is_err());
 
+    let scheme = bash.run("echo file://tmp/test");
+    assert!(scheme.is_err());
+
     let _ = std::fs::remove_dir_all(&root);
 }

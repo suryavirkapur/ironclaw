@@ -344,6 +344,8 @@ impl Default for HostSecurityConfig {
 pub struct GuestConfig {
     pub default_agent: String,
     pub tools: GuestToolsConfig,
+    #[serde(default)]
+    pub browser: GuestBrowserConfig,
     pub indexing: GuestIndexingConfig,
     pub scheduler: GuestSchedulerConfig,
     #[serde(default = "default_log_level")]
@@ -354,6 +356,51 @@ pub struct GuestConfig {
 pub struct GuestToolsConfig {
     pub allow_bash: bool,
     pub allow_file: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GuestBrowserConfig {
+    #[serde(default)]
+    pub binary_path: Option<PathBuf>,
+    #[serde(default = "default_browser_headless")]
+    pub headless: bool,
+    #[serde(default = "default_browser_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default = "default_browser_max_memory_mb")]
+    pub max_memory_mb: u64,
+    #[serde(default = "default_browser_max_cpu_seconds")]
+    pub max_cpu_seconds: u64,
+}
+
+fn default_browser_headless() -> bool {
+    true
+}
+
+fn default_browser_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_browser_max_memory_mb() -> u64 {
+    512
+}
+
+fn default_browser_max_cpu_seconds() -> u64 {
+    20
+}
+
+impl Default for GuestBrowserConfig {
+    fn default() -> Self {
+        Self {
+            binary_path: None,
+            headless: default_browser_headless(),
+            timeout_ms: default_browser_timeout_ms(),
+            allowed_domains: Vec::new(),
+            max_memory_mb: default_browser_max_memory_mb(),
+            max_cpu_seconds: default_browser_max_cpu_seconds(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -403,6 +450,7 @@ impl Default for GuestConfig {
                 allow_bash: false,
                 allow_file: true,
             },
+            browser: GuestBrowserConfig::default(),
             indexing: GuestIndexingConfig {
                 max_chunk_bytes: default_max_chunk_bytes(),
                 embedding_model: default_embedding_model(),

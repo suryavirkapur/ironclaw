@@ -5,6 +5,11 @@ log_level = "info"
 allow_bash = true
 allow_file = true
 
+[browser]
+headless = true
+timeout_ms = 30000
+allowed_domains = ["wikipedia.org", "github.com"]
+
 [indexing]
 max_chunk_bytes = 2048
 embedding_model = "text-embedding-3-small"

@@ -1,3 +1,19 @@
+0.9.0 2026-02-16
+- added guest `browser` tool in `crates/tools/src/browser.rs` with headless chromium/chrome support
+  for `fetch`, `screenshot`, and `evaluate` actions
+- added browser safety controls:
+  domain allowlist enforcement, dangerous url scheme blocking (`file`, `data`, `javascript`),
+  subprocess timeout handling, and linux process limits (`rlimit` + `no_new_privs`)
+- extended guest config with `[browser]` options:
+  `binary_path`, `headless`, `timeout_ms`, `allowed_domains`, `max_memory_mb`,
+  and `max_cpu_seconds`
+- wired guest runtime tool registration and host runtime allowlist exposure for `browser`
+- added browser unit tests for allowed fetch, screenshot base64 output, and blocked-domain errors
+- updated guest rootfs build script to install chromium/google-chrome into `/usr/bin/chromium`
+  when available and return a warning when missing
+- extended shell safety deny patterns for url-based dangerous inputs:
+  `file://`, `data:`, and `javascript:`
+
 0.8.0 2026-02-16
 - added new `security` crate with sqlite schema init for `pairing`, `rate_limits`, and `rate_limit_costs`
 - implemented gateway pairing state machine (`unpaired` -> `pairing` -> `paired`) with 6-digit otp,
