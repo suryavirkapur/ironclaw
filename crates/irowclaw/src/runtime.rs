@@ -13,7 +13,10 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tools::{FileReadTool, FileWriteTool, RestrictedBashTool, ToolRegistry, ToolResult};
+use tools::{
+    BrowserTool, BrowserToolConfig, FileReadTool, FileWriteTool, RestrictedBashTool, ToolRegistry,
+    ToolResult,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[error("irowclaw error: {message}")]
@@ -66,6 +69,17 @@ impl Runtime {
         tool_registry.register(
             "bash",
             Box::new(RestrictedBashTool::new(true, workspace_root.clone())),
+        );
+        tool_registry.register(
+            "browser",
+            Box::new(BrowserTool::new(BrowserToolConfig {
+                binary_path: config.browser.binary_path.clone(),
+                headless: config.browser.headless,
+                timeout_ms: config.browser.timeout_ms,
+                allowed_domains: config.browser.allowed_domains.clone(),
+                max_memory_mb: config.browser.max_memory_mb,
+                max_cpu_seconds: config.browser.max_cpu_seconds,
+            })),
         );
 
         Ok(Self {
@@ -891,7 +905,7 @@ fn now_ms() -> Result<u64, IrowclawError> {
 }
 
 fn default_allowed_tools(config: &GuestConfig) -> Vec<String> {
-    let mut tools = Vec::new();
+    let mut tools = vec!["browser".to_string()];
     if config.tools.allow_file {
         tools.push("file_read".to_string());
         tools.push("file_write".to_string());

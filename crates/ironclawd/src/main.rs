@@ -2681,7 +2681,11 @@ fn load_guest_allow_bash(config_path: &StdPath) -> bool {
 }
 
 fn allowed_tools_for_runtime(local_guest: bool, guest_allow_bash: bool) -> Vec<String> {
-    let mut tools = vec!["file_read".to_string(), "file_write".to_string()];
+    let mut tools = vec![
+        "file_read".to_string(),
+        "file_write".to_string(),
+        "browser".to_string(),
+    ];
     if bash_allowed(local_guest, guest_allow_bash) {
         tools.push("bash".to_string());
     }
@@ -3376,12 +3380,17 @@ mod tests {
     #[test]
     fn local_runtime_never_offers_bash_tool() {
         let local_tools = allowed_tools_for_runtime(true, true);
+        assert!(local_tools.iter().any(|tool| tool == "browser"));
         assert!(!local_tools.iter().any(|tool| tool == "bash"));
 
         let firecracker_without_bash = allowed_tools_for_runtime(false, false);
+        assert!(firecracker_without_bash
+            .iter()
+            .any(|tool| tool == "browser"));
         assert!(!firecracker_without_bash.iter().any(|tool| tool == "bash"));
 
         let firecracker_with_bash = allowed_tools_for_runtime(false, true);
+        assert!(firecracker_with_bash.iter().any(|tool| tool == "browser"));
         assert!(firecracker_with_bash.iter().any(|tool| tool == "bash"));
     }
 
