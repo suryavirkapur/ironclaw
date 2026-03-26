@@ -4,8 +4,8 @@ use std::sync::Arc;
 use common::config::{HostLlmApi, HostLlmConfig};
 
 use rig::client::CompletionClient;
-use rig::completion::{CompletionError, CompletionModel};
 use rig::completion::message::AssistantContent;
+use rig::completion::{CompletionError, CompletionModel};
 
 // ---------------------------------------------------------------------------
 // Provider backend – wraps a Rig CompletionModel behind a dyn-compatible trait
@@ -15,9 +15,7 @@ trait ProviderComplete: Send + Sync {
     fn complete(
         &self,
         prompt: &str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>>;
 }
 
 struct CompleteFn<M: CompletionModel> {
@@ -28,9 +26,8 @@ impl<M: CompletionModel + 'static> ProviderComplete for CompleteFn<M> {
     fn complete(
         &self,
         prompt: &str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>>
+    {
         let model = self.model.clone();
         let prompt = prompt.to_string();
         Box::pin(async move {
@@ -241,13 +238,25 @@ fn build_tool_plan_prompt(
         ""
     };
 
+    let browser_hint = if allowed_tools.iter().any(|t| t == "browser") {
+        "\n- for browser automation, use tool browser with json input like: {\"command\":\"snapshot\",\"args\":[\"-i\",\"-c\"]}"
+    } else {
+        ""
+    };
+
+    let browser_action_hint = if allowed_tools.iter().any(|t| t == "browser_action") {
+        "\n- for simplified browser actions, use tool browser_action with json like: {\"action\":\"navigate\",\"url\":\"https://...\"} or {\"action\":\"click\",\"ref\":\"e5\"} or {\"action\":\"snapshot\",\"interactive\":true}"
+    } else {
+        ""
+    };
+
     format!(
         "you are a host planner. choose exactly one action.\n\
          output valid json only.\n\
          schema:\n\
          - tool action: {{\"action\":\"tool\",\"tool\":\"<name>\",\"input\":\"<text>\"}}\n\
          - answer action: {{\"action\":\"answer\",\"text\":\"<response>\"}}\n\
-         allowed tools: [{tools}]{code_exec_hint}{tool_install_hint}{tool_call_hint}\n\
+         allowed tools: [{tools}]{code_exec_hint}{tool_install_hint}{tool_call_hint}{browser_hint}{browser_action_hint}\n\
          rules:\n\
          - if a tool is needed, choose action tool.\n\
          - if no tool is needed, choose action answer.\n\

@@ -13,6 +13,7 @@ include_dir = "*"
 irowclaw = { path = "../irowclaw" }
 memory = { path = "../memory" }
 security = { path = "../security" }
+tools = { path = "../tools" }
 mime_guess = "*"
 nix = { version = "*", features = ["signal"] }
 reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls"] }

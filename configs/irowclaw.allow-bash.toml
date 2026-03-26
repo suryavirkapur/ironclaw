@@ -4,6 +4,7 @@ log_level = "info"
 [tools]
 allow_bash = true
 allow_file = true
+allow_browser = true
 
 [indexing]
 max_chunk_bytes = 2048

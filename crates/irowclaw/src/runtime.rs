@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tools::{
-    CodeExecutionTool, FileReadTool, FileWriteTool, RestrictedBashTool, ToolCallTool,
-    ToolInstallTool, ToolRegistry, ToolResult,
+    BrowserActionTool, BrowserAutomationTool, CodeExecutionTool, FileReadTool, FileWriteTool,
+    RestrictedBashTool, ToolCallTool, ToolInstallTool, ToolRegistry, ToolResult,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -72,9 +72,24 @@ impl Runtime {
             "bash",
             Box::new(RestrictedBashTool::new(true, workspace_root.clone())),
         );
-
         let timeout_secs = config.execution.timeout_secs;
         let allowed_domains = config.network.allowed_domains.clone();
+
+        tool_registry.register(
+            "browser",
+            Box::new(BrowserAutomationTool::new(
+                workspace_root.clone(),
+                allowed_domains.clone(),
+            )),
+        );
+
+        tool_registry.register(
+            "browser_action",
+            Box::new(BrowserActionTool::new(
+                workspace_root.clone(),
+                allowed_domains.clone(),
+            )),
+        );
 
         tool_registry.register(
             "code_exec",
@@ -937,6 +952,10 @@ fn default_allowed_tools(config: &GuestConfig) -> Vec<String> {
     }
     if config.tools.allow_bash {
         tools.push("bash".to_string());
+    }
+    if config.tools.allow_browser {
+        tools.push("browser".to_string());
+        tools.push("browser_action".to_string());
     }
     tools.push("code_exec".to_string());
     tools.push("tool_install".to_string());

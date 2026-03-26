@@ -440,6 +440,8 @@ impl Default for GuestNetworkConfig {
 pub struct GuestToolsConfig {
     pub allow_bash: bool,
     pub allow_file: bool,
+    #[serde(default)]
+    pub allow_browser: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -488,6 +490,7 @@ impl Default for GuestConfig {
             tools: GuestToolsConfig {
                 allow_bash: false,
                 allow_file: true,
+                allow_browser: false,
             },
             indexing: GuestIndexingConfig {
                 max_chunk_bytes: default_max_chunk_bytes(),

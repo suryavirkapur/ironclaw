@@ -17,6 +17,7 @@ IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
 IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-1}"
 INCLUDE_PYTHON="${INCLUDE_PYTHON:-0}"
 INCLUDE_NODE="${INCLUDE_NODE:-0}"
+INCLUDE_AGENT_BROWSER="${INCLUDE_AGENT_BROWSER:-0}"
 
 require_bin() {
   local bin
@@ -257,10 +258,94 @@ if [[ "${INCLUDE_NODE}" == "1" ]]; then
   fi
 fi
 
+# ============================================================================
+# agent-browser + Chromium Installation
+# ============================================================================
+if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  echo "Adding agent-browser and Chromium to rootfs..." >&2
+
+  AGENT_BROWSER_BIN="${AGENT_BROWSER_BIN:-}"
+  CHROME_CACHE_DIR="${CHROME_CACHE_DIR:-}"
+
+  # Locate or install agent-browser
+  if [[ -z "${AGENT_BROWSER_BIN}" ]]; then
+    if command -v agent-browser >/dev/null 2>&1; then
+      AGENT_BROWSER_BIN="$(command -v agent-browser)"
+    elif command -v cargo >/dev/null 2>&1 && [[ "${IROWCLAW_USE_MUSL}" == "1" ]]; then
+      echo "Installing agent-browser via cargo..." >&2
+      if cargo install agent-browser 2>/dev/null; then
+        AGENT_BROWSER_BIN="$(cargo install agent-browser 2>&1 | grep -oP '(?<=Installed package `agent-browser v)[^`]+' | head -1)/bin/agent-browser" || true
+        AGENT_BROWSER_BIN="$(which agent-browser 2>/dev/null || echo "")"
+      fi
+    elif command -v npm >/dev/null 2>&1; then
+      echo "Installing agent-browser via npm..." >&2
+      if npm install -g agent-browser 2>/dev/null; then
+        AGENT_BROWSER_BIN="$(npm root -g)/agent-browser/bin/agent-browser"
+      fi
+    fi
+  fi
+
+  if [[ -z "${AGENT_BROWSER_BIN}" ]] || [[ ! -x "${AGENT_BROWSER_BIN}" ]]; then
+    echo "WARNING: agent-browser not found or not executable, skipping browser automation support" >&2
+  else
+    install -m 0755 "${AGENT_BROWSER_BIN}" "${ROOT_DIR}/usr/bin/agent-browser"
+    ln -sf agent-browser "${ROOT_DIR}/usr/bin/agent-browser" 2>/dev/null || true
+    echo "agent-browser installed: ${AGENT_BROWSER_BIN}" >&2
+  fi
+
+  # Locate Chromium
+  if [[ -z "${CHROME_CACHE_DIR}" ]]; then
+    for cache_dir in \
+      "${HOME}/.cache/agent-browser/chrome-linux" \
+      "${HOME}/.cache/browser-use/chrome" \
+      "${HOME}/.cache/ms-playwright/chromium-*" \
+      "${HOME}/.cache/chromium-*" \
+      "/usr/bin/chromium" \
+      "/usr/bin/google-chrome" \
+      "/usr/bin/chromium-browser"; do
+      if [[ -e "${cache_dir}" ]]; then
+        if [[ -d "${cache_dir}" ]]; then
+          CHROME_CACHE_DIR="${cache_dir}"
+          break
+        elif [[ -x "${cache_dir}" ]]; then
+          # It's an executable, use its directory
+          CHROME_CACHE_DIR="$(dirname "${cache_dir}")"
+          break
+        fi
+      fi
+    done
+  fi
+
+  if [[ -n "${CHROME_CACHE_DIR}" ]] && [[ -e "${CHROME_CACHE_DIR}" ]]; then
+    echo "Copying Chromium from: ${CHROME_CACHE_DIR}" >&2
+    mkdir -p "${ROOT_DIR}/usr/lib/agent-browser"
+    if [[ -d "${CHROME_CACHE_DIR}" ]]; then
+      cp -r "${CHROME_CACHE_DIR}" "${ROOT_DIR}/usr/lib/agent-browser/chrome-linux" 2>/dev/null || \
+        cp -r "${CHROME_CACHE_DIR}/"* "${ROOT_DIR}/usr/lib/agent-browser/" 2>/dev/null || true
+    fi
+    # Also check for chrome binary directly
+    if [[ -x "${CHROME_CACHE_DIR}/chrome" ]]; then
+      install -m 0755 "${CHROME_CACHE_DIR}/chrome" "${ROOT_DIR}/usr/lib/agent-browser/chrome"
+    fi
+    # Link chrome into PATH
+    if [[ -x "${ROOT_DIR}/usr/lib/agent-browser/chrome" ]]; then
+      ln -sf /usr/lib/agent-browser/chrome "${ROOT_DIR}/usr/bin/chromium" 2>/dev/null || true
+    fi
+    echo "Chromium installed from ${CHROME_CACHE_DIR}" >&2
+  else
+    echo "WARNING: Chromium not found in common locations. agent-browser will download it at runtime." >&2
+    echo "         To avoid this on first run, set CHROME_CACHE_DIR=/path/to/chrome when building." >&2
+  fi
+fi
+
 # Increase rootfs size if runtimes are included
-if [[ "${INCLUDE_PYTHON}" == "1" || "${INCLUDE_NODE}" == "1" ]]; then
-  # Python ~50MB, Node ~30MB + stdlib
+if [[ "${INCLUDE_PYTHON}" == "1" || "${INCLUDE_NODE}" == "1" || "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  # Python ~50MB, Node ~30MB + stdlib, Chrome ~150MB
   ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-512}"
+fi
+if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  # Chrome is ~150MB, bump to 768MB minimum if not already larger
+  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-768}"
 fi
 
 rm -f "${ROOTFS_IMAGE}"

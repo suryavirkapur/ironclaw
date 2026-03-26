@@ -1,7 +1,10 @@
 use super::{
-    CodeExecutionTool, FileReadTool, FileWriteTool, RestrictedBashTool, Tool, ToolCallTool,
-    ToolInstallTool, ToolRegistry,
+    BrowserAutomationTool, CodeExecutionTool, FileReadTool, FileWriteTool, RestrictedBashTool,
+    Tool, ToolCallTool, ToolInstallTool, ToolRegistry,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 fn temp_workspace(name: &str) -> std::path::PathBuf {
     let ts = std::time::SystemTime::now()
@@ -253,6 +256,160 @@ fn tool_call_runs_installed_tool() {
     assert!(result.ok);
     assert!(result.output.contains("tool executed successfully"));
     assert!(result.output.contains("analyzer ready"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn browser_tool_rejects_unsafe_command() {
+    let root = temp_workspace("browser-block");
+    let browser = BrowserAutomationTool::with_executable("agent-browser", root.clone(), vec![]);
+
+    let result = browser.run(r#"{"command":"eval","args":["window.location.href"]}"#);
+    assert!(result.is_err());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_tool_wraps_agent_browser_with_guardrails() {
+    let root = temp_workspace("browser-fake");
+    let script_path = root.join("fake-agent-browser.sh");
+    let args_path = root.join("browser-args.txt");
+    let home_path = root.join("browser-home.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\nprintf '%s' \"$HOME\" > \"{}\"\nprintf '{{\"success\":true}}'\n",
+            args_path.display(),
+            home_path.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script_path, perms).unwrap();
+
+    let browser = BrowserAutomationTool::with_executable(
+        script_path.display().to_string(),
+        root.clone(),
+        vec!["example.com".to_string(), "www.example.com".to_string()],
+    );
+
+    let result = browser.run(r#"{"command":"snapshot","args":["-i","-c"]}"#);
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert!(result.ok);
+    assert!(result.output.contains("success"));
+
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("--json"));
+    assert!(args.contains("--content-boundaries"));
+    assert!(args.contains("--max-output"));
+    assert!(args.contains("50000"));
+    assert!(args.contains("--allowed-domains"));
+    assert!(args.contains("example.com,www.example.com"));
+    assert!(args.contains("--session"));
+    assert!(args.contains("ironclaw"));
+    assert!(args.contains("snapshot"));
+    assert!(args.contains("-i"));
+    assert!(args.contains("-c"));
+
+    let home = std::fs::read_to_string(&home_path).unwrap();
+    assert!(home.contains(".agent-browser-home"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_action_tool_navigate_converts_correctly() {
+    use super::BrowserActionTool;
+    let root = temp_workspace("browser-action-nav");
+    let script_path = root.join("fake-browser.sh");
+    let args_path = root.join("browser-args.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\nprintf '{{\"success\":true}}'\n",
+            args_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let tool =
+        BrowserActionTool::with_executable(script_path.display().to_string(), root.clone(), vec![]);
+    let result = tool
+        .run(r#"{"action":"navigate","url":"https://example.com"}"#)
+        .unwrap();
+    assert!(result.ok);
+
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("open"));
+    assert!(args.contains("https://example.com"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_action_tool_snapshot_interactive_converts_correctly() {
+    use super::BrowserActionTool;
+    let root = temp_workspace("browser-action-snap");
+    let script_path = root.join("fake-browser.sh");
+    let args_path = root.join("browser-args.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\nprintf '{{\"success\":true}}'\n",
+            args_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let tool =
+        BrowserActionTool::with_executable(script_path.display().to_string(), root.clone(), vec![]);
+    let result = tool
+        .run(r#"{"action":"snapshot","interactive":true,"compact":true}"#)
+        .unwrap();
+    assert!(result.ok);
+
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("snapshot"));
+    assert!(args.contains("-i"));
+    assert!(args.contains("-c"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn browser_action_tool_click_converts_correctly() {
+    use super::BrowserActionTool;
+    let root = temp_workspace("browser-action-click");
+    let script_path = root.join("fake-browser.sh");
+    let args_path = root.join("browser-args.txt");
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\nprintf '{{\"success\":true}}'\n",
+            args_path.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let tool =
+        BrowserActionTool::with_executable(script_path.display().to_string(), root.clone(), vec![]);
+    let result = tool.run(r#"{"action":"click","ref":"e5"}"#).unwrap();
+    assert!(result.ok);
+
+    let args = std::fs::read_to_string(&args_path).unwrap();
+    assert!(args.contains("click"));
+    assert!(args.contains("@e5"));
 
     let _ = std::fs::remove_dir_all(&root);
 }

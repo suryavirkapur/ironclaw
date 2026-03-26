@@ -180,13 +180,18 @@ impl VmManager for FirecrackerManager {
         std::fs::create_dir_all(&self.config.vsock_uds_dir)
             .map_err(|e| VmError::new(format!("create vsock uds dir failed: {e}")))?;
 
-        if let Err(e) = crate::network_firewall::setup_vm_network(&user_id, &config.allowed_domains) {
+        if let Err(e) = crate::network_firewall::setup_vm_network(&user_id, &config.allowed_domains)
+        {
             tracing::warn!("failed to setup network firewall for {}: {}", user_id, e);
         }
 
         if let Some(limit) = self.check_brain_quota(&config.brain_path) {
-            tracing::info!("brain disk usage for {}: {} bytes (limit: {} MB)",
-                user_id, limit.0, self.config.disk_quota_mb);
+            tracing::info!(
+                "brain disk usage for {}: {} bytes (limit: {} MB)",
+                user_id,
+                limit.0,
+                self.config.disk_quota_mb
+            );
             if limit.0 >= (self.config.disk_quota_mb as u64) * 1024 * 1024 {
                 return Err(VmError::new(format!(
                     "disk quota exceeded for {}: {} bytes at limit {} MB",
