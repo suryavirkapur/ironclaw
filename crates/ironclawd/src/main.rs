@@ -20,6 +20,7 @@ use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 use common::logging::{init_logging, LoggingConfig, LoggingHandle};
 use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
+use common::slack::{parse_slack_message, validate_slack_signature, SlackResponse, SlackUrlVerification};
 use daemon::GatewayCommand;
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
@@ -595,10 +596,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
         if let Some(guest_transport) = guest_transport {
             let guest_user_id = user_id.clone();
             let users_root = state.host_config.storage.users_root.clone();
-            let guest_config_path = (*state.guest_config_path).clone();
+            let brain_root = users_root.join(&guest_user_id).join("guest");
+            let guest_config_path = brain_root.join("config").join("irowclaw.toml");
             tokio::spawn(async move {
-                // Local guest mode runs irowclaw in-process. Use a writable brain root.
-                let brain_root = users_root.join(&guest_user_id).join("guest");
                 if let Err(err) = std::fs::create_dir_all(&brain_root) {
                     tracing::warn!("create brain root failed: {err}");
                 }
@@ -612,7 +612,78 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             });
         }
     }
-    // Send AuthChallenge and wait for AuthAck before starting WS bridge.
+
+    let (mut sender, mut receiver) = socket.split();
+
+    // Send AuthChallenge to client and wait for AuthAck.
+    {
+        use common::proto::ironclaw::AuthChallenge;
+        let challenge = MessageEnvelope {
+            user_id: user_id.clone(),
+            session_id: session_id.clone(),
+            msg_id: 0,
+            timestamp_ms: now_ms().unwrap_or(0),
+            cap_token: cap_token.clone(),
+            payload: Some(message_envelope::Payload::AuthChallenge(AuthChallenge {
+                cap_token: cap_token.clone(),
+                allowed_tools: guest_allowed_tools.clone(),
+                execution_mode: state.execution_mode.to_wire().to_string(),
+            })),
+        };
+        let challenge_json = match serde_json::to_string(&challenge) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!("auth challenge serialize failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = sender.send(Message::Text(challenge_json.into())).await {
+            tracing::error!("auth challenge send failed: {err}");
+            return;
+        }
+
+        let auth_ack = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.next()).await;
+        match auth_ack {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let ack: MessageEnvelope = match serde_json::from_str(text.as_ref()) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::error!("auth ack parse failed: {err}");
+                        return;
+                    }
+                };
+                match ack.payload {
+                    Some(message_envelope::Payload::AuthAck(ack)) if ack.cap_token == cap_token => {}
+                    other => {
+                        tracing::error!("invalid auth ack: {other:?}");
+                        return;
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)))) => {
+                tracing::debug!("client closed connection during auth");
+                return;
+            }
+            Ok(Some(Ok(other))) => {
+                tracing::error!("unexpected message type during auth: {other:?}");
+                return;
+            }
+            Ok(Some(Err(err))) => {
+                tracing::error!("auth ack recv failed: {err}");
+                return;
+            }
+            Ok(None) => {
+                tracing::error!("auth ack connection closed");
+                return;
+            }
+            Err(_) => {
+                tracing::error!("auth ack timed out");
+                return;
+            }
+        }
+    }
+
+    // Now do internal auth with guest.
     {
         use common::proto::ironclaw::AuthChallenge;
         let challenge = MessageEnvelope {
@@ -628,7 +699,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             })),
         };
         if let Err(err) = transport.send(challenge).await {
-            tracing::error!("auth challenge send failed: {err}");
+            tracing::error!("guest auth challenge send failed: {err}");
             return;
         }
 
@@ -636,25 +707,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             Ok(Ok(Some(msg))) => match msg.payload {
                 Some(message_envelope::Payload::AuthAck(ack)) if ack.cap_token == cap_token => {}
                 other => {
-                    tracing::error!("invalid auth ack: {other:?}");
+                    tracing::error!("invalid guest auth ack: {other:?}");
                     return;
                 }
             },
             Ok(Ok(None)) => return,
             Ok(Err(err)) => {
-                tracing::error!("auth ack recv failed: {err}");
+                tracing::error!("guest auth ack recv failed: {err}");
                 return;
             }
             Err(_) => {
-                tracing::error!("auth ack timed out");
+                tracing::error!("guest auth ack timed out");
                 return;
             }
         }
 
         transport = Box::new(AuthenticatedTransport::new(transport, cap_token.clone()));
     }
-
-    let (mut sender, mut receiver) = socket.split();
 
     // host tool policy.
     let tool_user_id = user_id.clone();
@@ -1105,9 +1174,11 @@ async fn start_vm_pair(
         vm_running
     );
     let brain_path = brain_ext4_path(&state.host_config.storage.users_root, user_id)?;
+    let allowed_domains = state.host_config.security.network.allowed_domains.clone();
     let config = VmConfig {
         user_id: user_id.to_string(),
         brain_path,
+        allowed_domains,
     };
     if state.local_guest {
         if let Some(manager) = &state.stub_vm_manager {
@@ -1324,7 +1395,8 @@ async fn webhook_handler(
     Path(channel): Path<String>,
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<WebhookResponse>, (StatusCode, String)> {
+    body: String,
+) -> Result<Response, (StatusCode, String)> {
     ensure_channel_allowed(&state, &channel)
         .map_err(|_| (StatusCode::FORBIDDEN, "channel not allowed".to_string()))?;
 
@@ -1338,17 +1410,57 @@ async fn webhook_handler(
         ));
     }
 
-    let user_id = headers
-        .get("x-user-id")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("webhook");
-    enforce_rate_limit(&state, user_id, &channel, 0).map_err(|_| {
+    enforce_rate_limit(&state, "webhook", &channel, 0).map_err(|_| {
         (
             StatusCode::TOO_MANY_REQUESTS,
             "429 too many requests".to_string(),
         )
     })?;
-    Ok(Json(WebhookResponse { accepted: true }))
+
+    match channel.as_str() {
+        "slack" => handle_slack_webhook(&body, &headers).await,
+        _ => Ok(Json(WebhookResponse { accepted: true }).into_response()),
+    }
+}
+
+async fn handle_slack_webhook(
+    body: &str,
+    headers: &HeaderMap,
+) -> Result<Response, (StatusCode, String)> {
+    if let Ok(url_verification) = serde_json::from_str::<SlackUrlVerification>(body) {
+        if url_verification.type_ == "url_verification" {
+            return Ok(Json(serde_json::json!({
+                "challenge": url_verification.challenge
+            })).into_response());
+        }
+    }
+
+    match parse_slack_message(body) {
+        Ok(payload) => {
+            let user_id = payload.user_id.clone().unwrap_or_else(|| "unknown".to_string());
+            let text = payload.text.clone().unwrap_or_default();
+
+            tracing::info!(
+                "slack webhook: user_id={} channel={} text={}",
+                user_id,
+                payload.channel_id.as_deref().unwrap_or("unknown"),
+                text
+            );
+
+            if text.is_empty() {
+                return Ok(Json(SlackResponse::new("No message text provided")).into_response());
+            }
+
+            Ok(Json(SlackResponse::new(&format!(
+                "Received: {}. Processing via agent...",
+                text
+            ))).into_response())
+        }
+        Err(e) => {
+            tracing::warn!("slack parse error: {}", e);
+            Ok(Json(SlackResponse::new("Error processing message")).into_response())
+        }
+    }
 }
 
 fn run_gateway_cli(config: &HostConfig, command: GatewayCommand) -> Result<(), IronclawError> {

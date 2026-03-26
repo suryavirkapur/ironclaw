@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 pub struct VmConfig {
     pub user_id: String,
     pub brain_path: PathBuf,
+    pub allowed_domains: Vec<String>,
 }
 
 pub struct VmInstance {
@@ -129,6 +130,12 @@ pub struct FirecrackerManagerConfig {
     pub vsock_uds_dir: PathBuf,
     /// Guest listens/connects on this vsock port.
     pub vsock_port: u32,
+    /// Number of vCPUs for each VM.
+    pub vcpus: u8,
+    /// Memory in MiB for each VM.
+    pub memory_mib: u32,
+    /// Disk quota in MB for brain storage.
+    pub disk_quota_mb: u32,
 }
 
 #[cfg(feature = "firecracker")]
@@ -151,18 +158,42 @@ impl FirecrackerManager {
     async fn is_running_inner(&self, user_id: &str) -> bool {
         self.handles.lock().await.contains_key(user_id)
     }
+
+    fn check_brain_quota(&self, brain_path: &std::path::Path) -> Option<(u64)> {
+        if brain_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(brain_path) {
+                return Some(metadata.len());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(feature = "firecracker")]
 #[async_trait::async_trait]
 impl VmManager for FirecrackerManager {
     async fn start_vm(&self, config: VmConfig) -> Result<VmInstance, VmError> {
-        let user_id = config.user_id;
+        let user_id = config.user_id.clone();
 
         std::fs::create_dir_all(&self.config.api_socket_dir)
             .map_err(|e| VmError::new(format!("create api socket dir failed: {e}")))?;
         std::fs::create_dir_all(&self.config.vsock_uds_dir)
             .map_err(|e| VmError::new(format!("create vsock uds dir failed: {e}")))?;
+
+        if let Err(e) = crate::network_firewall::setup_vm_network(&user_id, &config.allowed_domains) {
+            tracing::warn!("failed to setup network firewall for {}: {}", user_id, e);
+        }
+
+        if let Some(limit) = self.check_brain_quota(&config.brain_path) {
+            tracing::info!("brain disk usage for {}: {} bytes (limit: {} MB)",
+                user_id, limit.0, self.config.disk_quota_mb);
+            if limit.0 >= (self.config.disk_quota_mb as u64) * 1024 * 1024 {
+                return Err(VmError::new(format!(
+                    "disk quota exceeded for {}: {} bytes at limit {} MB",
+                    user_id, limit.0, self.config.disk_quota_mb
+                )));
+            }
+        }
 
         // If one already exists, stop it first.
         let existing = { self.handles.lock().await.remove(&user_id) };
@@ -188,7 +219,9 @@ impl VmManager for FirecrackerManager {
         .kernel(&self.config.kernel_path)
         .api_socket(&api_socket)
         .vm_id(user_id.clone())
-        .vsock(3, &vsock_uds_path);
+        .vsock(3, &vsock_uds_path)
+        .vcpus(self.config.vcpus)
+        .memory_mib(self.config.memory_mib);
 
         if self.config.rootfs_path.is_dir() {
             builder = builder.rootfs_dir(&self.config.rootfs_path);
@@ -295,6 +328,15 @@ impl VmManager for FirecrackerManager {
                 .await
                 .map_err(|e| VmError::new(format!("firecracker kill failed: {e}")))?;
         }
+
+        if let Err(e) = crate::network_firewall::cleanup_vm_network(user_id) {
+            tracing::warn!("failed to cleanup network firewall for {}: {}", user_id, e);
+        }
+
+        if let Err(e) = crate::cgroup::cleanup_cgroup(user_id) {
+            tracing::warn!("failed to cleanup cgroup for {}: {}", user_id, e);
+        }
+
         Ok(())
     }
 

@@ -25,6 +25,12 @@ rootfs_path = "rootfs/build/guest-rootfs.ext4"
 api_socket_dir = "/tmp/ironclaw-fc"
 vsock_uds_dir = "/tmp/ironclaw/vsock"
 vsock_port = 5000
+vcpus = 2
+memory_mib = 2048
+disk_quota_mb = 512
+
+[security.network]
+allowed_domains = []
 
 [daemon]
 pid_file = "/tmp/ironclaw/ironclawd.pid"

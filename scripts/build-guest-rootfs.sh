@@ -5,6 +5,9 @@ set -euo pipefail
 # outputs:
 # - root tree: rootfs/build/guest-root (or arg1)
 # - ext4 image: rootfs/build/guest-rootfs.ext4 (or arg2 / ROOTFS_IMAGE)
+#
+# optional: set INCLUDE_PYTHON=1 to include Python3
+# optional: set INCLUDE_NODE=1 to include Node.js
 
 ROOT_DIR="${1:-rootfs/build/guest-root}"
 ROOTFS_IMAGE="${2:-${ROOTFS_IMAGE:-rootfs/build/guest-rootfs.ext4}}"
@@ -12,6 +15,8 @@ ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-256}"
 IROWCLAW_BIN_REL="${IROWCLAW_BIN_REL:-target/x86_64-unknown-linux-musl/release/irowclaw}"
 IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
 IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-1}"
+INCLUDE_PYTHON="${INCLUDE_PYTHON:-0}"
+INCLUDE_NODE="${INCLUDE_NODE:-0}"
 
 require_bin() {
   local bin
@@ -148,6 +153,114 @@ if [[ -d "${MOD_BASE}" ]]; then
       fi
     done
   fi
+fi
+
+# ============================================================================
+# Python 3 Installation
+# ============================================================================
+if [[ "${INCLUDE_PYTHON}" == "1" ]]; then
+  echo "Adding Python 3 to rootfs..." >&2
+  
+  PYTHON_BIN=""
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  elif [[ -x /usr/bin/python3 ]]; then
+    PYTHON_BIN="/usr/bin/python3"
+  else
+    echo "WARNING: python3 not found, skipping" >&2
+  fi
+
+  if [[ -n "${PYTHON_BIN}" ]]; then
+    # Install python binary
+    install -m 0755 "${PYTHON_BIN}" "${ROOT_DIR}/usr/bin/python3"
+    ln -sf python3 "${ROOT_DIR}/usr/bin/python"
+    
+    # Copy python shared library dependencies
+    copy_binary_deps "${ROOT_DIR}/usr/bin/python3"
+    
+    # Copy Python standard library (minimal)
+    PYTHON_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    PYTHON_LIB="/usr/lib/python${PYTHON_VER}"
+    
+    if [[ -d "${PYTHON_LIB}" ]]; then
+      mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}"
+      
+      # Copy essential stdlib modules
+      for module in os sys io re json asyncio threading subprocess pathlib \
+        typing collections itertools functools contextlib traceback warnings \
+        types weakref copy pickle heapq bisect math time datetime hashlib random \
+        string textwrap unicodedata encodings; do
+        if [[ -d "${PYTHON_LIB}/${module}" ]]; then
+          mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/${module}"
+          cp -r "${PYTHON_LIB}/${module}"/* "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/${module}/"
+        elif [[ -f "${PYTHON_LIB}/${module}.py" ]]; then
+          cp "${PYTHON_LIB}/${module}.py" "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/"
+        fi
+      done
+      
+      # Copy __pycache__ for compiled modules
+      if [[ -d "${PYTHON_LIB}/__pycache__" ]]; then
+        mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/__pycache__"
+        cp "${PYTHON_LIB}/__pycache__/"*.pyc "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/__pycache__/" 2>/dev/null || true
+      fi
+    fi
+    
+    # Install pip if available
+    if command -v pip3 >/dev/null 2>&1; then
+      PIP_BIN="$(command -v pip3)"
+      install -m 0755 "${PIP_BIN}" "${ROOT_DIR}/usr/bin/pip3" 2>/dev/null || true
+      ln -sf pip3 "${ROOT_DIR}/usr/bin/pip" 2>/dev/null || true
+    fi
+    
+    echo "Python ${PYTHON_VER} installed" >&2
+  fi
+fi
+
+# ============================================================================
+# Node.js Installation
+# ============================================================================
+if [[ "${INCLUDE_NODE}" == "1" ]]; then
+  echo "Adding Node.js to rootfs..." >&2
+  
+  NODE_BIN=""
+  if command -v node >/dev/null 2>&1; then
+    NODE_BIN="$(command -v node)"
+  elif [[ -x /usr/bin/node ]]; then
+    NODE_BIN="/usr/bin/node"
+  else
+    echo "WARNING: node not found, skipping" >&2
+  fi
+
+  if [[ -n "${NODE_BIN}" ]]; then
+    # Install node binary
+    install -m 0755 "${NODE_BIN}" "${ROOT_DIR}/usr/bin/node"
+    
+    # Copy node shared library dependencies
+    copy_binary_deps "${ROOT_DIR}/usr/bin/node"
+    
+    # Create minimal node_modules structure
+    mkdir -p "${ROOT_DIR}/usr/lib/node_modules"
+    
+    # Install npm if available
+    if command -v npm >/dev/null 2>&1; then
+      NPM_BIN="$(command -v npm)"
+      install -m 0755 "${NPM_BIN}" "${ROOT_DIR}/usr/bin/npm" 2>/dev/null || true
+      
+      # npm is a script, also need node_modules/npm
+      NPM_LIB="/usr/lib/node_modules/npm"
+      if [[ -d "${NPM_LIB}" ]]; then
+        cp -r "${NPM_LIB}" "${ROOT_DIR}/usr/lib/node_modules/" 2>/dev/null || true
+      fi
+    fi
+    
+    echo "Node.js installed" >&2
+  fi
+fi
+
+# Increase rootfs size if runtimes are included
+if [[ "${INCLUDE_PYTHON}" == "1" || "${INCLUDE_NODE}" == "1" ]]; then
+  # Python ~50MB, Node ~30MB + stdlib
+  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-512}"
 fi
 
 rm -f "${ROOTFS_IMAGE}"

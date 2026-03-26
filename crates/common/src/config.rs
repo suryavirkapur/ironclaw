@@ -53,6 +53,8 @@ fn default_log_level() -> LogLevel {
 pub enum HostLlmApi {
     ChatCompletions,
     Responses,
+    Message,
+    Anthropic,
 }
 
 impl HostLlmApi {
@@ -60,6 +62,8 @@ impl HostLlmApi {
         match self {
             Self::ChatCompletions => "/chat/completions",
             Self::Responses => "/responses",
+            Self::Message => "/message",
+            Self::Anthropic => "/v1/messages",
         }
     }
 }
@@ -97,9 +101,30 @@ pub struct HostFirecrackerConfig {
     /// Directory for Firecracker vsock UDS endpoints.
     #[serde(default)]
     pub vsock_uds_dir: Option<PathBuf>,
-    /// Guest port used for host-guest transport.
+    /// Guest listens/connects on this vsock port.
     #[serde(default)]
     pub vsock_port: Option<u32>,
+    /// Number of vCPUs allocated to each VM.
+    #[serde(default = "default_vcpus")]
+    pub vcpus: u8,
+    /// Memory in MiB allocated to each VM.
+    #[serde(default = "default_memory_mib")]
+    pub memory_mib: u32,
+    /// Disk quota in MB for each tenant's brain storage.
+    #[serde(default = "default_disk_quota_mb")]
+    pub disk_quota_mb: u32,
+}
+
+fn default_vcpus() -> u8 {
+    2
+}
+
+fn default_memory_mib() -> u32 {
+    2048
+}
+
+fn default_disk_quota_mb() -> u32 {
+    512
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -235,6 +260,9 @@ impl HostConfig {
                 api_socket_dir: PathBuf::from("/tmp/ironclaw-fc"),
                 vsock_uds_dir: Some(PathBuf::from("/tmp/ironclaw/vsock")),
                 vsock_port: Some(5000),
+                vcpus: default_vcpus(),
+                memory_mib: default_memory_mib(),
+                disk_quota_mb: default_disk_quota_mb(),
             },
             storage: HostStorageConfig { users_root },
             llm: HostLlmConfig {
@@ -300,6 +328,24 @@ pub struct HostSecurityConfig {
     pub webhook_secret: String,
     #[serde(default)]
     pub rate_limit: HostRateLimitConfig,
+    #[serde(default)]
+    pub network: HostNetworkConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostNetworkConfig {
+    /// Domains allowed for network access from generated code.
+    /// Empty list means all domains are allowed.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+impl Default for HostNetworkConfig {
+    fn default() -> Self {
+        Self {
+            allowed_domains: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -336,6 +382,7 @@ impl Default for HostSecurityConfig {
             allowed_channels: Vec::new(),
             webhook_secret: String::new(),
             rate_limit: HostRateLimitConfig::default(),
+            network: HostNetworkConfig::default(),
         }
     }
 }
@@ -348,6 +395,45 @@ pub struct GuestConfig {
     pub scheduler: GuestSchedulerConfig,
     #[serde(default = "default_log_level")]
     pub log_level: LogLevel,
+    #[serde(default)]
+    pub execution: GuestExecutionConfig,
+    #[serde(default)]
+    pub network: GuestNetworkConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GuestExecutionConfig {
+    /// Timeout in seconds for code execution.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u32,
+}
+
+fn default_timeout_secs() -> u32 {
+    30
+}
+
+impl Default for GuestExecutionConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: default_timeout_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GuestNetworkConfig {
+    /// Domains allowed for network access from generated code.
+    /// Empty list means all domains are allowed.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+impl Default for GuestNetworkConfig {
+    fn default() -> Self {
+        Self {
+            allowed_domains: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -414,6 +500,8 @@ impl Default for GuestConfig {
                 jobs_path: PathBuf::from("/mnt/brain/cron/jobs.toml"),
             },
             log_level: default_log_level(),
+            execution: GuestExecutionConfig::default(),
+            network: GuestNetworkConfig::default(),
         }
     }
 }

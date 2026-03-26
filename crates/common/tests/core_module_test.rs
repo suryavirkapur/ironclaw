@@ -111,6 +111,7 @@ async fn stub_vm_lifecycle_tracks_running_state() {
     let config = VmConfig {
         user_id: "owner".to_string(),
         brain_path: std::path::PathBuf::from("/tmp/brain"),
+        allowed_domains: vec![],
     };
 
     let before = match manager.is_vm_running("owner").await {
@@ -147,6 +148,7 @@ async fn stub_vm_with_guest_transport_roundtrip() {
     let config = VmConfig {
         user_id: "owner".to_string(),
         brain_path: std::path::PathBuf::from("/tmp/brain"),
+        allowed_domains: vec![],
     };
 
     let (instance, mut guest_transport) = match manager.start_vm_with_guest(config) {

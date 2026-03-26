@@ -1,11 +1,80 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use std::sync::Arc;
 
 use common::config::{HostLlmApi, HostLlmConfig};
 
+use rig::client::CompletionClient;
+use rig::completion::{CompletionError, CompletionModel};
+use rig::completion::message::AssistantContent;
+
+// ---------------------------------------------------------------------------
+// Provider backend – wraps a Rig CompletionModel behind a dyn-compatible trait
+// ---------------------------------------------------------------------------
+
+trait ProviderComplete: Send + Sync {
+    fn complete(
+        &self,
+        prompt: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>,
+    >;
+}
+
+struct CompleteFn<M: CompletionModel> {
+    model: M,
+}
+
+impl<M: CompletionModel + 'static> ProviderComplete for CompleteFn<M> {
+    fn complete(
+        &self,
+        prompt: &str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<String, CompletionError>> + Send>,
+    > {
+        let model = self.model.clone();
+        let prompt = prompt.to_string();
+        Box::pin(async move {
+            let request = model
+                .completion_request(&prompt)
+                .max_tokens_opt(Some(1024))
+                .build();
+            let response = model.completion(request).await?;
+            for item in response.choice.into_iter() {
+                match item {
+                    AssistantContent::Text(t) => return Ok(t.text),
+                    _ => continue,
+                }
+            }
+            Err(CompletionError::ResponseError(
+                "response did not contain text content".into(),
+            ))
+        })
+    }
+}
+
+enum ProviderBackend {
+    Completions(Arc<dyn ProviderComplete>), // OpenAI Chat Completions
+    Responses(Arc<dyn ProviderComplete>),   // OpenAI Responses API
+    Anthropic(Arc<dyn ProviderComplete>),   // Anthropic Messages API
+}
+
+impl Clone for ProviderBackend {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Completions(c) => Self::Completions(c.clone()),
+            Self::Responses(c) => Self::Responses(c.clone()),
+            Self::Anthropic(c) => Self::Anthropic(c.clone()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct LlmClient {
-    config: HostLlmConfig,
-    http_client: reqwest::Client,
+    backend: ProviderBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,59 +97,71 @@ impl LlmClientError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LlmClient implementation
+// ---------------------------------------------------------------------------
+
 impl LlmClient {
     pub fn new(config: HostLlmConfig) -> Result<Self, LlmClientError> {
-        let http_client = reqwest::Client::builder()
-            .build()
-            .map_err(|err| LlmClientError::new(format!("http client init failed: {err}")))?;
-        Ok(Self {
-            config,
-            http_client,
-        })
+        let backend = match config.api {
+            HostLlmApi::ChatCompletions => {
+                let api_key = env_key("OPENAI_API_KEY")?;
+                let client = rig::providers::openai::CompletionsClient::builder()
+                    .api_key(&api_key)
+                    .base_url(config.base_url.trim_end_matches('/'))
+                    .build()
+                    .map_err(|e| LlmClientError::new(format!("openai client init failed: {e}")))?;
+                let model = client.completion_model(&config.model);
+                ProviderBackend::Completions(Arc::new(CompleteFn { model }))
+            }
+            HostLlmApi::Responses => {
+                let api_key = env_key("OPENAI_API_KEY")?;
+                let client = rig::providers::openai::Client::builder()
+                    .api_key(&api_key)
+                    .base_url(config.base_url.trim_end_matches('/'))
+                    .build()
+                    .map_err(|e| {
+                        LlmClientError::new(format!("openai responses client init failed: {e}"))
+                    })?;
+                let model = client.completion_model(&config.model);
+                ProviderBackend::Responses(Arc::new(CompleteFn { model }))
+            }
+            HostLlmApi::Message => {
+                tracing::warn!(
+                    "llm api variant 'message' is deprecated, using chat_completions path"
+                );
+                let api_key = env_key("OPENAI_API_KEY")?;
+                let client = rig::providers::openai::CompletionsClient::builder()
+                    .api_key(&api_key)
+                    .base_url(config.base_url.trim_end_matches('/'))
+                    .build()
+                    .map_err(|e| LlmClientError::new(format!("openai client init failed: {e}")))?;
+                let model = client.completion_model(&config.model);
+                ProviderBackend::Completions(Arc::new(CompleteFn { model }))
+            }
+            HostLlmApi::Anthropic => {
+                let api_key = env_key("ANTHROPIC_API_KEY")?;
+                let client = rig::providers::anthropic::Client::builder()
+                    .api_key(&api_key)
+                    .base_url(config.base_url.trim_end_matches('/'))
+                    .build()
+                    .map_err(|e| {
+                        LlmClientError::new(format!("anthropic client init failed: {e}"))
+                    })?;
+                let model = client.completion_model(&config.model);
+                ProviderBackend::Anthropic(Arc::new(CompleteFn { model }))
+            }
+        };
+        Ok(Self { backend })
     }
 
     pub async fn complete(&self, prompt: &str) -> Result<String, LlmClientError> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| LlmClientError::new("missing openai_api_key"))?;
-        let trimmed_base = self.config.base_url.trim_end_matches('/');
-        let url = format!("{trimmed_base}{}", self.config.api.path());
-        let payload = match self.config.api {
-            HostLlmApi::ChatCompletions => serde_json::to_value(ChatCompletionsRequest {
-                model: self.config.model.clone(),
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: prompt.to_string(),
-                }],
-            })
-            .map_err(|err| LlmClientError::new(format!("json encode failed: {err}")))?,
-            HostLlmApi::Responses => serde_json::to_value(ResponsesRequest {
-                model: self.config.model.clone(),
-                input: prompt.to_string(),
-            })
-            .map_err(|err| LlmClientError::new(format!("json encode failed: {err}")))?,
+        let result = match &self.backend {
+            ProviderBackend::Completions(c) => c.complete(prompt).await,
+            ProviderBackend::Responses(c) => c.complete(prompt).await,
+            ProviderBackend::Anthropic(c) => c.complete(prompt).await,
         };
-
-        let response = self
-            .http_client
-            .post(url)
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|err| LlmClientError::new(format!("llm request failed: {err}")))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| LlmClientError::new(format!("response decode failed: {err}")))?;
-        if !status.is_success() {
-            return Err(LlmClientError::new(format!(
-                "llm request failed with status {}: {body}",
-                status.as_u16()
-            )));
-        }
-
-        parse_llm_response(self.config.api, &body)
+        result.map_err(|err| LlmClientError::new(format!("{err}")))
     }
 
     pub async fn plan_tool_or_answer(
@@ -118,37 +199,13 @@ impl LlmClient {
     }
 }
 
-fn parse_llm_response(api: HostLlmApi, body: &str) -> Result<String, LlmClientError> {
-    match api {
-        HostLlmApi::ChatCompletions => {
-            let response: ChatCompletionsResponse = serde_json::from_str(body)
-                .map_err(|err| LlmClientError::new(format!("parse chat response failed: {err}")))?;
-            response
-                .choices
-                .first()
-                .map(|choice| choice.message.content.clone())
-                .filter(|content| !content.is_empty())
-                .ok_or_else(|| LlmClientError::new("chat response did not contain text"))
-        }
-        HostLlmApi::Responses => {
-            let response: ResponsesResponse = serde_json::from_str(body).map_err(|err| {
-                LlmClientError::new(format!("parse responses response failed: {err}"))
-            })?;
-            if let Some(output_text) = response.output_text.filter(|value| !value.is_empty()) {
-                return Ok(output_text);
-            }
-
-            for item in response.output {
-                for content in item.content {
-                    if let Some(text) = content.text.filter(|value| !value.is_empty()) {
-                        return Ok(text);
-                    }
-                }
-            }
-            Err(LlmClientError::new("responses output did not contain text"))
-        }
-    }
+fn env_key(name: &str) -> Result<String, LlmClientError> {
+    std::env::var(name).map_err(|_| LlmClientError::new(format!("missing {name}")))
 }
+
+// ---------------------------------------------------------------------------
+// Tool plan types & parsing (unchanged from prior implementation)
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolPlan {
@@ -165,13 +222,32 @@ fn build_tool_plan_prompt(
     let tools = allowed_tools.join(", ");
     let memory = build_memory_block(memory_block);
     let history_block = build_history_block(history);
+
+    let code_exec_hint = if allowed_tools.iter().any(|t| t == "code_exec") {
+        "\n- for code execution, use tool code_exec with input: {\"language\":\"python\",\"code\":\"...\"}"
+    } else {
+        ""
+    };
+
+    let tool_install_hint = if allowed_tools.iter().any(|t| t == "tool_install") {
+        "\n- to create a reusable tool, use tool_install with input: {\"name\":\"...\",\"language\":\"python\",\"code\":\"...\",\"description\":\"...\"}"
+    } else {
+        ""
+    };
+
+    let tool_call_hint = if allowed_tools.iter().any(|t| t == "tool_call") {
+        "\n- to call an installed tool, use tool_call with input: \"<tool_name> <args>\""
+    } else {
+        ""
+    };
+
     format!(
         "you are a host planner. choose exactly one action.\n\
          output valid json only.\n\
          schema:\n\
          - tool action: {{\"action\":\"tool\",\"tool\":\"<name>\",\"input\":\"<text>\"}}\n\
          - answer action: {{\"action\":\"answer\",\"text\":\"<response>\"}}\n\
-         allowed tools: [{tools}]\n\
+         allowed tools: [{tools}]{code_exec_hint}{tool_install_hint}{tool_call_hint}\n\
          rules:\n\
          - if a tool is needed, choose action tool.\n\
          - if no tool is needed, choose action answer.\n\
@@ -331,81 +407,13 @@ fn extract_json_object(raw: &str) -> Option<&str> {
     None
 }
 
-#[derive(Serialize)]
-struct ChatCompletionsRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-}
-
-#[derive(Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct ChatCompletionsResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatChoiceMessage {
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ResponsesRequest {
-    model: String,
-    input: String,
-}
-
-#[derive(Deserialize)]
-struct ResponsesResponse {
-    #[serde(default)]
-    output_text: Option<String>,
-    #[serde(default)]
-    output: Vec<ResponsesOutputItem>,
-}
-
-#[derive(Deserialize)]
-struct ResponsesOutputItem {
-    #[serde(default)]
-    content: Vec<ResponsesContentItem>,
-}
-
-#[derive(Deserialize)]
-struct ResponsesContentItem {
-    #[serde(default)]
-    text: Option<String>,
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod llm_client_test {
-    use super::{
-        build_tool_plan_prompt, parse_llm_response, parse_tool_plan, ConversationMessage, ToolPlan,
-    };
-    use common::config::HostLlmApi;
-
-    #[test]
-    fn parses_chat_completions_text() {
-        let body = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
-        let result = parse_llm_response(HostLlmApi::ChatCompletions, body);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap_or_default(), "hello");
-    }
-
-    #[test]
-    fn parses_responses_output_text_fallback() {
-        let body = r#"{"output":[{"content":[{"text":"hello from responses"}]}]}"#;
-        let result = parse_llm_response(HostLlmApi::Responses, body);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap_or_default(), "hello from responses");
-    }
+    use super::{build_tool_plan_prompt, parse_tool_plan, ConversationMessage, ToolPlan};
 
     #[test]
     fn parses_answer_plan_json() {

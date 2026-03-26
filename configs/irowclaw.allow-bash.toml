@@ -14,3 +14,9 @@ embedding_cache_size = 1000
 
 [scheduler]
 jobs_path = "/mnt/brain/cron/jobs.toml"
+
+[execution]
+timeout_secs = 30
+
+[network]
+allowed_domains = []

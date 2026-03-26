@@ -1,8 +1,12 @@
 pub mod auth_transport;
 pub mod codec;
 pub mod config;
+pub mod disk_quota;
 pub mod firecracker;
 pub mod logging;
+pub mod network_firewall;
 pub mod proto;
+pub mod slack;
+pub mod cgroup;
 pub mod stream_transport;
 pub mod transport;

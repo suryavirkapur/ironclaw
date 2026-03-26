@@ -33,6 +33,7 @@ async fn main() -> Result<(), String> {
         .start_vm(VmConfig {
             user_id: user_id.clone(),
             brain_path,
+            allowed_domains: vec![],
         })
         .await
         .map_err(|e| e.to_string())?;

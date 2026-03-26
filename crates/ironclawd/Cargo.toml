@@ -16,6 +16,7 @@ security = { path = "../security" }
 mime_guess = "*"
 nix = { version = "*", features = ["signal"] }
 reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls"] }
+rig-core = "0.33"
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"

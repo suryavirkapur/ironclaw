@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 #[error("tool error: {message}")]
@@ -192,6 +193,342 @@ fn rooted_path(root: &Path, raw_path: &str) -> Result<PathBuf, ToolError> {
         return Err(ToolError::new("missing path"));
     }
     Ok(root.join(safe))
+}
+
+#[derive(Deserialize)]
+pub struct CodeInput {
+    pub language: String,
+    pub code: String,
+    pub stdin: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct CodeResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+pub struct CodeExecutionTool {
+    workspace_root: PathBuf,
+    timeout_secs: u32,
+    allowed_domains: Vec<String>,
+}
+
+impl CodeExecutionTool {
+    pub fn new(workspace_root: PathBuf, timeout_secs: u32, allowed_domains: Vec<String>) -> Self {
+        Self {
+            workspace_root,
+            timeout_secs,
+            allowed_domains,
+        }
+    }
+
+    fn language_to_binary(lang: &str) -> Option<&'static str> {
+        match lang.to_lowercase().as_str() {
+            "python" | "python3" | "py" => Some("python3"),
+            "node" | "javascript" | "js" => Some("node"),
+            "bash" | "shell" | "sh" => Some("sh"),
+            _ => None,
+        }
+    }
+
+    fn language_to_ext(lang: &str) -> Option<&'static str> {
+        match lang.to_lowercase().as_str() {
+            "python" | "python3" | "py" => Some("py"),
+            "node" | "javascript" | "js" => Some("js"),
+            "bash" | "shell" | "sh" => Some("sh"),
+            _ => None,
+        }
+    }
+
+    fn check_network_safety(&self, code: &str) -> Result<(), ToolError> {
+        if self.allowed_domains.is_empty() {
+            return Ok(());
+        }
+
+        let network_patterns = [
+            "urllib.request",
+            "urllib.error",
+            "urllib.parse",
+            "requests.",
+            "http://",
+            "https://",
+            "fetch(",
+            "axios.",
+            "http.get",
+            "http.post",
+            "node:http",
+            "node:https",
+            "node:fetch",
+            "require('http')",
+            "require('https')",
+            "websocket",
+            "socket.connect",
+            "socket.createConnection",
+        ];
+
+        let code_lower = code.to_lowercase();
+        for pattern in network_patterns {
+            if code_lower.contains(&pattern.to_lowercase()) {
+                return Err(ToolError::new(format!(
+                    "code uses network features but allowlist is configured. Domains allowed: {:?}. \
+                     Remove network calls or configure allowed_domains.",
+                    self.allowed_domains
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Tool for CodeExecutionTool {
+    fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let spec: CodeInput = serde_json::from_str(input)
+            .map_err(|e| ToolError::new(format!("invalid json: {}", e)))?;
+
+        let binary = Self::language_to_binary(&spec.language)
+            .ok_or_else(|| ToolError::new(format!("unsupported language: {}", spec.language)))?;
+
+        let ext = Self::language_to_ext(&spec.language)
+            .ok_or_else(|| ToolError::new("cannot determine file extension"))?;
+
+        self.check_network_safety(&spec.code)?;
+
+        let script_path = self.workspace_root.join(format!("exec.{}", ext));
+        std::fs::write(&script_path, &spec.code)
+            .map_err(|e| ToolError::new(format!("write failed: {}", e)))?;
+
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| ToolError::new(format!("runtime error: {}", e)))?;
+
+        let timeout_secs = self.timeout_secs;
+        let script_path_for_exec = script_path.clone();
+        let result = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs as u64),
+                tokio::task::spawn_blocking(move || {
+                    std::process::Command::new(binary)
+                        .arg(script_path_for_exec)
+                        .output()
+                })
+            ).await
+        });
+
+        let _ = std::fs::remove_file(&script_path);
+
+        match result {
+            Ok(Ok(Ok(output))) => {
+                let code_result = CodeResult {
+                    exit_code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    timed_out: false,
+                };
+                Ok(ToolResult {
+                    ok: output.status.success(),
+                    output: serde_json::to_string(&code_result).unwrap_or_else(|_| "{}".to_string()),
+                })
+            }
+            Ok(Ok(Err(e))) => Err(ToolError::new(format!("execution failed: {}", e))),
+            Ok(Err(e)) => Err(ToolError::new(format!("task failed: {}", e))),
+            Err(_) => {
+                let code_result = CodeResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: format!("execution timed out after {}s", timeout_secs),
+                    timed_out: true,
+                };
+                Ok(ToolResult {
+                    ok: false,
+                    output: serde_json::to_string(&code_result).unwrap_or_else(|_| "{}".to_string()),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ToolMeta {
+    pub name: String,
+    pub language: String,
+    pub description: String,
+    pub created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct ToolInstallInput {
+    pub name: String,
+    pub language: String,
+    pub code: String,
+    pub description: Option<String>,
+}
+
+pub struct ToolInstallTool {
+    tools_dir: PathBuf,
+    workspace_root: PathBuf,
+    timeout_secs: u32,
+    allowed_domains: Vec<String>,
+}
+
+impl ToolInstallTool {
+    pub fn new(
+        tools_dir: PathBuf,
+        workspace_root: PathBuf,
+        timeout_secs: u32,
+        allowed_domains: Vec<String>,
+    ) -> Self {
+        Self {
+            tools_dir,
+            workspace_root,
+            timeout_secs,
+            allowed_domains,
+        }
+    }
+}
+
+impl Tool for ToolInstallTool {
+    fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let spec: ToolInstallInput = serde_json::from_str(input)
+            .map_err(|e| ToolError::new(format!("invalid json: {}", e)))?;
+
+        if !spec.name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(ToolError::new("name must be alphanumeric + underscore"));
+        }
+
+        if spec.name.is_empty() || spec.name.len() > 64 {
+            return Err(ToolError::new("name must be 1-64 characters"));
+        }
+
+        let ext = CodeExecutionTool::language_to_ext(&spec.language)
+            .ok_or_else(|| ToolError::new("unsupported language"))?;
+
+        std::fs::create_dir_all(&self.tools_dir)
+            .map_err(|e| ToolError::new(format!("create dir failed: {}", e)))?;
+
+        let script_path = self.tools_dir.join(format!("{}.{}", spec.name, ext));
+        let meta_path = self.tools_dir.join(format!("{}.meta.json", spec.name));
+
+        std::fs::write(&script_path, &spec.code)
+            .map_err(|e| ToolError::new(format!("write script failed: {}", e)))?;
+
+        let now = format!("{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0));
+        let meta = ToolMeta {
+            name: spec.name.clone(),
+            language: spec.language.clone(),
+            description: spec.description.unwrap_or_default(),
+            created_at: now,
+        };
+
+        let meta_json = serde_json::to_string_pretty(&meta)
+            .map_err(|e| ToolError::new(format!("serialize meta failed: {}", e)))?;
+
+        std::fs::write(&meta_path, meta_json)
+            .map_err(|e| ToolError::new(format!("write meta failed: {}", e)))?;
+
+        Ok(ToolResult {
+            ok: true,
+            output: serde_json::json!({
+                "installed": spec.name,
+                "path": script_path.display().to_string(),
+                "language": spec.language
+            }).to_string(),
+        })
+    }
+}
+
+pub struct ToolCallTool {
+    tools_dir: PathBuf,
+    workspace_root: PathBuf,
+    timeout_secs: u32,
+    allowed_domains: Vec<String>,
+}
+
+impl ToolCallTool {
+    pub fn new(
+        tools_dir: PathBuf,
+        workspace_root: PathBuf,
+        timeout_secs: u32,
+        allowed_domains: Vec<String>,
+    ) -> Self {
+        Self {
+            tools_dir,
+            workspace_root,
+            timeout_secs,
+            allowed_domains,
+        }
+    }
+}
+
+impl Tool for ToolCallTool {
+    fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let tool_name = parts.first().ok_or_else(|| ToolError::new("missing tool name"))?;
+        let args = parts.get(1).unwrap_or(&"");
+
+        let meta_path = self.tools_dir.join(format!("{}.meta.json", tool_name));
+        let meta: ToolMeta = serde_json::from_str(
+            &std::fs::read_to_string(&meta_path)
+                .map_err(|e| ToolError::new(format!("tool not found: {}", e)))?
+        ).map_err(|e| ToolError::new(format!("invalid meta: {}", e)))?;
+
+        let ext = CodeExecutionTool::language_to_ext(&meta.language).unwrap();
+        let script_path = self.tools_dir.join(format!("{}.{}", tool_name, ext));
+
+        let code = std::fs::read_to_string(&script_path)
+            .map_err(|e| ToolError::new(format!("read tool failed: {}", e)))?;
+
+        let exec_tool = CodeExecutionTool::new(
+            self.workspace_root.clone(),
+            self.timeout_secs,
+            self.allowed_domains.clone(),
+        );
+
+        let input_json = serde_json::json!({
+            "language": meta.language,
+            "code": code,
+            "stdin": args.to_string(),
+        });
+
+        exec_tool.run(&input_json.to_string())
+    }
+}
+
+impl ToolRegistry {
+    pub fn load_installed_tools(&mut self, tools_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(tools_dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("meta.json") {
+                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                    let meta_path = tools_dir.join(format!("{}.meta.json", name));
+                    if let Ok(meta_json) = std::fs::read_to_string(&meta_path) {
+                        if let Ok(meta) = serde_json::from_str::<ToolMeta>(&meta_json) {
+                            let tools_dir = tools_dir.to_path_buf();
+                            let workspace_root = tools_dir.join("../workspace");
+                            self.register(
+                                name,
+                                Box::new(ToolCallTool::new(
+                                    tools_dir,
+                                    workspace_root,
+                                    30,
+                                    vec![],
+                                )),
+                            );
+                            tracing::info!("loaded installed tool: {} ({})", name, meta.language);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
