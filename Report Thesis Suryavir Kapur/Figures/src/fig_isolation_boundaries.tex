@@ -1,0 +1,33 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+
+  % \pillar{x}{color}{title}{kernel line}{mechanism (italic)}{verdict (gray)}
+  \newcommand{\pillar}[6]{%
+    \begin{scope}[on background layer]
+      \draw[draw=#2, line width=1.1pt, rounded corners=6pt, fill=#2!6]
+        (#1-1.6,-1.25) rectangle (#1+1.6,3.5);
+    \end{scope}
+    \node[font=\normalsize\bfseries\color{#2}] at (#1,3.02) {#3};
+    \node[draw=#2, fill=#2!22, rounded corners=3pt, line width=0.8pt,
+          minimum width=1.9cm, minimum height=0.8cm,
+          font=\footnotesize\color{IronDark}] at (#1,1.85) {Workload};
+    \draw[#2!45, line width=0.6pt] (#1-1.35,1.2) -- (#1+1.35,1.2);
+    \node[font=\footnotesize\color{IronDark}, align=center, text width=2.9cm] at (#1,0.75) {#4};
+    \node[font=\footnotesize\itshape\color{IronGray}, align=center, text width=2.9cm] at (#1,0.05) {#5};
+    \node[font=\footnotesize\color{IronGray}, align=center, text width=2.9cm] at (#1,-0.75) {#6};
+  }
+
+  \pillar{-5.25}{IronRed}{Process}{Shares host kernel}{Host kernel only}{Fastest, weakest}
+  \pillar{-1.75}{IronOrange}{Container}{Shares host kernel}{Namespaces + cgroups}{Practical, still shares kernel}
+  \pillar{ 1.75}{IronBlue}{Virtual machine}{Guest kernel}{Hardware virtualisation}{Strong boundary, slower boot}
+  \pillar{ 5.25}{IronDark}{MicroVM}{Minimal guest kernel}{Minimal device model}{Strong + fast boot}
+
+  % shared host hardware
+  \node[draw=IronGray, fill=IronGray, text=white, rounded corners=6pt,
+        minimum width=14.0cm, minimum height=0.95cm, font=\normalsize\bfseries]
+        at (0,-2.05) {Host hardware};
+
+\end{tikzpicture}
+\end{document}

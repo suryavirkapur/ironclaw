@@ -1,0 +1,84 @@
+% Appendix A
+
+\chapter{Installation and Execution Instructions}
+\label{AppendixA}
+\lhead{Appendix A. \emph{Installation and Execution Instructions}}
+
+\section{Submitted Folders and Files}
+The submitted project package should include the following folders and files:
+\begin{itemize}
+    \item \texttt{crates/}: Rust workspace crates for the host daemon, guest
+    runtime, shared protocol, security, memory, tools, heartbeat, and channels.
+    \item \texttt{configs/}: runtime configuration files for IronClaw and the
+    guest runtime.
+    \item \texttt{scripts/}: build and smoke-test scripts for local and
+    Firecracker-backed execution.
+    \item \texttt{rootfs/}: guest root filesystem skeleton files.
+    \item \texttt{kernels/firecracker/}: kernel images used by the Firecracker
+    runtime.
+    \item \texttt{docs/}: supporting architecture and setup documentation.
+    \item \texttt{Report Thesis Suryavir Kapur/}: thesis report source and
+    generated PDF.
+\end{itemize}
+
+\section{Prerequisites}
+The development machine should have Rust installed through \texttt{rustup}, the
+toolchain specified in \texttt{rust-toolchain.toml}, \texttt{cargo},
+\texttt{make}, a Linux environment capable of running Firecracker, and LaTeX
+tools for building the report. Firecracker execution may require KVM support and
+appropriate permissions on the host.
+
+\section{Compilation Steps}
+From the repository root, build the Rust workspace using:
+\begin{verbatim}
+cargo build --workspace
+\end{verbatim}
+
+Run the test suite using:
+\begin{verbatim}
+cargo test --workspace
+\end{verbatim}
+
+Build the thesis PDF from the report directory using:
+\begin{verbatim}
+cd "Report Thesis Suryavir Kapur"
+make
+\end{verbatim}
+
+\section{Execution Steps}
+Local smoke tests can be executed using the scripts under \texttt{scripts/}.
+Typical commands include:
+\begin{verbatim}
+./scripts/smoke-local-guest.sh
+./scripts/smoke-firecracker.sh
+./scripts/smoke-firecracker-ws.sh
+./scripts/smoke-guest-tools-ws.sh
+\end{verbatim}
+
+Configuration files under \texttt{configs/} select the runtime behavior,
+permissions, and guest execution mode. Before running Firecracker tests, verify
+that the configured kernel path, root filesystem path, vsock settings, and file
+permissions match the local machine.
+
+\section{Configuration Details}
+The main configuration files are:
+\begin{itemize}
+    \item \texttt{configs/ironclawd.toml}: host daemon configuration.
+    \item \texttt{configs/irowclaw.default.toml}: default guest runtime
+    configuration.
+    \item \texttt{configs/irowclaw.allow-bash.toml}: guest runtime configuration
+    that permits shell execution for controlled test scenarios.
+\end{itemize}
+
+\section{Reproducibility Checklist}
+The final project package should make it possible to reproduce the implementation
+and evaluation environment. Before submission, verify that:
+\begin{itemize}
+    \item the Rust workspace builds with \texttt{cargo build --workspace};
+    \item the available automated tests run with \texttt{cargo test --workspace};
+    \item configuration files under \texttt{configs/} match the local execution
+    mode;
+    \item Firecracker kernel and root filesystem paths are documented;
+    \item smoke-test commands and expected outputs are recorded;
+    \item generated report and presentation PDFs are included.
+\end{itemize}

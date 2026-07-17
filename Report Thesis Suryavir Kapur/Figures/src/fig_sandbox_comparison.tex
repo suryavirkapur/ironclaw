@@ -1,0 +1,31 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+  \tikzset{
+    bubble/.style={ellipse, line width=1pt, align=center, text=white,
+                   font=\small\bfseries},
+    axis/.style={-{Latex[length=3mm,width=2.2mm]}, line width=1pt, IronDark},
+  }
+
+  % axes
+  \draw[axis] (0,0) -- (9.2,0);
+  \draw[axis] (0,0) -- (0,6.0);
+  \node[note, anchor=north east, font=\small\color{IronDark}] at (9.2,-0.15)
+        {Startup latency / resource cost};
+  \node[note, rotate=90, anchor=south, font=\small\color{IronDark}] at (-0.35,3.0)
+        {Isolation strength};
+
+  % bubbles: size grows with memory overhead
+  \node[bubble, draw=IronRed,    fill=IronRed!55,    minimum width=1.7cm, minimum height=1.2cm]
+        at (1.4,1.0) {Process};
+  \node[bubble, draw=IronOrange, fill=IronOrange!75, minimum width=2.4cm, minimum height=1.6cm]
+        at (4.2,2.7) {Container};
+  \node[bubble, draw=IronBlue,   fill=IronBlue!80,   minimum width=3.0cm, minimum height=2.0cm]
+        at (7.0,4.7) {MicroVM};
+
+  \node[note, anchor=north east, font=\footnotesize\itshape\color{IronGray}] at (9.2,-0.8)
+        {Bubble size \(=\) memory overhead (notional)};
+
+\end{tikzpicture}
+\end{document}

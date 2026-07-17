@@ -1,0 +1,30 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+  \tikzset{
+    lenpre/.style={draw=IronDark, fill=IronDark, text=white, rounded corners=3pt,
+                   minimum height=1.15cm, text width=2.0cm, align=center, font=\footnotesize},
+    payload/.style={rounded corners=3pt, minimum height=1.15cm, text width=7.6cm,
+                    align=center, font=\small, text=white, line width=0.8pt},
+  }
+
+  % Request envelope
+  \node[font=\normalsize\bfseries\color{IronBlue}, anchor=west] at (0,3.4) {Request envelope};
+  \node[lenpre, anchor=west] (rpre) at (0,2.55) {4-byte length\\(prefix)};
+  \node[payload, draw=IronBlue, fill=IronBlue!72, anchor=west] (rpay)
+        at ($(rpre.east)+(0.18,0)$)
+        {user\_id, session\_id, msg\_id,\\timestamp\_ms, cap\_token, oneof payload};
+
+  % Response envelope
+  \node[font=\normalsize\bfseries\color{IronOrange}, anchor=west] at (0,1.25) {Response envelope};
+  \node[lenpre, anchor=west] (ppre) at (0,0.4) {4-byte length\\(prefix)};
+  \node[payload, draw=IronOrange, fill=IronOrange!82, anchor=west] (ppay)
+        at ($(ppre.east)+(0.18,0)$)
+        {msg\_id, status, exit\_code, stdout,\\stderr, duration, artifacts};
+
+  \node[note, anchor=north] at ($(ppre.west)!0.5!(ppay.east)+(0,-0.5)$)
+        {\itshape Both envelopes share the same ProtoCodec framing across all transports};
+
+\end{tikzpicture}
+\end{document}

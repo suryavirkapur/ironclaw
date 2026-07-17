@@ -1,0 +1,507 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% -----------------------------------------------------------------------------
+% Theme and colours
+% -----------------------------------------------------------------------------
+\usetheme[progressbar=frametitle, numbering=fraction, block=fill, background=light]{metropolis}
+
+% A refined accent palette
+\definecolor{IronDark}{HTML}{1A2B3C}
+\definecolor{IronBlue}{HTML}{2E86AB}
+\definecolor{IronTeal}{HTML}{06A77D}
+\definecolor{IronOrange}{HTML}{F18F01}
+\definecolor{IronRed}{HTML}{C73E1D}
+\definecolor{IronLight}{HTML}{F4F7F9}
+\definecolor{IronGray}{HTML}{5D6D7E}
+
+\setbeamercolor{frametitle}{bg=IronDark, fg=white}
+\setbeamercolor{progress bar}{fg=IronTeal}
+\setbeamercolor{title}{fg=IronDark}
+\setbeamercolor{subtitle}{fg=IronGray}
+\setbeamercolor{author}{fg=IronGray}
+\setbeamercolor{institute}{fg=IronGray}
+\setbeamercolor{date}{fg=IronGray}
+\setbeamercolor{block title}{bg=IronBlue, fg=white}
+\setbeamercolor{block body}{bg=IronBlue!8, fg=IronDark}
+\setbeamercolor{block title alerted}{bg=IronRed, fg=white}
+\setbeamercolor{block body alerted}{bg=IronRed!8, fg=IronDark}
+\setbeamercolor{block title example}{bg=IronTeal, fg=white}
+\setbeamercolor{block body example}{bg=IronTeal!8, fg=IronDark}
+\setbeamercolor{item}{fg=IronBlue}
+\setbeamercolor{subitem}{fg=IronTeal}
+\setbeamercolor{caption name}{fg=IronBlue}
+
+\metroset{sectionpage=progressbar, subsectionpage=none}
+
+% -----------------------------------------------------------------------------
+% Packages
+% -----------------------------------------------------------------------------
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.multipart,fit,shadows.blur}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{fontawesome5}
+\usepackage{etoolbox}
+
+% Remove navigation symbols
+\setbeamertemplate{navigation symbols}{}
+
+% -----------------------------------------------------------------------------
+% Metadata
+% -----------------------------------------------------------------------------
+\title{IronClaw}
+\subtitle{Dynamic Tool Synthesis and Secure MicroVM Isolation for Autonomous Agents}
+\author{Suryavir Kapur}
+\institute{BITS Pilani \quad\(\cdot\)\quad Supervisor: Dr.~Vijaykumar B.}
+\date{May 2026}
+
+% -----------------------------------------------------------------------------
+% TikZ styles consistent with the colour palette
+% -----------------------------------------------------------------------------
+\tikzset{
+  box/.style={draw=IronDark, rounded corners=4pt, align=center, minimum height=0.9cm, minimum width=2.3cm, fill=IronLight, line width=0.8pt, font=\small},
+  host/.style={draw=IronTeal, rounded corners=4pt, align=center, minimum height=0.9cm, minimum width=2.5cm, fill=IronTeal!10, line width=0.8pt, font=\small},
+  guest/.style={draw=IronOrange, rounded corners=4pt, align=center, minimum height=0.9cm, minimum width=2.5cm, fill=IronOrange!12, line width=0.8pt, font=\small},
+  warn/.style={draw=IronRed, rounded corners=4pt, align=center, minimum height=0.9cm, minimum width=2.5cm, fill=IronRed!10, line width=0.8pt, font=\small},
+  arrow/.style={-{Latex[length=2.5mm,width=1.8mm]}, thick, IronDark},
+  label/.style={font=\footnotesize\color{IronGray}}
+}
+
+% -----------------------------------------------------------------------------
+% Document
+% -----------------------------------------------------------------------------
+\begin{document}
+
+% Title frame
+\begin{frame}[plain]
+  \vspace*{-0.5cm}
+  \titlepage
+\end{frame}
+
+\section{Introduction}
+
+\begin{frame}{Motivation}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.55\textwidth}
+      \begin{itemize}
+        \item LLM agents excel at long, multi-step workflows.
+        \item Fixed tool registries limit what an agent can do at runtime.
+        \item \alert{Dynamic tool synthesis} lets the agent generate task-specific code on demand.
+        \item Generated code is untrusted and requires strong isolation.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.42\textwidth}
+      \centering
+      \begin{tikzpicture}[node distance=0.7cm]
+        \node[box, fill=IronBlue!15, minimum width=4cm] (fixed) {\faLock\ Fixed tools};
+        \node[host, below=of fixed, minimum width=4cm] (dynamic) {\faCogs\ Dynamic synthesis};
+        \node[warn, below=of dynamic, minimum width=4cm] (risk) {\faExclamationTriangle\ Untrusted code};
+        \draw[arrow] (fixed) -- (dynamic);
+        \draw[arrow] (dynamic) -- (risk);
+      \end{tikzpicture}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Research Questions}
+  \begin{block}{\faQuestionCircle\ RQ1: Utility}
+    Do agents with secure dynamic tool synthesis outperform fixed-tool agents on complex tasks?
+  \end{block}
+  \vspace{0.4cm}
+  \begin{block}{\faQuestionCircle\ RQ2: Security and Systems}
+    What containment and performance trade-offs arise when using Firecracker microVMs instead of process-level sandboxing?
+  \end{block}
+\end{frame}
+
+\begin{frame}{Enterprise Reality: Why OpenClaw Is Not Enough}
+  \small
+  \textit{Perspective from experience at Deriv, Fidelity, and Deloitte consulting the world's top insurance companies.}\\[0.15cm]
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{alertblock}{\faExclamationTriangle\ OpenClaw gaps}
+        \begin{itemize}
+          \item Process-level sandbox shares the host kernel.
+          \item Generated code can persist state or access host resources.
+          \item Difficult to prove containment to auditors.
+          \item One compromise can affect the whole agent host.
+        \end{itemize}
+      \end{alertblock}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\faLock\ IronClaw fix}
+        \begin{itemize}
+          \item Firecracker microVMs provide hardware-isolated guests.
+          \item Each tool runs in a disposable guest with explicit inputs.
+          \item Bounded, auditable execution envelope.
+          \item Host secrets and workspace remain outside the guest.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+  \vspace{0.1cm}
+  \centering
+  \footnotesize\textbf{Enterprises need agents, but they need them behind a strong isolation boundary.}
+\end{frame}
+
+\begin{frame}{OpenClaw vs Hermes vs IronClaw}
+  \centering
+  \footnotesize
+  \renewcommand{\arraystretch}{1.25}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{0.17\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth}}
+    \toprule
+    \textbf{Dimension} & \textbf{Hermes Agent} & \textbf{OpenClaw} & \textbf{IronClaw} \\
+    \midrule
+    Main identity & Self-improving AI agent (Nous) & Personal AI assistant platform & Secure dynamic-tool agent runtime \\
+    Mental model & Brain + skills + memory + tools & Always-on assistant OS/gateway & Host/guest sandbox for generated tools \\
+    Runtime & Python-centric loop & TypeScript/Node platform runtime & Rust host + Firecracker microVM guest \\
+    Standout feature & Learning loop, self-created skills & Multi-channel gateway, plugins, UI/canvas & Hardware-isolated dynamic tool execution \\
+    Execution & Local host only & Built-in runtime + plugins + gateway & Firecracker microVM per tool/task \\
+    Security & Pairs with NemoClaw/OpenShell & Pairs with NemoClaw/OpenShell & Native microVM containment + policy \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\section{Use Cases}
+
+\begin{frame}{Use Cases}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\faFile\ Ad-hoc Data Transformation}
+        Synthesise parsers and transformers for custom logs, CSVs, or domain-specific formats.
+      \end{block}
+      \vspace{0.3cm}
+      \begin{block}{\faBug\ Untrusted Artifact Analysis}
+        Analyse suspicious scripts or attachments without exposing the host.
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\faPlug\ Dynamic API Integration}
+        Generate on-demand clients for new external services.
+      \end{block}
+      \vspace{0.3cm}
+      \begin{block}{\faCode\ Iterative Code Generation}
+        Write, test, and refine generated code inside an isolated guest.
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Isolation and Design}
+
+\begin{frame}{Agent Workflow With Dynamic Tool Synthesis}
+  \centering
+  \begin{tikzpicture}[node distance=1.3cm]
+    \node[box] (task) {User Task};
+    \node[box, right=of task] (agent) {LLM Agent\\plans steps};
+    \node[box, right=of agent] (need) {Missing\\capability?};
+    \node[host, below=of need] (tool) {Generate\\tool code};
+    \node[guest, left=of tool] (sandbox) {Isolated\\execution};
+    \node[box, left=of sandbox] (result) {Result\\observed};
+    \node[box, below=of result] (answer) {Final answer};
+
+    \draw[arrow] (task) -- (agent);
+    \draw[arrow] (agent) -- (need);
+    \draw[arrow] (need) -- (tool);
+    \draw[arrow] (tool) -- (sandbox);
+    \draw[arrow] (sandbox) -- (result);
+    \draw[arrow] (result) |- (agent);
+    \draw[arrow] (result) -- (answer);
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{What Sandboxing Does}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.46\textwidth}
+      \begin{itemize}
+        \item Restricts files, network, CPU, memory, and time.
+        \item Limits damage from bugs or malicious code.
+        \item Makes execution auditable and repeatable.
+      \end{itemize}
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \centering
+      \resizebox{0.92\columnwidth}{!}{%
+      \begin{tikzpicture}[node distance=0.6cm]
+        \node[warn] (code) {Untrusted\\tool code};
+        \node[box, below=of code, minimum width=5cm, fill=IronBlue!15] (sandbox) {Sandbox policy};
+        \node[box, below left=0.9cm and -0.1cm of sandbox] (fs) {Files};
+        \node[box, below=0.9cm of sandbox] (net) {Network};
+        \node[box, below right=0.9cm and -0.1cm of sandbox] (cpu) {CPU/RAM};
+        \draw[arrow] (code) -- (sandbox);
+        \draw[arrow] (sandbox) -- (fs);
+        \draw[arrow] (sandbox) -- (net);
+        \draw[arrow] (sandbox) -- (cpu);
+      \end{tikzpicture}%
+      }
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Isolation Options}
+  \centering
+  \renewcommand{\arraystretch}{1.4}
+  \begin{tabular}{>{\raggedright\arraybackslash}p{0.18\textwidth} >{\raggedright\arraybackslash}p{0.30\textwidth} >{\raggedright\arraybackslash}p{0.36\textwidth}}
+    \toprule
+    \textbf{Technique} & \textbf{Boundary} & \textbf{Risk for generated code} \\
+    \midrule
+    Process sandbox & Same host kernel & Kernel and permission mistakes matter \\
+    Container & Namespaces/cgroups, same kernel & Strong packaging, weaker security boundary \\
+    Virtual machine & Guest kernel plus hypervisor & Stronger host/guest separation \\
+    MicroVM & Minimal VM with small device model & Strong boundary with lower startup overhead \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\begin{frame}{How VMs Execute on the CPU}
+  \centering
+  \begin{tikzpicture}[node distance=0.9cm, scale=0.88, every node/.style={transform shape}]
+    \node[host, minimum width=8.2cm] (hostcpu) {CPU hardware virtualization support\\Intel VT-x / AMD-V};
+    \node[host, below=of hostcpu, minimum width=4cm] (hypervisor) {Hypervisor / VMM\\host-controlled mode};
+    \node[guest, below=1.1cm of hypervisor, minimum width=3.5cm] (guestos) {Guest OS kernel\\guest mode};
+    \node[guest, below=of guestos, minimum width=3.5cm] (app) {Guest process\\generated tool};
+    \node[box, right=1.4cm of guestos, minimum width=3.5cm, fill=IronBlue!12] (memory) {Nested address translation\\guest memory mapped\\to host pages};
+
+    \draw[arrow] (hostcpu) -- (hypervisor);
+    \draw[arrow] (hypervisor) -- node[right,label]{VM entry} (guestos);
+    \draw[arrow] (guestos) -- (app);
+    \draw[arrow] (guestos.east) -- (memory.west);
+    \draw[arrow] (guestos.north west) to[out=120, in=-120, looseness=1.7] node[left,label,align=center]{VM exit\\sensitive ops} (hypervisor.south west);
+  \end{tikzpicture}
+\end{frame}
+
+\begin{frame}{Process Sandbox vs MicroVM Boundary}
+  \centering
+  \resizebox{!}{0.68\textheight}{%
+  \begin{tikzpicture}[node distance=0.5cm]
+    \node[box, minimum width=4.8cm, minimum height=0.75cm] (papp) {Generated tool process};
+    \node[box, below=of papp, minimum width=4.8cm, minimum height=0.75cm] (pkernel) {Shared host kernel};
+    \node[host, below=of pkernel, minimum width=4.8cm, minimum height=0.75cm] (phost) {Host machine};
+
+    \node[guest, right=2.2cm of papp, minimum width=4.8cm, minimum height=0.75cm] (mapp) {Generated tool process};
+    \node[guest, below=of mapp, minimum width=4.8cm, minimum height=0.75cm] (gkernel) {Guest kernel};
+    \node[box, below=of gkernel, minimum width=4.8cm, minimum height=0.75cm, fill=IronBlue!12] (vmm) {Firecracker VMM};
+    \node[host, below=of vmm, minimum width=4.8cm, minimum height=0.75cm] (mhost) {Host machine};
+
+    \node[above=0.15cm of papp, font=\bfseries\small\color{IronDark}] {Process-level sandbox};
+    \node[above=0.15cm of mapp, font=\bfseries\small\color{IronDark}] {MicroVM sandbox};
+  \end{tikzpicture}%
+  }
+\end{frame}
+
+\section{Architecture}
+
+\begin{frame}{IronClaw Architecture}
+  \centering
+  \resizebox{0.98\textwidth}{!}{%
+  \begin{tikzpicture}[node distance=0.7cm]
+    \node[host, minimum width=1.8cm] (user) {User};
+    \node[host, right=0.9cm of user] (daemon) {ironclawd\\host daemon};
+    \node[host, above right=0.55cm and 0.5cm of daemon] (llm) {LLM provider};
+    \node[host, below right=0.55cm and 0.5cm of daemon] (policy) {Policy and\\memory};
+    \node[box, right=1.6cm of daemon, fill=IronBlue!15] (vsock) {vsock};
+    \node[guest, right=0.9cm of vsock] (guest) {ironclaw\\guest runtime};
+    \node[guest, right=0.9cm of guest] (tool) {Synthesized\\tool code};
+
+    \draw[arrow] (user) -- (daemon);
+    \draw[arrow] (daemon) -- (llm);
+    \draw[arrow] (llm) -- (daemon);
+    \draw[arrow] (daemon) -- (policy);
+    \draw[arrow] (daemon) -- (vsock);
+    \draw[arrow] (vsock) -- (guest);
+    \draw[arrow] (guest) -- (tool);
+    \draw[arrow] (tool) to[bend left=18] (guest);
+    \draw[arrow] (guest) to[bend left=18] (vsock);
+    \draw[arrow] (vsock) to[bend left=18] (daemon);
+  \end{tikzpicture}%
+  }
+\end{frame}
+
+\begin{frame}{Host Daemon Internals}
+  \centering
+  \begin{tikzpicture}[node distance=0.55cm, every node/.style={minimum height=0.65cm, minimum width=2.3cm}]
+    \node[host] (api) {Task intake\\API/channel};
+    \node[host, right=of api] (loop) {Agent loop\\plan-act-observe};
+    \node[host, right=of loop] (prompt) {Prompt and\\provider layer};
+    \node[host, below=0.85cm of loop] (dispatch) {Dispatcher};
+    \node[host, left=of dispatch] (policy) {Policy\\manager};
+    \node[host, right=of dispatch] (supervisor) {Sandbox\\supervisor};
+    \node[box, below=0.85cm of dispatch, fill=IronBlue!12] (logs) {Memory, logs,\\result triage};
+
+    \draw[arrow] (api) -- (loop);
+    \draw[arrow] (loop) -- (prompt);
+    \draw[arrow] (prompt) to[bend left=20] (loop);
+    \draw[arrow] (loop) -- (dispatch);
+    \draw[arrow] (policy) -- (dispatch);
+    \draw[arrow] (dispatch) -- (supervisor);
+    \draw[arrow] (dispatch) -- (logs);
+    \draw[arrow] (logs.east) -- ++(2.8,0) |- (loop.south east);
+  \end{tikzpicture}
+
+  \vspace{0.2cm}
+  \parbox{\textwidth}{\centering\small The trusted host owns planning, policy, providers, lifecycle control, and result triage.}
+\end{frame}
+
+\begin{frame}{Guest Runtime Internals}
+  \centering
+  \resizebox{0.93\textwidth}{!}{%
+  \begin{tikzpicture}[node distance=0.8cm]
+    \node[box, fill=IronBlue!12] (req) {Execution\\request};
+    \node[guest, right=of req] (validate) {Validate\\envelope};
+    \node[guest, right=of validate] (materialize) {Materialize\\inputs};
+    \node[guest, right=of materialize] (run) {Run tool\\with limits};
+    \node[guest, below=of run] (capture) {Capture stdout,\\stderr, status};
+    \node[box, left=of capture, fill=IronBlue!12] (response) {Structured\\response};
+
+    \draw[arrow] (req) -- (validate);
+    \draw[arrow] (validate) -- (materialize);
+    \draw[arrow] (materialize) -- (run);
+    \draw[arrow] (run) -- (capture);
+    \draw[arrow] (capture) -- (response);
+  \end{tikzpicture}%
+  }
+  \vspace{0.1cm}
+  \small The guest sees only the inputs explicitly sent for the current execution.
+\end{frame}
+
+\begin{frame}{Structured Execution Envelope}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Request}
+        \begin{itemize}
+          \item request id and tool name
+          \item generated code or command
+          \item serialized inputs
+          \item timeout, memory, network, output limits
+          \item expected result format
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Response}
+        \begin{itemize}
+          \item request id and status
+          \item exit code and duration
+          \item bounded stdout and stderr
+          \item artifact metadata
+          \item error classification
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{MicroVM Execution Lifecycle}
+  \centering
+  \resizebox{0.98\textwidth}{!}{%
+  \begin{tikzpicture}[node distance=0.95cm]
+    \node[host] (alloc) {Allocate or\\resume guest};
+    \node[box, right=of alloc, fill=IronBlue!12] (vsock) {Open vsock};
+    \node[guest, right=of vsock] (send) {Send request\\and inputs};
+    \node[guest, right=of send] (exec) {Execute\\tool};
+    \node[guest, below=of exec] (resp) {Return\\response};
+    \node[host, left=of resp] (copy) {Copy approved\\artifacts};
+    \node[host, left=of copy] (reset) {Terminate or\\reset guest};
+
+    \draw[arrow] (alloc) -- (vsock);
+    \draw[arrow] (vsock) -- (send);
+    \draw[arrow] (send) -- (exec);
+    \draw[arrow] (exec) -- (resp);
+    \draw[arrow] (resp) -- (copy);
+    \draw[arrow] (copy) -- (reset);
+  \end{tikzpicture}%
+  }
+\end{frame}
+
+\begin{frame}{Policy and Failure Handling}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Policy gates}
+        \begin{itemize}
+          \item interpreter allowlist
+          \item file and network mode
+          \item CPU, memory, and time limits
+          \item output truncation
+        \end{itemize}
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{alertblock}{Failure classes}
+        \begin{itemize}
+          \item tool compile/runtime error
+          \item policy denied
+          \item timeout or output overflow
+          \item guest or transport failure
+        \end{itemize}
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\section{Evaluation}
+
+\begin{frame}{Evaluation Plan}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\faChartBar\ Utility}
+        Compare fixed-tool and dynamic-tool agents on multi-step tasks.
+      \end{block}
+      \vspace{0.3cm}
+      \begin{block}{\faLock\ Security}
+        Run malicious payloads and verify host containment.
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{\faChartLine\ Performance}
+        Measure initialization latency, execution latency, CPU, and memory.
+      \end{block}
+      \vspace{0.3cm}
+      \begin{block}{\faCodeBranch\ Reproducibility}
+        Submit code, configuration, scripts, and execution steps.
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Expected Outcome}
+  \begin{itemize}
+    \item Dynamic tools should improve completion on transformation-heavy tasks.
+    \item Firecracker microVMs should contain untrusted generated code better than process-only sandboxes.
+    \item The main cost is startup latency and memory overhead.
+    \item IronClaw makes the utility--security trade-off measurable.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What's Done / What's Remaining}
+  \small
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{exampleblock}{\faCheckCircle\ Done}
+        \begin{itemize}
+          \item Host daemon with agent loop and dispatch
+          \item Guest runtime in Firecracker/container/process sandboxes
+          \item Execution envelope and policy gates
+          \item Memory, channels, and smoke tests
+        \end{itemize}
+      \end{exampleblock}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{alertblock}{\faHourglassHalf\ Remaining}
+        \begin{itemize}
+          \item Utility evaluation on multi-step tasks
+          \item Security red-teaming against generated payloads
+          \item Performance profiling: init latency, CPU, memory
+          \item Larger benchmarks and richer policies
+        \end{itemize}
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Thank You}
+  \centering
+  \Huge\textbf{Questions?}\\[0.6cm]
+  \large\color{IronGray} Suryavir Kapur \(\cdot\) BITS Pilani\\
+  \texttt{2022A7TS0293U}
+\end{frame}
+
+\end{document}

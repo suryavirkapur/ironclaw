@@ -1,0 +1,50 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+
+  \tikzset{
+    pill/.style={rounded corners=6pt, minimum height=0.72cm, minimum width=2.0cm,
+                 align=center, font=\small\bfseries, text=white, line width=0.8pt},
+    callout/.style={draw=IronGray, fill=white, rounded corners=3pt, line width=0.6pt,
+                    align=center, font=\footnotesize\color{IronDark}, text width=2.1cm,
+                    inner sep=3pt},
+    leader/.style={IronGray, line width=0.5pt},
+  }
+
+  \coordinate (A) at (0,3.2);      % Security apex
+  \coordinate (B) at (-3.6,-0.6);  % Utility
+  \coordinate (C) at (3.6,-0.6);   % Performance
+
+  % triangle body
+  \begin{scope}[on background layer]
+    \fill[IronBlue!7] (A) -- (B) -- (C) -- cycle;
+    \draw[IronBlue, line width=1.4pt] (A) -- (B) -- (C) -- cycle;
+  \end{scope}
+
+  \node[font=\normalsize\bfseries\color{IronBlue}, align=center] at (0,0.55)
+      {IronClaw\\Evaluation};
+
+  % vertex pills
+  \node[pill, draw=IronRed,  fill=IronRed]  (sec) at (A) {Security};
+  \node[pill, draw=IronDark, fill=IronDark] (uti) at (B) {Utility};
+  \node[pill, draw=IronTeal, fill=IronTeal] (per) at (C) {Performance};
+
+  % callouts (outside the triangle)
+  \node[callout] (secL) at (-2.6,4.5) {Red-team containment};
+  \node[callout] (secR) at ( 2.6,4.5) {Policy denials};
+  \node[callout] (utiA) at (-5.7,0.4) {Task success rate};
+  \node[callout] (utiB) at (-5.7,-1.9) {Interaction turns};
+  \node[callout] (perA) at ( 5.7,0.4) {CPU / memory overhead};
+  \node[callout] (perB) at ( 5.7,-1.9) {Init latency};
+
+  % leaders
+  \draw[leader] (secL.south) -- (sec.north west);
+  \draw[leader] (secR.south) -- (sec.north east);
+  \draw[leader] (utiA.east)  -- (uti.north west);
+  \draw[leader] (utiB.east)  -- (uti.south west);
+  \draw[leader] (perA.west)  -- (per.north east);
+  \draw[leader] (perB.west)  -- (per.south east);
+
+\end{tikzpicture}
+\end{document}

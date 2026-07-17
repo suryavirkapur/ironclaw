@@ -1,0 +1,44 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+  \tikzset{
+    attack/.style={draw=IronRed, fill=IronRed, text=white, rounded corners=3pt,
+                   line width=0.8pt, align=center, font=\footnotesize,
+                   text width=2.2cm, minimum height=0.75cm, inner sep=3pt},
+    block/.style={-{Latex[length=2.6mm,width=2mm]}, line width=1pt, IronRed},
+  }
+
+  \def\ring{2.55}
+  \def\rad{4.15}
+
+  % boundary ring
+  \draw[IronBlue, line width=2.2pt] (0,0) circle (\ring);
+
+  % protected host + boundary label at top
+  \node[draw=IronBlue, fill=IronBlue, text=white, rounded corners=3pt,
+        line width=0.8pt, font=\small, minimum height=0.75cm, text width=2.4cm,
+        align=center] at (0,4.05) {Host resources};
+  \node[font=\normalsize\bfseries\color{IronBlue}] at (0,3.2)
+        {Firecracker / host-policy boundary};
+
+  % untrusted core
+  \node[circle, draw=IronOrange, fill=IronOrange!90, text=white, align=center,
+        font=\small\bfseries, text width=1.9cm, inner sep=2pt] at (0,0)
+        {Untrusted generated tool};
+
+  % attack vectors outside the boundary, arrows blocked at the ring
+  \node[attack] (a1) at (162:\rad) {File reads};
+  \node[attack] (a2) at (18:\rad)  {Network scan};
+  \node[attack] (a3) at (212:\rad) {Fork / resource exhaustion};
+  \node[attack] (a4) at (-32:\rad) {Persistence across sessions};
+  \node[attack] (a5) at (270:\rad) {Container / host escape};
+
+  \draw[block] (a1) -- (162:\ring);
+  \draw[block] (a2) -- (18:\ring);
+  \draw[block] (a3) -- (212:\ring);
+  \draw[block] (a4) -- (-32:\ring);
+  \draw[block] (a5) -- (270:\ring);
+
+\end{tikzpicture}
+\end{document}

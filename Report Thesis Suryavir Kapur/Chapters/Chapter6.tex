@@ -1,0 +1,20 @@
+% Chapter 6
+
+\chapter{Conclusion and Future Work}
+\label{Chapter6}
+\lhead{Chapter 6. \emph{Conclusion and Future Work}}
+
+\section{Contributions}
+This research provides a practical architecture that integrates dynamic tool synthesis into micro-VM isolations. This is the first significant contribution -- just enabling an agent to generate code does not automatically place that code under a boundary that can be measured, destroyed, and replicated. Rather than simply evaluating the performance benefits of the system (i.e., utility), we will also measure the cost associated with isolating those tools from one another (i.e., isolation).
+
+\section{Limitations}
+Our evaluation has been constrained by our selection of benchmarks; the availability of machines to run these evaluations; and the quality of the large language model that was employed in each experiment. While dynamic tool synthesis likely will have the greatest impact on workflows that are heavy in data transformation, and thus require frequent use of tools created during the workflow, there are certainly many cases in which the fixed set of tools provided in an environment is sufficient. In addition to demonstrating containment of an untrusted tool against a predefined payload set, security testing can demonstrate that there are no vulnerabilities in the virtual machine monitor, kernel, or host integration.
+
+\section{Future Directions}
+There are four possible areas for extending IronClaw. First, the current suite of benchmarks could be extended to include larger, more realistic codebases, and/or longer running data processing jobs. Second, it should be possible to cache tools produced through dynamic tool synthesis with their corresponding signature and policies so that when an agent needs to perform a task again, they don't have to recreate all of the necessary tools. Third, we could expand our security evaluation to include fuzzing and kernel level instrumentation. Finally, we could extend the system to allow users to specify richer policies for defining network, file, CPU, memory, time limits for each dynamically generated tool.
+
+\section{Conclusion}
+Ultimately, dynamic tool synthesis is a natural extension of the ability for autonomous agents to create new capabilities at runtime. However, without a well-defined runtime boundary around such synthesized code creation, this increased flexibility comes at too great a risk. Thus, IronClaw demonstrates how Firecracker's microVMs can be used as a viable solution for creating a reasonable level of isolation for untrusted agent-created tools while still providing a way to evaluate the utility and performance impacts of using such tools.
+
+\section{Summary}
+In this Chapter, I briefly summarized my expected contributions, limitations, future work, and conclusions based on this dissertation. The Appendices contain information about installing, compiling, executing and configuring your environment in order to reproduce my work.

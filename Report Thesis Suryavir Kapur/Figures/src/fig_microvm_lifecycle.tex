@@ -1,0 +1,32 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}
+  \tikzset{
+    stage/.style={draw=IronBlue, fill=IronBlue!75, text=white, rounded corners=4pt,
+                  align=center, font=\footnotesize, text width=2.3cm,
+                  minimum height=1.0cm, inner sep=3pt},
+  }
+
+  \def\R{3.5}
+  \node[stage] (n1) at (90:\R)  {Allocate /\\resume image};
+  \node[stage] (n2) at (30:\R)  {Establish\\vsock};
+  \node[stage] (n3) at (-30:\R) {Send request\\+ input bundle};
+  \node[stage] (n4) at (-90:\R) {Enforce timeout\\\& output limits};
+  \node[stage] (n5) at (-150:\R){Receive \&\\validate response};
+  \node[stage] (n6) at (150:\R) {Copy artifacts \&\\terminate / reset};
+
+  \node[circle, draw=IronDark, fill=IronDark, text=white, align=center,
+        font=\small\bfseries, text width=1.9cm, inner sep=2pt] (core) at (0,0)
+        {Ephemeral microVM session};
+
+  % clockwise arrows bowing outward, clear of node text
+  \draw[arrow] (n1) to[bend right=22] (n2);
+  \draw[arrow] (n2) to[bend right=22] (n3);
+  \draw[arrow] (n3) to[bend right=22] (n4);
+  \draw[arrow] (n4) to[bend right=22] (n5);
+  \draw[arrow] (n5) to[bend right=22] (n6);
+  \draw[arrow] (n6) to[bend right=22] (n1);
+
+\end{tikzpicture}
+\end{document}

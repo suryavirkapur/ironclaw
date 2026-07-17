@@ -1,0 +1,36 @@
+\documentclass[border=8pt]{standalone}
+\input{preamble.tikz}
+\begin{document}
+\begin{tikzpicture}[node distance=8mm]
+
+  \tikzset{
+    stage/.style={rounded corners=4pt, align=center, line width=0.8pt,
+                  minimum height=1.5cm, text width=2.1cm, font=\small},
+    hoststage/.style={stage, draw=IronBlue, fill=IronBlue,   text=white},
+    gueststage/.style={stage, draw=IronOrange, fill=IronOrange!85, text=white},
+    softstage/.style={stage, draw=IronBlue, fill=IronBlue!55, text=white},
+  }
+
+  \node[hoststage] (identify) {Identify\\gap};
+  \node[hoststage, right=of identify] (propose) {Propose\\tool};
+  \node[draw=IronTeal, fill=IronTeal!80, text=white, diamond, aspect=1.6,
+        align=center, line width=0.8pt, font=\small, inner sep=1pt,
+        right=of propose] (policy) {Policy\\validation};
+  \node[gueststage, right=of policy] (exec) {Guest\\execution};
+  \node[softstage, right=of exec] (classify) {Result\\classification};
+  \node[hoststage, right=of classify] (answer) {Continue,\\revise or\\answer};
+
+  \draw[arrow] (identify) -- (propose);
+  \draw[arrow] (propose)  -- (policy);
+  \draw[arrow] (policy)   -- node[above, note] {pass} (exec);
+  \draw[arrow] (exec)     -- (classify);
+  \draw[arrow] (classify) -- (answer);
+
+  % reject path from the policy gate
+  \node[draw=IronRed, fill=IronRed!10, rounded corners=3pt, line width=0.8pt,
+        font=\small\color{IronRed}, minimum height=0.7cm,
+        below=1.0cm of policy] (reject) {Reject};
+  \draw[arrow, IronRed] (policy.south) -- (reject.north);
+
+\end{tikzpicture}
+\end{document}

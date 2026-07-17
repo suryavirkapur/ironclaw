@@ -1,0 +1,116 @@
+% Appendix B
+
+\chapter{Draft Paper Outline}
+\label{AppendixB}
+\lhead{Appendix B. \emph{Draft Paper Outline}}
+
+\section{Draft Title}
+\textbf{IronClaw: Dynamic Tool Synthesis with Secure MicroVM Isolation for
+Autonomous Agents}
+
+\section{Draft Abstract}
+Autonomous agents based on Large Language Models increasingly rely on external
+tools to complete long-horizon software engineering, data processing, and
+operational tasks. Fixed tool registries simplify control and auditing, but they
+limit the agent when a task requires an unanticipated parser, transformation,
+test harness, or integration. Dynamic tool synthesis addresses this limitation
+by allowing the agent to generate executable code during a task, but doing so
+introduces a severe security problem: generated code is untrusted and may be
+incorrect, malicious, prompt-injected, or resource-exhaustive.
+
+This paper will present IronClaw, a self-hosted agent platform that separates
+trusted host control from untrusted guest execution. The host daemon manages
+model interaction, policy, memory, configuration, and sandbox lifecycle, while a
+guest runtime executes generated tools inside a restricted environment. The
+system supports process, container, and Firecracker-backed microVM runtimes over
+a shared protobuf protocol. The planned evaluation will compare fixed-tool and
+dynamic-tool agents on multi-step tasks, measure containment against malicious
+payloads, and quantify latency and resource overhead across sandbox backends.
+The expected contribution is a practical architecture and empirical methodology
+for making runtime tool synthesis useful without collapsing the host trust
+boundary.
+
+\section{Planned Paper Sections}
+\begin{enumerate}
+    \item \textbf{Introduction}
+    \begin{itemize}
+        \item Motivation for dynamic tool synthesis.
+        \item Security risk of executing agent-generated code.
+        \item Summary of IronClaw's host/guest architecture.
+        \item Contributions and evaluation goals.
+    \end{itemize}
+
+    \item \textbf{Background and Related Work}
+    \begin{itemize}
+        \item LLM agents and tool use.
+        \item Dynamic skill and tool acquisition.
+        \item Sandboxing, containers, virtual machines, and microVMs.
+        \item Firecracker and lightweight virtualization.
+    \end{itemize}
+
+    \item \textbf{Threat Model}
+    \begin{itemize}
+        \item Untrusted generated code.
+        \item Prompt injection and malicious task data.
+        \item Host filesystem, network, memory, and credential protection.
+        \item Non-goals such as proving the absence of all hypervisor bugs.
+    \end{itemize}
+
+    \item \textbf{System Design}
+    \begin{itemize}
+        \item Host daemon responsibilities.
+        \item Guest runtime responsibilities.
+        \item Protobuf message envelope and capability handshake.
+        \item Tool allowlists and policy gates.
+        \item Runtime options: process, container, and microVM.
+    \end{itemize}
+
+    \item \textbf{Implementation}
+    \begin{itemize}
+        \item Rust workspace organization.
+        \item Configuration model.
+        \item Transport and framing.
+        \item Firecracker manager and vsock setup.
+        \item Tool registry, file tools, restricted shell, browser tool, memory,
+        and scheduler.
+    \end{itemize}
+
+    \item \textbf{Evaluation Methodology}
+    \begin{itemize}
+        \item Utility benchmarks for fixed-tool versus dynamic-tool agents.
+        \item Security red-team payload suite.
+        \item Performance measurements for latency, CPU, memory, and startup.
+        \item Reproducibility and environment details.
+    \end{itemize}
+
+    \item \textbf{Results}
+    \begin{itemize}
+        \item Task completion rate.
+        \item Turn count and token usage.
+        \item Containment outcomes.
+        \item Runtime overhead comparisons.
+    \end{itemize}
+
+    \item \textbf{Discussion}
+    \begin{itemize}
+        \item When dynamic synthesis helps.
+        \item When fixed tools are sufficient.
+        \item Security and usability trade-offs.
+        \item Operational limits of microVM-based isolation.
+    \end{itemize}
+
+    \item \textbf{Limitations}
+    \begin{itemize}
+        \item Benchmark representativeness.
+        \item Hardware dependency.
+        \item Model dependency.
+        \item Scope of red-team payloads.
+    \end{itemize}
+
+    \item \textbf{Conclusion}
+    \begin{itemize}
+        \item Summary of architecture, measurements, and lessons.
+        \item Future work on stronger policies, snapshots, caching, and broader
+        benchmarks.
+    \end{itemize}
+\end{enumerate}

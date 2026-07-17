@@ -1,0 +1,201 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Thesis / Project Report
+% LaTeX Template
+% Version 2.0 (08/04/16)
+%
+% Author:
+% Siddhant Shrivastava
+% https://github.com/sidcode/bits-pilani-thesis-template-latex
+%
+% This template is heavily based on the work of Darshit Shah, Steven Gunn and Sunil Patel
+% Darshit Shah
+% https://github.com/darnir/BPHC-LaTeX-Report-Class
+% Steven Gunn
+% http://users.ecs.soton.ac.uk/srg/softwaretools/document/templates/
+% and
+% Sunil Patel
+% http://www.sunilpatel.co.uk/thesis-template/
+%
+% License:
+% CC BY-NC-SA 4.0 (http://creativecommons.org/licenses/by-nc-sa/4.0/)
+%
+% Note:
+% Make sure to edit document variables in the Thesis.cls file
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%-------------------------------------------------------------------------------
+%	PACKAGES AND OTHER DOCUMENT CONFIGURATIONS
+%-------------------------------------------------------------------------------
+
+\documentclass[11pt, a4paper, oneside]{Thesis} % Paper size, default font size
+                                               % and one-sided paper
+
+\graphicspath{{Pictures/}} % Specifies the directory where pictures are stored
+
+\title{\ttitle} % Defines the thesis title - don't touch this
+
+\begin{document}
+
+\frontmatter % Use roman numbering style (i, ii...) for the pre-content pages
+
+\setstretch{1.5} % Line spacing required for the submitted report
+
+% Define page headers using FancyHdr package and set up for one-sided printing
+\fancyhead{} % Clears all page headers and footers
+\rhead{\thepage} % Sets the right side header to show the page number
+\lhead{} % Clears the left side page header
+
+\pagestyle{fancy} % Finally, use the "fancy" page style to implement the
+                  %FancyHdr headers
+
+% Input all the variables used in the document. Please fill out the
+% variables.tex file with all your details.
+\input{variables}
+%-------------------------------------------------------------------------------
+%   NON-CONTENT PAGES
+%-------------------------------------------------------------------------------
+\maketitle
+\Declaration
+\Certificate
+\Quotation{Security is a process, not a product.}{Bruce Schneier}
+
+\begin{abstract}
+As Large Language Models (LLMs) continue to grow as agents capable of performing ever increasing numbers of increasingly complex, multi-step workflows, these models typically have access to relatively small sets of static, pre-defined, or "fixed" toolsets. If we allow LLM agents to create, and subsequently run, task-specific tools at runtime, this will significantly enhance their ability to perform long-horizon software development and data processing work; however, executing synthesized code in ordinary, process level sandboxes creates significant potential security risk. This dissertation will introduce and describe IronClaw -- an autonomous agent platform that provides both dynamically created tools and strictly isolated Firecracker micro-VMs. In other words, IronClaw separates the host daemon, responsible for managing agent policy, context and lifecycle management from a guest runtime where the agent generates untrusted code to be executed behind a hardware-based virtualization barrier.
+
+The evaluation methodology described herein is based on assessing whether the generation of tools dynamically relative to the use of fixed toolsets enhances the effectiveness of autonomous agent utility. Additionally, the trade-off's associated with using micro-VM isolation versus running agent generated tools in a process sandbox environment are evaluated in terms of security and performance. A complex set of software engineering and data transformation tasks are used to evaluate the effectiveness of each mode. Red teaming style prompts designed to cause host escape and/or resource exploitation are also used to assess the relative strengths/weaknesses of the two environments. Latency, CPU usage, and memory utilization overhead measurements are taken across the three execution modes to provide additional insight into differences between them. Ultimately, the goal of this research is to produce a repeatable evaluation of whether dynamic tool synthesis for secure operation can be made practically viable for autonomous agents while maintaining effective containment of the host system.
+\end{abstract}
+
+\begin{acknowledgements}
+This thesis would not have been possible without the patient guidance of my supervisor, Dr. Vijaykumar B., whose thoughtful suggestions and steady encouragement carried me through every stage of this work, and without the stimulating academic environment provided by the Department of Computer Science and Information Systems at BITS Pilani, where the ideas behind IronClaw were explored, refined, and brought to life. Equally, I am grateful to my family and friends, who gave so freely of their time in testing the system, shaping its documentation, and supporting its development, and whose quiet belief in this work sustained me throughout.
+\end{acknowledgements}
+
+%-------------------------------------------------------------------------------
+%	LIST OF CONTENTS/FIGURES/TABLES PAGES
+%-------------------------------------------------------------------------------
+
+% The page style headers have been "empty" all this time, now use the "fancy"
+% headers as defined before to bring them back
+\pagestyle{fancy}
+
+\lhead{\emph{Contents}} % Set the left side page header to "Contents"
+\tableofcontents % Write out the Table of Contents
+
+% Set the left side page header to "List of Figures"
+\lhead{\emph{List of Figures}}
+\listoffigures % Write out the List of Figures
+
+ % Set the left side page header to "List of Tables"
+\lhead{\emph{List of Tables}}
+\listoftables % Write out the List of Tables
+
+%-------------------------------------------------------------------------------
+%	ABBREVIATIONS
+%-------------------------------------------------------------------------------
+
+\clearpage % Start a new page
+
+ % Set the line spacing to 1.5, this makes the following tables easier to read
+\setstretch{1.5}
+
+\lhead{\emph{Abbreviations}} % Set the left side page header to "Abbreviations"
+\listofsymbols{ll} % Include a list of Abbreviations (a table of two columns)
+{
+\textbf{API} & \textbf{A}pplication \textbf{P}rogramming \textbf{I}nterface \\
+\textbf{LLM} & \textbf{L}arge \textbf{L}anguage \textbf{M}odel \\
+\textbf{VMM} & \textbf{V}irtual \textbf{M}achine \textbf{M}onitor \\
+\textbf{VM} & \textbf{V}irtual \textbf{M}achine \\
+\textbf{vsock} & \textbf{V}irtual socket transport \\
+}
+
+%-------------------------------------------------------------------------------
+%	PHYSICAL CONSTANTS/OTHER DEFINITIONS
+%-------------------------------------------------------------------------------
+
+\clearpage % Start a new page
+
+% Set the left side page header to "Physical Constants"
+\lhead{\emph{Physical Constants}}
+
+ % Include a list of Physical Constants (a four column table)
+\listofconstants{lrcl}
+{
+Target microVM initialization latency & $t_{init}$ & $<$ & 500 ms \\
+Maximum tool execution time & $t_{exec}$ & $=$ & policy-defined \\
+Maximum tool output size & $s_{out}$ & $=$ & policy-defined \\
+}
+
+%-------------------------------------------------------------------------------
+%	SYMBOLS
+%-------------------------------------------------------------------------------
+
+\clearpage % Start a new page
+
+\lhead{\emph{Glossary}} % Set the left side page header to "Symbols"
+
+\listofnomenclature % List the nomenclature. (We use the glossaries package)
+
+%-------------------------------------------------------------------------------
+%	DEDICATION
+%-------------------------------------------------------------------------------
+
+\setstretch{1.3} % Return the line spacing back to 1.3
+
+\pagestyle{empty} % Page style needs to be empty for this page
+
+% Dedication text
+\Dedicatory{Dedicated to my family, mentors, and peers.}
+
+\addtocontents{toc}{\vspace{2em}} % Add a gap in the Contents, for aesthetics
+
+%-------------------------------------------------------------------------------
+%	THESIS CONTENT - CHAPTERS
+%-------------------------------------------------------------------------------
+
+\mainmatter % Begin numeric (1,2,3...) page numbering
+
+\pagestyle{fancy} % Return the page headers back to the "fancy" style
+
+% Include the chapters of the thesis as separate files from the Chapters folder
+% Uncomment the lines as you write the chapters
+
+\input{Chapters/Chapter1}
+\input{Chapters/Chapter2}
+\input{Chapters/Chapter3}
+\input{Chapters/Chapter4}
+\input{Chapters/Chapter5}
+\input{Chapters/Chapter6}
+%\input{Chapters/Chapter7}
+
+%-------------------------------------------------------------------------------
+%	THESIS CONTENT - APPENDICES
+%-------------------------------------------------------------------------------
+
+\addtocontents{toc}{\vspace{2em}} % Add a gap in the Contents, for aesthetics
+
+\appendix % Cue to tell LaTeX that the following 'chapters' are Appendices
+
+% Include the appendices of the thesis as separate files from the Appendices
+% folder
+% Uncomment the lines as you write the Appendices
+
+\input{Appendices/AppendixA}
+\input{Appendices/AppendixB}
+%\input{Appendices/AppendixC}
+
+\addtocontents{toc}{\vspace{2em}} % Add a gap in the Contents, for aesthetics
+
+\backmatter
+
+%-------------------------------------------------------------------------------
+%	BIBLIOGRAPHY
+%-------------------------------------------------------------------------------
+
+\label{Bibliography}
+
+\lhead{\emph{Bibliography}} % Change the page header to say "Bibliography"
+
+\bibliographystyle{plain}
+\bibliography{Bibliography}
+
+\end{document}
