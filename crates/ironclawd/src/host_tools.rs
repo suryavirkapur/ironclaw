@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use tools::{BrowserAutomationTool, Tool};
 
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 pub async fn run_host_tool(
     allowed_tools: &[String],
+    allowed_domains: &[String],
     user_id: &str,
     tool: &str,
     input: &str,
@@ -18,6 +20,7 @@ pub async fn run_host_tool(
         "bash" => run_bash(&ws_root, input).await,
         "file_read" => file_read(&ws_root, input).await,
         "file_write" => file_write(&ws_root, input).await,
+        "browser" => run_browser(&ws_root, allowed_domains, input).await,
         _ => Err(format!("unknown tool: {tool}")),
     }
 }
@@ -110,6 +113,20 @@ async fn file_write(root: &Path, input: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("write failed: {e}"))?;
     Ok("ok".to_string())
+}
+
+async fn run_browser(
+    root: &Path,
+    allowed_domains: &[String],
+    input: &str,
+) -> Result<String, String> {
+    let tool = BrowserAutomationTool::new(root.to_path_buf(), allowed_domains.to_vec());
+    let input = input.to_string();
+    tokio::task::spawn_blocking(move || tool.run(&input))
+        .await
+        .map_err(|e| format!("browser task failed: {e}"))?
+        .map(|result| result.output)
+        .map_err(|e| e.to_string())
 }
 
 fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {

@@ -5,6 +5,9 @@ set -euo pipefail
 # outputs:
 # - root tree: rootfs/build/guest-root (or arg1)
 # - ext4 image: rootfs/build/guest-rootfs.ext4 (or arg2 / ROOTFS_IMAGE)
+#
+# optional: set INCLUDE_PYTHON=1 to include Python3
+# optional: set INCLUDE_NODE=1 to include Node.js
 
 ROOT_DIR="${1:-rootfs/build/guest-root}"
 ROOTFS_IMAGE="${2:-${ROOTFS_IMAGE:-rootfs/build/guest-rootfs.ext4}}"
@@ -12,6 +15,9 @@ ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-256}"
 IROWCLAW_BIN_REL="${IROWCLAW_BIN_REL:-target/x86_64-unknown-linux-musl/release/irowclaw}"
 IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
 IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-1}"
+INCLUDE_PYTHON="${INCLUDE_PYTHON:-0}"
+INCLUDE_NODE="${INCLUDE_NODE:-0}"
+INCLUDE_AGENT_BROWSER="${INCLUDE_AGENT_BROWSER:-0}"
 
 require_bin() {
   local bin
@@ -176,6 +182,198 @@ if [[ -d "${MOD_BASE}" ]]; then
       fi
     done
   fi
+fi
+
+# ============================================================================
+# Python 3 Installation
+# ============================================================================
+if [[ "${INCLUDE_PYTHON}" == "1" ]]; then
+  echo "Adding Python 3 to rootfs..." >&2
+  
+  PYTHON_BIN=""
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  elif [[ -x /usr/bin/python3 ]]; then
+    PYTHON_BIN="/usr/bin/python3"
+  else
+    echo "WARNING: python3 not found, skipping" >&2
+  fi
+
+  if [[ -n "${PYTHON_BIN}" ]]; then
+    # Install python binary
+    install -m 0755 "${PYTHON_BIN}" "${ROOT_DIR}/usr/bin/python3"
+    ln -sf python3 "${ROOT_DIR}/usr/bin/python"
+    
+    # Copy python shared library dependencies
+    copy_binary_deps "${ROOT_DIR}/usr/bin/python3"
+    
+    # Copy Python standard library (minimal)
+    PYTHON_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    PYTHON_LIB="/usr/lib/python${PYTHON_VER}"
+    
+    if [[ -d "${PYTHON_LIB}" ]]; then
+      mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}"
+      
+      # Copy essential stdlib modules
+      for module in os sys io re json asyncio threading subprocess pathlib \
+        typing collections itertools functools contextlib traceback warnings \
+        types weakref copy pickle heapq bisect math time datetime hashlib random \
+        string textwrap unicodedata encodings; do
+        if [[ -d "${PYTHON_LIB}/${module}" ]]; then
+          mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/${module}"
+          cp -r "${PYTHON_LIB}/${module}"/* "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/${module}/"
+        elif [[ -f "${PYTHON_LIB}/${module}.py" ]]; then
+          cp "${PYTHON_LIB}/${module}.py" "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/"
+        fi
+      done
+      
+      # Copy __pycache__ for compiled modules
+      if [[ -d "${PYTHON_LIB}/__pycache__" ]]; then
+        mkdir -p "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/__pycache__"
+        cp "${PYTHON_LIB}/__pycache__/"*.pyc "${ROOT_DIR}/usr/lib/python${PYTHON_VER}/__pycache__/" 2>/dev/null || true
+      fi
+    fi
+    
+    # Install pip if available
+    if command -v pip3 >/dev/null 2>&1; then
+      PIP_BIN="$(command -v pip3)"
+      install -m 0755 "${PIP_BIN}" "${ROOT_DIR}/usr/bin/pip3" 2>/dev/null || true
+      ln -sf pip3 "${ROOT_DIR}/usr/bin/pip" 2>/dev/null || true
+    fi
+    
+    echo "Python ${PYTHON_VER} installed" >&2
+  fi
+fi
+
+# ============================================================================
+# Node.js Installation
+# ============================================================================
+if [[ "${INCLUDE_NODE}" == "1" ]]; then
+  echo "Adding Node.js to rootfs..." >&2
+  
+  NODE_BIN=""
+  if command -v node >/dev/null 2>&1; then
+    NODE_BIN="$(command -v node)"
+  elif [[ -x /usr/bin/node ]]; then
+    NODE_BIN="/usr/bin/node"
+  else
+    echo "WARNING: node not found, skipping" >&2
+  fi
+
+  if [[ -n "${NODE_BIN}" ]]; then
+    # Install node binary
+    install -m 0755 "${NODE_BIN}" "${ROOT_DIR}/usr/bin/node"
+    
+    # Copy node shared library dependencies
+    copy_binary_deps "${ROOT_DIR}/usr/bin/node"
+    
+    # Create minimal node_modules structure
+    mkdir -p "${ROOT_DIR}/usr/lib/node_modules"
+    
+    # Install npm if available
+    if command -v npm >/dev/null 2>&1; then
+      NPM_BIN="$(command -v npm)"
+      install -m 0755 "${NPM_BIN}" "${ROOT_DIR}/usr/bin/npm" 2>/dev/null || true
+      
+      # npm is a script, also need node_modules/npm
+      NPM_LIB="/usr/lib/node_modules/npm"
+      if [[ -d "${NPM_LIB}" ]]; then
+        cp -r "${NPM_LIB}" "${ROOT_DIR}/usr/lib/node_modules/" 2>/dev/null || true
+      fi
+    fi
+    
+    echo "Node.js installed" >&2
+  fi
+fi
+
+# ============================================================================
+# agent-browser + Chromium Installation
+# ============================================================================
+if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  echo "Adding agent-browser and Chromium to rootfs..." >&2
+
+  AGENT_BROWSER_BIN="${AGENT_BROWSER_BIN:-}"
+  CHROME_CACHE_DIR="${CHROME_CACHE_DIR:-}"
+
+  # Locate or install agent-browser
+  if [[ -z "${AGENT_BROWSER_BIN}" ]]; then
+    if command -v agent-browser >/dev/null 2>&1; then
+      AGENT_BROWSER_BIN="$(command -v agent-browser)"
+    elif command -v cargo >/dev/null 2>&1 && [[ "${IROWCLAW_USE_MUSL}" == "1" ]]; then
+      echo "Installing agent-browser via cargo..." >&2
+      if cargo install agent-browser 2>/dev/null; then
+        AGENT_BROWSER_BIN="$(cargo install agent-browser 2>&1 | grep -oP '(?<=Installed package `agent-browser v)[^`]+' | head -1)/bin/agent-browser" || true
+        AGENT_BROWSER_BIN="$(which agent-browser 2>/dev/null || echo "")"
+      fi
+    elif command -v npm >/dev/null 2>&1; then
+      echo "Installing agent-browser via npm..." >&2
+      if npm install -g agent-browser 2>/dev/null; then
+        AGENT_BROWSER_BIN="$(npm root -g)/agent-browser/bin/agent-browser"
+      fi
+    fi
+  fi
+
+  if [[ -z "${AGENT_BROWSER_BIN}" ]] || [[ ! -x "${AGENT_BROWSER_BIN}" ]]; then
+    echo "WARNING: agent-browser not found or not executable, skipping browser automation support" >&2
+  else
+    install -m 0755 "${AGENT_BROWSER_BIN}" "${ROOT_DIR}/usr/bin/agent-browser"
+    ln -sf agent-browser "${ROOT_DIR}/usr/bin/agent-browser" 2>/dev/null || true
+    echo "agent-browser installed: ${AGENT_BROWSER_BIN}" >&2
+  fi
+
+  # Locate Chromium
+  if [[ -z "${CHROME_CACHE_DIR}" ]]; then
+    for cache_dir in \
+      "${HOME}/.cache/agent-browser/chrome-linux" \
+      "${HOME}/.cache/browser-use/chrome" \
+      "${HOME}/.cache/ms-playwright/chromium-*" \
+      "${HOME}/.cache/chromium-*" \
+      "/usr/bin/chromium" \
+      "/usr/bin/google-chrome" \
+      "/usr/bin/chromium-browser"; do
+      if [[ -e "${cache_dir}" ]]; then
+        if [[ -d "${cache_dir}" ]]; then
+          CHROME_CACHE_DIR="${cache_dir}"
+          break
+        elif [[ -x "${cache_dir}" ]]; then
+          # It's an executable, use its directory
+          CHROME_CACHE_DIR="$(dirname "${cache_dir}")"
+          break
+        fi
+      fi
+    done
+  fi
+
+  if [[ -n "${CHROME_CACHE_DIR}" ]] && [[ -e "${CHROME_CACHE_DIR}" ]]; then
+    echo "Copying Chromium from: ${CHROME_CACHE_DIR}" >&2
+    mkdir -p "${ROOT_DIR}/usr/lib/agent-browser"
+    if [[ -d "${CHROME_CACHE_DIR}" ]]; then
+      cp -r "${CHROME_CACHE_DIR}" "${ROOT_DIR}/usr/lib/agent-browser/chrome-linux" 2>/dev/null || \
+        cp -r "${CHROME_CACHE_DIR}/"* "${ROOT_DIR}/usr/lib/agent-browser/" 2>/dev/null || true
+    fi
+    # Also check for chrome binary directly
+    if [[ -x "${CHROME_CACHE_DIR}/chrome" ]]; then
+      install -m 0755 "${CHROME_CACHE_DIR}/chrome" "${ROOT_DIR}/usr/lib/agent-browser/chrome"
+    fi
+    # Link chrome into PATH
+    if [[ -x "${ROOT_DIR}/usr/lib/agent-browser/chrome" ]]; then
+      ln -sf /usr/lib/agent-browser/chrome "${ROOT_DIR}/usr/bin/chromium" 2>/dev/null || true
+    fi
+    echo "Chromium installed from ${CHROME_CACHE_DIR}" >&2
+  else
+    echo "WARNING: Chromium not found in common locations. agent-browser will download it at runtime." >&2
+    echo "         To avoid this on first run, set CHROME_CACHE_DIR=/path/to/chrome when building." >&2
+  fi
+fi
+
+# Increase rootfs size if runtimes are included
+if [[ "${INCLUDE_PYTHON}" == "1" || "${INCLUDE_NODE}" == "1" || "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  # Python ~50MB, Node ~30MB + stdlib, Chrome ~150MB
+  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-512}"
+fi
+if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
+  # Chrome is ~150MB, bump to 768MB minimum if not already larger
+  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-768}"
 fi
 
 rm -f "${ROOTFS_IMAGE}"

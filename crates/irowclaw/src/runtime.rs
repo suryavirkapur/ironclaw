@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tools::{
-    BrowserTool, BrowserToolConfig, FileReadTool, FileWriteTool, RestrictedBashTool, ToolRegistry,
+    BrowserActionTool, BrowserAutomationTool, BrowserTool, BrowserToolConfig, CodeExecutionTool,
+    FileReadTool, FileWriteTool, RestrictedBashTool, ToolCallTool, ToolInstallTool, ToolRegistry,
     ToolResult,
 };
 
@@ -61,6 +62,10 @@ impl Runtime {
         std::fs::create_dir_all(&workspace_root)
             .map_err(|err| IrowclawError::new(format!("workspace create failed: {err}")))?;
 
+        let tools_dir = brain.root.join("tools");
+        std::fs::create_dir_all(&tools_dir)
+            .map_err(|err| IrowclawError::new(format!("tools dir create failed: {err}")))?;
+
         let default_allowed = default_allowed_tools(&config);
         let mut tool_registry = ToolRegistry::new(&default_allowed);
         tool_registry.register(
@@ -71,12 +76,11 @@ impl Runtime {
             "file_write",
             Box::new(FileWriteTool::new(workspace_root.clone())),
         );
-        // Bash availability must be controlled by the host-provided allowlist
-        // (AuthChallenge.allowed_tools). The tool itself is always registered.
         tool_registry.register(
             "bash",
             Box::new(RestrictedBashTool::new(true, workspace_root.clone())),
         );
+
         tool_registry.register(
             "browser",
             Box::new(BrowserTool::new(BrowserToolConfig {
@@ -88,6 +92,56 @@ impl Runtime {
                 max_cpu_seconds: config.browser.max_cpu_seconds,
             })),
         );
+
+        let timeout_secs = config.execution.timeout_secs;
+        let allowed_domains = config.network.allowed_domains.clone();
+
+        tool_registry.register(
+            "agent_browser",
+            Box::new(BrowserAutomationTool::new(
+                workspace_root.clone(),
+                allowed_domains.clone(),
+            )),
+        );
+
+        tool_registry.register(
+            "browser_action",
+            Box::new(BrowserActionTool::new(
+                workspace_root.clone(),
+                allowed_domains.clone(),
+            )),
+        );
+
+        tool_registry.register(
+            "code_exec",
+            Box::new(CodeExecutionTool::new(
+                workspace_root.clone(),
+                timeout_secs,
+                allowed_domains.clone(),
+            )),
+        );
+
+        tool_registry.register(
+            "tool_install",
+            Box::new(ToolInstallTool::new(
+                tools_dir.clone(),
+                workspace_root.clone(),
+                timeout_secs,
+                allowed_domains.clone(),
+            )),
+        );
+
+        tool_registry.register(
+            "tool_call",
+            Box::new(ToolCallTool::new(
+                tools_dir.clone(),
+                workspace_root,
+                timeout_secs,
+                allowed_domains,
+            )),
+        );
+
+        tool_registry.load_installed_tools(&tools_dir);
 
         Ok(Self {
             config,
@@ -920,6 +974,13 @@ fn default_allowed_tools(config: &GuestConfig) -> Vec<String> {
     if config.tools.allow_bash {
         tools.push("bash".to_string());
     }
+    if config.tools.allow_browser {
+        tools.push("browser".to_string());
+        tools.push("browser_action".to_string());
+    }
+    tools.push("code_exec".to_string());
+    tools.push("tool_install".to_string());
+    tools.push("tool_call".to_string());
     tools
 }
 
@@ -933,6 +994,7 @@ pub struct BrainPaths {
     pub logs: PathBuf,
     pub cron: PathBuf,
     pub config: PathBuf,
+    pub tools: PathBuf,
     pub db: PathBuf,
     pub db_path: PathBuf,
 }
@@ -946,6 +1008,7 @@ impl BrainPaths {
         let logs = root.join("logs");
         let cron = root.join("cron");
         let config = root.join("config");
+        let tools = root.join("tools");
         let db = root.join("db");
         let db_path = db.join("ironclaw.db");
         Self {
@@ -957,6 +1020,7 @@ impl BrainPaths {
             logs,
             cron,
             config,
+            tools,
             db,
             db_path,
         }
