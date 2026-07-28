@@ -86,29 +86,17 @@ pub fn build_router(state: AppState) -> Router {
         )
         // admin: vms
         .route("/api/admin/vms", get(admin_vms_list))
-        .route(
-            "/api/admin/vms/{vm_id}",
-            get(admin_vm_detail),
-        )
-        .route(
-            "/api/admin/vms/{vm_id}/stop",
-            post(admin_vm_stop),
-        )
+        .route("/api/admin/vms/{vm_id}", get(admin_vm_detail))
+        .route("/api/admin/vms/{vm_id}/stop", post(admin_vm_stop))
         // admin: api keys
-        .route(
-            "/api/admin/keys",
-            get(admin_keys_list),
-        )
+        .route("/api/admin/keys", get(admin_keys_list))
         .route(
             "/api/admin/keys/{key_name}",
             post(admin_key_set).delete(admin_key_delete),
         )
         // admin: memory
         .route("/api/admin/memory", get(admin_memory_list))
-        .route(
-            "/api/admin/memory/{memory_id}",
-            get(admin_memory_detail),
-        )
+        .route("/api/admin/memory/{memory_id}", get(admin_memory_detail))
         // heartbeat
         .route("/api/admin/heartbeat", get(admin_heartbeat_status))
         .with_state(state);
@@ -128,9 +116,7 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(msg: impl Into<String>) -> Self {
-        Self {
-            error: msg.into(),
-        }
+        Self { error: msg.into() }
     }
 }
 
@@ -176,9 +162,7 @@ async fn health_handler() -> Json<HealthResponse> {
         (status = 200, description = "readiness status", body = ReadinessResponse)
     )
 )]
-async fn readiness_handler(
-    State(state): State<AppState>,
-) -> Json<ReadinessResponse> {
+async fn readiness_handler(State(state): State<AppState>) -> Json<ReadinessResponse> {
     let firecracker_ok = state.host_config.firecracker.enabled;
     Json(ReadinessResponse {
         ready: true,
@@ -255,11 +239,7 @@ async fn channel_whatsapp_verify(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let expected = state
-        .host_config
-        .security
-        .webhook_secret
-        .as_str();
+    let expected = state.host_config.security.webhook_secret.as_str();
     if token != expected {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -287,10 +267,7 @@ async fn channel_whatsapp_webhook(
             Json(ApiError::new(err.to_string())),
         )
     })?;
-    tracing::info!(
-        "whatsapp webhook messages_count={}",
-        messages.len(),
-    );
+    tracing::info!("whatsapp webhook messages_count={}", messages.len(),);
     // todo: route each inbound message to guest via vsock/ipc
     let _ = (state, messages);
     Ok(StatusCode::OK)
@@ -329,9 +306,7 @@ pub struct VmDetail {
         (status = 200, description = "list of active vms", body = Vec<VmSummary>)
     )
 )]
-async fn admin_vms_list(
-    State(_state): State<AppState>,
-) -> Json<Vec<VmSummary>> {
+async fn admin_vms_list(State(_state): State<AppState>) -> Json<Vec<VmSummary>> {
     // todo: query vm manager for running instances
     Json(vec![])
 }
@@ -405,9 +380,7 @@ pub struct ApiKeySetRequest {
         (status = 200, description = "list of api keys", body = Vec<ApiKeyEntry>)
     )
 )]
-async fn admin_keys_list(
-    State(_state): State<AppState>,
-) -> Json<Vec<ApiKeyEntry>> {
+async fn admin_keys_list(State(_state): State<AppState>) -> Json<Vec<ApiKeyEntry>> {
     // todo: read from postgres host key store
     Json(vec![])
 }
@@ -493,9 +466,7 @@ pub struct MemoryDetail {
         (status = 200, description = "list of memory entries", body = Vec<MemorySummary>)
     )
 )]
-async fn admin_memory_list(
-    State(_state): State<AppState>,
-) -> Json<Vec<MemorySummary>> {
+async fn admin_memory_list(State(_state): State<AppState>) -> Json<Vec<MemorySummary>> {
     // todo: query postgres memory store
     Json(vec![])
 }
@@ -517,9 +488,7 @@ async fn admin_memory_detail(
     // todo: query postgres memory store
     Err((
         StatusCode::NOT_FOUND,
-        Json(ApiError::new(format!(
-            "memory not found: {memory_id}"
-        ))),
+        Json(ApiError::new(format!("memory not found: {memory_id}"))),
     ))
 }
 
@@ -544,9 +513,7 @@ pub struct HeartbeatStatus {
         (status = 200, description = "heartbeat status", body = HeartbeatStatus)
     )
 )]
-async fn admin_heartbeat_status(
-    State(_state): State<AppState>,
-) -> Json<HeartbeatStatus> {
+async fn admin_heartbeat_status(State(_state): State<AppState>) -> Json<HeartbeatStatus> {
     // todo: read from heartbeat scheduler state
     Json(HeartbeatStatus {
         running: false,

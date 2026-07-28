@@ -11,7 +11,7 @@ set -euo pipefail
 
 ROOT_DIR="${1:-rootfs/build/guest-root}"
 ROOTFS_IMAGE="${2:-${ROOTFS_IMAGE:-rootfs/build/guest-rootfs.ext4}}"
-ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-256}"
+ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-}"
 IROWCLAW_BIN_REL="${IROWCLAW_BIN_REL:-target/x86_64-unknown-linux-musl/release/irowclaw}"
 IROWCLAW_BIN_ALT_REL="${IROWCLAW_BIN_ALT_REL:-target/release/irowclaw}"
 IROWCLAW_USE_MUSL="${IROWCLAW_USE_MUSL:-1}"
@@ -366,14 +366,12 @@ if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
   fi
 fi
 
-# Increase rootfs size if runtimes are included
-if [[ "${INCLUDE_PYTHON}" == "1" || "${INCLUDE_NODE}" == "1" || "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
-  # Python ~50MB, Node ~30MB + stdlib, Chrome ~150MB
-  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-512}"
-fi
-if [[ "${INCLUDE_AGENT_BROWSER}" == "1" ]]; then
-  # Chrome is ~150MB, bump to 768MB minimum if not already larger
-  ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-768}"
+# Size the image from the actual populated tree. The margin covers ext4 metadata
+# and leaves working room for package variants and shared libraries.
+ROOTFS_CONTENT_MB="$(du -sm "${ROOT_DIR}" | awk '{print $1}')"
+MIN_ROOTFS_SIZE_MB=$((ROOTFS_CONTENT_MB + ROOTFS_CONTENT_MB / 4 + 64))
+if [[ -z "${ROOTFS_SIZE_MB}" || "${ROOTFS_SIZE_MB}" -lt "${MIN_ROOTFS_SIZE_MB}" ]]; then
+  ROOTFS_SIZE_MB="${MIN_ROOTFS_SIZE_MB}"
 fi
 
 rm -f "${ROOTFS_IMAGE}"
