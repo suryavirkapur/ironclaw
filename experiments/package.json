@@ -1,0 +1,21 @@
+{
+  "name": "ironclaw-experiments",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experiments comparing generic capabilities with and without reusable dynamic tool synthesis",
+  "type": "module",
+  "scripts": {
+    "experiment": "tsx src/run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/deepseek": "^2.0.0",
+    "ai": "^6.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

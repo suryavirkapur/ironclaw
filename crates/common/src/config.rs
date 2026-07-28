@@ -408,16 +408,24 @@ pub struct GuestExecutionConfig {
     /// Timeout in seconds for code execution.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u32,
+    /// Deprecated compatibility field. The native tool loop now runs until completion.
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: u8,
 }
 
 fn default_timeout_secs() -> u32 {
     30
 }
 
+fn default_max_tool_iterations() -> u8 {
+    8
+}
+
 impl Default for GuestExecutionConfig {
     fn default() -> Self {
         Self {
             timeout_secs: default_timeout_secs(),
+            max_tool_iterations: default_max_tool_iterations(),
         }
     }
 }

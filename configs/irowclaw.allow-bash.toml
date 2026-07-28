@@ -9,7 +9,7 @@ allow_browser = true
 [browser]
 headless = true
 timeout_ms = 30000
-allowed_domains = ["wikipedia.org", "github.com"]
+allowed_domains = ["*"]
 
 [indexing]
 max_chunk_bytes = 2048
@@ -22,7 +22,7 @@ embedding_cache_size = 1000
 jobs_path = "/mnt/brain/cron/jobs.toml"
 
 [execution]
-timeout_secs = 30
+timeout_secs = 120
 
 [network]
 allowed_domains = []
