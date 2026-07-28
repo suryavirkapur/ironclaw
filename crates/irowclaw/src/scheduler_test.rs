@@ -1,10 +1,60 @@
 use super::{
-    initialize_scheduler_schema, run_job, run_job_by_id, scheduler_tick, CronSchedule,
-    SchedulerPaths,
+    initialize_scheduler_schema, load_jobs, run_job, run_job_by_id, scheduler_tick, upsert_job,
+    CronField, CronSchedule, SchedulerPaths,
 };
 use chrono::Timelike;
 use common::config::JobDefinition;
 use rusqlite::Connection;
+
+#[test]
+fn empty_jobs_file_is_a_valid_empty_schedule() {
+    let path = std::env::temp_dir().join(format!(
+        "irowclaw-empty-jobs-test-{}.toml",
+        std::process::id()
+    ));
+    std::fs::write(&path, "").expect("write empty jobs file");
+    let jobs = load_jobs(&path).expect("load empty jobs");
+    assert!(jobs.jobs.is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn jobs_can_be_created_and_replaced_through_the_scheduler_api() {
+    let path = std::env::temp_dir().join(format!(
+        "irowclaw-upsert-jobs-test-{}.toml",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let job = JobDefinition {
+        id: "cron-e2e".to_string(),
+        schedule: "* * * * *".to_string(),
+        description: Some("initial".to_string()),
+        task: "echo first".to_string(),
+    };
+    upsert_job(&path, job).expect("create scheduled job");
+
+    let replacement = JobDefinition {
+        id: "cron-e2e".to_string(),
+        schedule: "0 * * * *".to_string(),
+        description: Some("replacement".to_string()),
+        task: "echo second".to_string(),
+    };
+    upsert_job(&path, replacement).expect("replace scheduled job");
+
+    let jobs = load_jobs(&path).expect("load scheduled jobs");
+    assert_eq!(jobs.jobs.len(), 1);
+    assert_eq!(jobs.jobs[0].schedule, "0 * * * *");
+    assert_eq!(jobs.jobs[0].task, "echo second");
+
+    let invalid = JobDefinition {
+        id: "../escape".to_string(),
+        schedule: "* * * * *".to_string(),
+        description: None,
+        task: "echo invalid".to_string(),
+    };
+    assert!(upsert_job(&path, invalid).is_err());
+    let _ = std::fs::remove_file(path);
+}
 
 #[tokio::test]
 async fn scheduler_marks_due_job_triggered() {
@@ -126,6 +176,24 @@ fn cron_parser_rejects_invalid_field_count() {
 fn cron_parser_rejects_out_of_range_values() {
     let parsed = CronSchedule::parse("70 * * * *");
     assert!(parsed.is_err());
+}
+
+#[test]
+fn cron_parser_supports_standard_wildcard_steps() {
+    let field = CronField::parse("*/10", 0, 59).expect("parse ten-minute step");
+    assert!(field.matches(0));
+    assert!(field.matches(10));
+    assert!(field.matches(50));
+    assert!(!field.matches(9));
+    assert!(!field.matches(11));
+    assert!(CronSchedule::parse("*/10 * * * *").is_ok());
+}
+
+#[test]
+fn cron_parser_rejects_invalid_wildcard_steps() {
+    assert!(CronSchedule::parse("*/0 * * * *").is_err());
+    assert!(CronSchedule::parse("*/61 * * * *").is_err());
+    assert!(CronSchedule::parse("*/ten * * * *").is_err());
 }
 
 #[tokio::test]

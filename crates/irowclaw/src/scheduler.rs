@@ -109,10 +109,61 @@ pub async fn run_job(
     Ok(outcome)
 }
 
-fn load_jobs(path: &Path) -> Result<JobsConfig, IrowclawError> {
+pub fn load_jobs(path: &Path) -> Result<JobsConfig, IrowclawError> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| IrowclawError::new(format!("jobs read failed: {err}")))?;
+    if contents.trim().is_empty() {
+        return Ok(JobsConfig { jobs: Vec::new() });
+    }
     toml::from_str(&contents).map_err(|err| IrowclawError::new(format!("jobs parse failed: {err}")))
+}
+
+pub fn upsert_job(path: &Path, job: JobDefinition) -> Result<(), IrowclawError> {
+    CronSchedule::parse(&job.schedule)?;
+    validate_job_id(&job.id)?;
+    if job.task.trim().is_empty() {
+        return Err(IrowclawError::new("scheduled job task cannot be empty"));
+    }
+
+    let mut config = if path.exists() {
+        load_jobs(path)?
+    } else {
+        JobsConfig { jobs: Vec::new() }
+    };
+    if let Some(existing) = config.jobs.iter_mut().find(|item| item.id == job.id) {
+        *existing = job;
+    } else {
+        config.jobs.push(job);
+    }
+    save_jobs(path, &config)
+}
+
+fn save_jobs(path: &Path, config: &JobsConfig) -> Result<(), IrowclawError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| IrowclawError::new(format!("jobs dir create failed: {err}")))?;
+    }
+    let encoded = toml::to_string_pretty(config)
+        .map_err(|err| IrowclawError::new(format!("jobs encode failed: {err}")))?;
+    let temporary = path.with_extension("toml.tmp");
+    std::fs::write(&temporary, encoded)
+        .map_err(|err| IrowclawError::new(format!("jobs temporary write failed: {err}")))?;
+    std::fs::rename(&temporary, path)
+        .map_err(|err| IrowclawError::new(format!("jobs replace failed: {err}")))
+}
+
+fn validate_job_id(id: &str) -> Result<(), IrowclawError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(IrowclawError::new(
+            "job id must be 1-64 ASCII letters, digits, '-' or '_'",
+        ));
+    }
+    Ok(())
 }
 
 fn open_scheduler_db(path: &Path) -> Result<Connection, IrowclawError> {
@@ -193,6 +244,7 @@ async fn process_job(db_path: &Path, job: &JobDefinition) -> Result<bool, Irowcl
 pub struct ScheduledJobOutcome {
     pub ok: bool,
     pub log_ref: String,
+    pub stdout: String,
 }
 
 async fn execute_job(
@@ -210,7 +262,11 @@ async fn execute_job(
     let exit_code = command_output.status.code().unwrap_or(-1);
     let ok = command_output.status.success();
     let log_ref = append_job_result_log(logs_dir, job, exit_code, ok, &stdout, &stderr)?;
-    Ok(ScheduledJobOutcome { ok, log_ref })
+    Ok(ScheduledJobOutcome {
+        ok,
+        log_ref,
+        stdout,
+    })
 }
 
 fn append_job_result_log(
@@ -403,12 +459,28 @@ impl CronSchedule {
 enum CronField {
     Any,
     Exact(u32),
+    Step { origin: u32, interval: u32 },
 }
 
 impl CronField {
     fn parse(field: &str, min: u32, max: u32) -> Result<Self, IrowclawError> {
         if field == "*" {
             return Ok(Self::Any);
+        }
+        if let Some(interval) = field.strip_prefix("*/") {
+            let interval = interval
+                .parse::<u32>()
+                .map_err(|err| IrowclawError::new(format!("invalid cron step interval: {err}")))?;
+            let field_width = max.saturating_sub(min).saturating_add(1);
+            if interval == 0 || interval > field_width {
+                return Err(IrowclawError::new(format!(
+                    "invalid cron step interval: {interval} outside 1-{field_width}"
+                )));
+            }
+            return Ok(Self::Step {
+                origin: min,
+                interval,
+            });
         }
         let value = field
             .parse::<u32>()
@@ -425,6 +497,9 @@ impl CronField {
         match self {
             Self::Any => true,
             Self::Exact(expected) => *expected == value,
+            Self::Step { origin, interval } => {
+                value >= *origin && value.saturating_sub(*origin) % *interval == 0
+            }
         }
     }
 }
