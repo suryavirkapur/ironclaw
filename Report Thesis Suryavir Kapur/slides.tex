@@ -53,7 +53,7 @@
 \subtitle{Dynamic Tool Synthesis and Secure MicroVM Isolation for Autonomous Agents}
 \author{Suryavir Kapur}
 \institute{BITS Pilani \quad\(\cdot\)\quad Supervisor: Dr.~Vijaykumar B.}
-\date{May 2026}
+\date{July 2026}
 
 % -----------------------------------------------------------------------------
 % TikZ styles consistent with the colour palette
@@ -74,221 +74,107 @@
 
 % Title frame
 \begin{frame}[plain]
-  \vspace*{-0.5cm}
-  \titlepage
-\end{frame}
+  \begin{tikzpicture}[remember picture,overlay]
+    % Split background and architectural accents
+    \fill[IronLight] (current page.south west) rectangle (current page.north east);
+    \fill[IronDark]
+      ([xshift=-0.32\paperwidth]current page.south east)
+      rectangle (current page.north east);
+    \fill[IronTeal]
+      ([xshift=-0.32\paperwidth]current page.south east)
+      rectangle ([xshift=-0.315\paperwidth]current page.north east);
+    \fill[IronOrange]
+      ([xshift=-0.32\paperwidth,yshift=0.55cm]current page.south east)
+      rectangle ([xshift=-0.23\paperwidth,yshift=0.63cm]current page.south east);
 
-\section{Introduction}
+    % Thesis label
+    \node[
+      anchor=north west,
+      fill=IronTeal,
+      text=white,
+      rounded corners=2pt,
+      inner xsep=8pt,
+      inner ysep=4pt,
+      font=\scriptsize\bfseries
+    ] at ([xshift=0.85cm,yshift=-0.65cm]current page.north west)
+      {UNDERGRADUATE THESIS \(\cdot\) BITS F423T};
 
-\begin{frame}{Motivation}
-  \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.55\textwidth}
-      \begin{itemize}
-        \item LLM agents excel at long, multi-step workflows.
-        \item Fixed tool registries limit what an agent can do at runtime.
-        \item \alert{Dynamic tool synthesis} lets the agent generate task-specific code on demand.
-        \item Generated code is untrusted and requires strong isolation.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.42\textwidth}
-      \centering
-      \begin{tikzpicture}[node distance=0.7cm]
-        \node[box, fill=IronBlue!15, minimum width=4cm] (fixed) {\faLock\ Fixed tools};
-        \node[host, below=of fixed, minimum width=4cm] (dynamic) {\faCogs\ Dynamic synthesis};
-        \node[warn, below=of dynamic, minimum width=4cm] (risk) {\faExclamationTriangle\ Untrusted code};
-        \draw[arrow] (fixed) -- (dynamic);
-        \draw[arrow] (dynamic) -- (risk);
-      \end{tikzpicture}
-    \end{column}
-  \end{columns}
-\end{frame}
+    % Main title block
+    \node[
+      anchor=north west,
+      align=left,
+      text width=0.58\paperwidth,
+      text=IronDark
+    ] at ([xshift=0.85cm,yshift=-1.45cm]current page.north west) {
+      {\fontsize{27}{30}\selectfont\bfseries IronClaw}\\[0.18cm]
+      {\fontsize{15}{18}\selectfont
+        Dynamic Tool Synthesis\\
+        and Secure \mbox{MicroVM} Isolation}\\[-0.02cm]
+      {\fontsize{12}{15}\selectfont\color{IronGray}
+        for Autonomous Agents}
+    };
 
-\begin{frame}{Research Questions}
-  \begin{block}{\faQuestionCircle\ RQ1: Utility}
-    Do agents with secure dynamic tool synthesis outperform fixed-tool agents on complex tasks?
-  \end{block}
-  \vspace{0.4cm}
-  \begin{block}{\faQuestionCircle\ RQ2: Security and Systems}
-    What containment and performance trade-offs arise when using Firecracker microVMs instead of process-level sandboxing?
-  \end{block}
-\end{frame}
+    % Contribution pills
+    \node[
+      anchor=west,
+      draw=IronBlue,
+      fill=IronBlue!8,
+      text=IronDark,
+      rounded corners=4pt,
+      inner xsep=8pt,
+      inner ysep=5pt,
+      font=\small
+    ] at ([xshift=0.85cm,yshift=2.50cm]current page.south west)
+      {\faCogs\quad Synthesize once, reuse safely};
+    \node[
+      anchor=west,
+      draw=IronOrange,
+      fill=IronOrange!9,
+      text=IronDark,
+      rounded corners=4pt,
+      inner xsep=8pt,
+      inner ysep=5pt,
+      font=\small
+    ] at ([xshift=0.85cm,yshift=1.73cm]current page.south west)
+      {\faLock\quad Contain generated code in Firecracker};
 
-\begin{frame}{Enterprise Reality: Why OpenClaw Is Not Enough}
-  \small
-  \textit{Perspective from experience at Deriv, Fidelity, and Deloitte consulting the world's top insurance companies.}\\[0.15cm]
-  \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.48\textwidth}
-      \begin{alertblock}{\faExclamationTriangle\ OpenClaw gaps}
-        \begin{itemize}
-          \item Process-level sandbox shares the host kernel.
-          \item Generated code can persist state or access host resources.
-          \item Difficult to prove containment to auditors.
-          \item One compromise can affect the whole agent host.
-        \end{itemize}
-      \end{alertblock}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{\faLock\ IronClaw fix}
-        \begin{itemize}
-          \item Firecracker microVMs provide hardware-isolated guests.
-          \item Each tool runs in a disposable guest with explicit inputs.
-          \item Bounded, auditable execution envelope.
-          \item Host secrets and workspace remain outside the guest.
-        \end{itemize}
-      \end{block}
-    \end{column}
-  \end{columns}
-  \vspace{0.1cm}
-  \centering
-  \footnotesize\textbf{Enterprises need agents, but they need them behind a strong isolation boundary.}
-\end{frame}
+    % Author information
+    \node[
+      anchor=south west,
+      align=left,
+      text=IronGray,
+      font=\scriptsize
+    ] at ([xshift=0.85cm,yshift=0.42cm]current page.south west) {
+      \textbf{\color{IronDark}Suryavir Kapur}
+      \(\;\cdot\;\) 2022A7TS0293U
+      \(\;\cdot\;\) July 2026\\
+      Supervisor: Dr.~Vijaykumar B.
+    };
 
-\begin{frame}{OpenClaw vs Hermes vs IronClaw}
-  \centering
-  \footnotesize
-  \renewcommand{\arraystretch}{1.25}
-  \begin{tabular}{>{\raggedright\arraybackslash}p{0.17\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth} >{\raggedright\arraybackslash}p{0.24\textwidth}}
-    \toprule
-    \textbf{Dimension} & \textbf{Hermes Agent} & \textbf{OpenClaw} & \textbf{IronClaw} \\
-    \midrule
-    Main identity & Self-improving AI agent (Nous) & Personal AI assistant platform & Secure dynamic-tool agent runtime \\
-    Mental model & Brain + skills + memory + tools & Always-on assistant OS/gateway & Host/guest sandbox for generated tools \\
-    Runtime & Python-centric loop & TypeScript/Node platform runtime & Rust host + Firecracker microVM guest \\
-    Standout feature & Learning loop, self-created skills & Multi-channel gateway, plugins, UI/canvas & Hardware-isolated dynamic tool execution \\
-    Execution & Local host only & Built-in runtime + plugins + gateway & Firecracker microVM per tool/task \\
-    Security & Pairs with NemoClaw/OpenShell & Pairs with NemoClaw/OpenShell & Native microVM containment + policy \\
-    \bottomrule
-  \end{tabular}
-\end{frame}
-
-\section{Use Cases}
-
-\begin{frame}{Use Cases}
-  \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{\faFile\ Ad-hoc Data Transformation}
-        Synthesise parsers and transformers for custom logs, CSVs, or domain-specific formats.
-      \end{block}
-      \vspace{0.3cm}
-      \begin{block}{\faBug\ Untrusted Artifact Analysis}
-        Analyse suspicious scripts or attachments without exposing the host.
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{\faPlug\ Dynamic API Integration}
-        Generate on-demand clients for new external services.
-      \end{block}
-      \vspace{0.3cm}
-      \begin{block}{\faCode\ Iterative Code Generation}
-        Write, test, and refine generated code inside an isolated guest.
-      \end{block}
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\section{Isolation and Design}
-
-\begin{frame}{Agent Workflow With Dynamic Tool Synthesis}
-  \centering
-  \begin{tikzpicture}[node distance=1.3cm]
-    \node[box] (task) {User Task};
-    \node[box, right=of task] (agent) {LLM Agent\\plans steps};
-    \node[box, right=of agent] (need) {Missing\\capability?};
-    \node[host, below=of need] (tool) {Generate\\tool code};
-    \node[guest, left=of tool] (sandbox) {Isolated\\execution};
-    \node[box, left=of sandbox] (result) {Result\\observed};
-    \node[box, below=of result] (answer) {Final answer};
-
-    \draw[arrow] (task) -- (agent);
-    \draw[arrow] (agent) -- (need);
-    \draw[arrow] (need) -- (tool);
-    \draw[arrow] (tool) -- (sandbox);
-    \draw[arrow] (sandbox) -- (result);
-    \draw[arrow] (result) |- (agent);
-    \draw[arrow] (result) -- (answer);
+    % BITS identity panel
+    \node[
+      fill=white,
+      rounded corners=8pt,
+      inner sep=8pt
+    ] at ([xshift=0.34\paperwidth,yshift=0.65cm]current page.center)
+      {\includegraphics[width=2.75cm]{Pictures/bits_logo.png}};
+    \node[
+      anchor=north,
+      align=center,
+      text=white,
+      text width=0.27\paperwidth,
+      font=\scriptsize
+    ] at ([xshift=0.34\paperwidth,yshift=-1.2cm]current page.center) {
+      \textbf{\normalsize BITS Pilani}\\[0.08cm]
+      Department of Computer Science\\
+      \& Information Systems
+    };
   \end{tikzpicture}
 \end{frame}
 
-\begin{frame}{What Sandboxing Does}
-  \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.46\textwidth}
-      \begin{itemize}
-        \item Restricts files, network, CPU, memory, and time.
-        \item Limits damage from bugs or malicious code.
-        \item Makes execution auditable and repeatable.
-      \end{itemize}
-    \end{column}
-    \begin{column}{0.52\textwidth}
-      \centering
-      \resizebox{0.92\columnwidth}{!}{%
-      \begin{tikzpicture}[node distance=0.6cm]
-        \node[warn] (code) {Untrusted\\tool code};
-        \node[box, below=of code, minimum width=5cm, fill=IronBlue!15] (sandbox) {Sandbox policy};
-        \node[box, below left=0.9cm and -0.1cm of sandbox] (fs) {Files};
-        \node[box, below=0.9cm of sandbox] (net) {Network};
-        \node[box, below right=0.9cm and -0.1cm of sandbox] (cpu) {CPU/RAM};
-        \draw[arrow] (code) -- (sandbox);
-        \draw[arrow] (sandbox) -- (fs);
-        \draw[arrow] (sandbox) -- (net);
-        \draw[arrow] (sandbox) -- (cpu);
-      \end{tikzpicture}%
-      }
-    \end{column}
-  \end{columns}
-\end{frame}
-
-\begin{frame}{Isolation Options}
-  \centering
-  \renewcommand{\arraystretch}{1.4}
-  \begin{tabular}{>{\raggedright\arraybackslash}p{0.18\textwidth} >{\raggedright\arraybackslash}p{0.30\textwidth} >{\raggedright\arraybackslash}p{0.36\textwidth}}
-    \toprule
-    \textbf{Technique} & \textbf{Boundary} & \textbf{Risk for generated code} \\
-    \midrule
-    Process sandbox & Same host kernel & Kernel and permission mistakes matter \\
-    Container & Namespaces/cgroups, same kernel & Strong packaging, weaker security boundary \\
-    Virtual machine & Guest kernel plus hypervisor & Stronger host/guest separation \\
-    MicroVM & Minimal VM with small device model & Strong boundary with lower startup overhead \\
-    \bottomrule
-  \end{tabular}
-\end{frame}
-
-\begin{frame}{How VMs Execute on the CPU}
-  \centering
-  \begin{tikzpicture}[node distance=0.9cm, scale=0.88, every node/.style={transform shape}]
-    \node[host, minimum width=8.2cm] (hostcpu) {CPU hardware virtualization support\\Intel VT-x / AMD-V};
-    \node[host, below=of hostcpu, minimum width=4cm] (hypervisor) {Hypervisor / VMM\\host-controlled mode};
-    \node[guest, below=1.1cm of hypervisor, minimum width=3.5cm] (guestos) {Guest OS kernel\\guest mode};
-    \node[guest, below=of guestos, minimum width=3.5cm] (app) {Guest process\\generated tool};
-    \node[box, right=1.4cm of guestos, minimum width=3.5cm, fill=IronBlue!12] (memory) {Nested address translation\\guest memory mapped\\to host pages};
-
-    \draw[arrow] (hostcpu) -- (hypervisor);
-    \draw[arrow] (hypervisor) -- node[right,label]{VM entry} (guestos);
-    \draw[arrow] (guestos) -- (app);
-    \draw[arrow] (guestos.east) -- (memory.west);
-    \draw[arrow] (guestos.north west) to[out=120, in=-120, looseness=1.7] node[left,label,align=center]{VM exit\\sensitive ops} (hypervisor.south west);
-  \end{tikzpicture}
-\end{frame}
-
-\begin{frame}{Process Sandbox vs MicroVM Boundary}
-  \centering
-  \resizebox{!}{0.68\textheight}{%
-  \begin{tikzpicture}[node distance=0.5cm]
-    \node[box, minimum width=4.8cm, minimum height=0.75cm] (papp) {Generated tool process};
-    \node[box, below=of papp, minimum width=4.8cm, minimum height=0.75cm] (pkernel) {Shared host kernel};
-    \node[host, below=of pkernel, minimum width=4.8cm, minimum height=0.75cm] (phost) {Host machine};
-
-    \node[guest, right=2.2cm of papp, minimum width=4.8cm, minimum height=0.75cm] (mapp) {Generated tool process};
-    \node[guest, below=of mapp, minimum width=4.8cm, minimum height=0.75cm] (gkernel) {Guest kernel};
-    \node[box, below=of gkernel, minimum width=4.8cm, minimum height=0.75cm, fill=IronBlue!12] (vmm) {Firecracker VMM};
-    \node[host, below=of vmm, minimum width=4.8cm, minimum height=0.75cm] (mhost) {Host machine};
-
-    \node[above=0.15cm of papp, font=\bfseries\small\color{IronDark}] {Process-level sandbox};
-    \node[above=0.15cm of mapp, font=\bfseries\small\color{IronDark}] {MicroVM sandbox};
-  \end{tikzpicture}%
-  }
-\end{frame}
-
-\section{Architecture}
+% =============================================================================
+\section{Architecture Summary}
+% =============================================================================
 
 \begin{frame}{IronClaw Architecture}
   \centering
@@ -314,187 +200,468 @@
     \draw[arrow] (vsock) to[bend left=18] (daemon);
   \end{tikzpicture}%
   }
+  \vspace{0.15cm}
+
+  \small Trusted Rust host plans and gates; generated code runs inside a
+  disposable Firecracker microVM reached only over vsock.
 \end{frame}
 
-\begin{frame}{Host Daemon Internals}
-  \centering
-  \begin{tikzpicture}[node distance=0.55cm, every node/.style={minimum height=0.65cm, minimum width=2.3cm}]
-    \node[host] (api) {Task intake\\API/channel};
-    \node[host, right=of api] (loop) {Agent loop\\plan-act-observe};
-    \node[host, right=of loop] (prompt) {Prompt and\\provider layer};
-    \node[host, below=0.85cm of loop] (dispatch) {Dispatcher};
-    \node[host, left=of dispatch] (policy) {Policy\\manager};
-    \node[host, right=of dispatch] (supervisor) {Sandbox\\supervisor};
-    \node[box, below=0.85cm of dispatch, fill=IronBlue!12] (logs) {Memory, logs,\\result triage};
-
-    \draw[arrow] (api) -- (loop);
-    \draw[arrow] (loop) -- (prompt);
-    \draw[arrow] (prompt) to[bend left=20] (loop);
-    \draw[arrow] (loop) -- (dispatch);
-    \draw[arrow] (policy) -- (dispatch);
-    \draw[arrow] (dispatch) -- (supervisor);
-    \draw[arrow] (dispatch) -- (logs);
-    \draw[arrow] (logs.east) -- ++(2.8,0) |- (loop.south east);
-  \end{tikzpicture}
-
-  \vspace{0.2cm}
-  \parbox{\textwidth}{\centering\small The trusted host owns planning, policy, providers, lifecycle control, and result triage.}
-\end{frame}
-
-\begin{frame}{Guest Runtime Internals}
-  \centering
-  \resizebox{0.93\textwidth}{!}{%
-  \begin{tikzpicture}[node distance=0.8cm]
-    \node[box, fill=IronBlue!12] (req) {Execution\\request};
-    \node[guest, right=of req] (validate) {Validate\\envelope};
-    \node[guest, right=of validate] (materialize) {Materialize\\inputs};
-    \node[guest, right=of materialize] (run) {Run tool\\with limits};
-    \node[guest, below=of run] (capture) {Capture stdout,\\stderr, status};
-    \node[box, left=of capture, fill=IronBlue!12] (response) {Structured\\response};
-
-    \draw[arrow] (req) -- (validate);
-    \draw[arrow] (validate) -- (materialize);
-    \draw[arrow] (materialize) -- (run);
-    \draw[arrow] (run) -- (capture);
-    \draw[arrow] (capture) -- (response);
-  \end{tikzpicture}%
-  }
-  \vspace{0.1cm}
-  \small The guest sees only the inputs explicitly sent for the current execution.
-\end{frame}
-
-\begin{frame}{Structured Execution Envelope}
+\begin{frame}{Architecture Summary: Trusted Host, Disposable Guest}
+  \scriptsize
   \begin{columns}[T,totalwidth=\textwidth]
     \begin{column}{0.48\textwidth}
-      \begin{block}{Request}
+      \begin{block}{\faServer\ Host daemon (trusted)}
         \begin{itemize}
-          \item request id and tool name
-          \item generated code or command
-          \item serialized inputs
-          \item timeout, memory, network, output limits
-          \item expected result format
+          \item Task intake API and plan--act--observe agent loop with the
+            prompt/provider layer.
+          \item Policy manager gates every dispatch; sandbox supervisor owns
+            the VM lifecycle.
+          \item Memory, logs, and result triage stay on the host.
         \end{itemize}
       \end{block}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \begin{block}{Response}
+      \begin{exampleblock}{\faLock\ Guest runtime (untrusted)}
         \begin{itemize}
-          \item request id and status
-          \item exit code and duration
-          \item bounded stdout and stderr
-          \item artifact metadata
-          \item error classification
+          \item Validate envelope \(\rightarrow\) materialize inputs
+            \(\rightarrow\) run tool with limits.
+          \item Capture stdout, stderr, and exit status; return a structured
+            response.
+          \item Sees only the inputs explicitly sent for the current execution.
         \end{itemize}
-      \end{block}
+      \end{exampleblock}
     \end{column}
   \end{columns}
+  \vspace{0.25cm}
+  \centering
+  \textbf{Split of trust:} the host owns planning, policy, providers, lifecycle
+  control, and triage; the guest only executes.
 \end{frame}
 
-\begin{frame}{MicroVM Execution Lifecycle}
+\begin{frame}{Architecture Summary: Envelope, Lifecycle, Policy}
   \centering
-  \resizebox{0.98\textwidth}{!}{%
-  \begin{tikzpicture}[node distance=0.95cm]
+  \resizebox{0.9\textwidth}{!}{%
+  \begin{tikzpicture}[node distance=0.8cm, every node/.style={font=\scriptsize}]
     \node[host] (alloc) {Allocate or\\resume guest};
     \node[box, right=of alloc, fill=IronBlue!12] (vsock) {Open vsock};
     \node[guest, right=of vsock] (send) {Send request\\and inputs};
     \node[guest, right=of send] (exec) {Execute\\tool};
-    \node[guest, below=of exec] (resp) {Return\\response};
-    \node[host, left=of resp] (copy) {Copy approved\\artifacts};
-    \node[host, left=of copy] (reset) {Terminate or\\reset guest};
+    \node[guest, right=of exec] (resp) {Return\\response};
+    \node[host, right=of resp] (reset) {Copy artifacts,\\terminate/reset};
 
     \draw[arrow] (alloc) -- (vsock);
     \draw[arrow] (vsock) -- (send);
     \draw[arrow] (send) -- (exec);
     \draw[arrow] (exec) -- (resp);
-    \draw[arrow] (resp) -- (copy);
-    \draw[arrow] (copy) -- (reset);
+    \draw[arrow] (resp) -- (reset);
   \end{tikzpicture}%
   }
-\end{frame}
+  \vspace{0.25cm}
 
-\begin{frame}{Policy and Failure Handling}
+  \scriptsize
   \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{Policy gates}
-        \begin{itemize}
-          \item interpreter allowlist
-          \item file and network mode
-          \item CPU, memory, and time limits
-          \item output truncation
-        \end{itemize}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{Request envelope}
+        request id, tool name, generated code/command, serialized inputs,
+        resource limits, expected result format.
       \end{block}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{alertblock}{Failure classes}
-        \begin{itemize}
-          \item tool compile/runtime error
-          \item policy denied
-          \item timeout or output overflow
-          \item guest or transport failure
-        \end{itemize}
+    \begin{column}{0.32\textwidth}
+      \begin{block}{Response envelope}
+        status, exit code, duration, bounded stdout/stderr, artifact metadata,
+        error classification.
+      \end{block}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \begin{alertblock}{Policy and failures}
+        interpreter allowlist, file/network mode, CPU/memory/time limits,
+        output truncation; errors classified (tool, policy, timeout,
+        transport).
       \end{alertblock}
     \end{column}
   \end{columns}
 \end{frame}
 
-\section{Evaluation}
+% =============================================================================
+\section{Hypotheses}
+% =============================================================================
 
-\begin{frame}{Evaluation Plan}
+\begin{frame}{Hypotheses}
+  \begin{block}{H1: Utility}
+    On repeated tasks for which no purpose-built tool is available,
+    policy-guided dynamic tool synthesis reduces model interaction steps and
+    token consumption relative to generic capabilities alone, while preserving
+    task correctness. \textbf{The benefit increases with reuse.}
+  \end{block}
+  \vspace{0.35cm}
+  \begin{exampleblock}{H2: Security and Performance}
+    IronClaw's microVM architecture contains simulated host-breakout attempts
+    from malicious synthesized tools, at the cost of measurable but acceptable
+    initialization latency and memory overhead.
+  \end{exampleblock}
+\end{frame}
+
+% =============================================================================
+\section{Results}
+% =============================================================================
+
+\begin{frame}{H1 Setup: One Mechanism, Three Domains, Five Experiments}
+  \scriptsize
   \begin{columns}[T,totalwidth=\textwidth]
-    \begin{column}{0.48\textwidth}
-      \begin{block}{\faChartBar\ Utility}
-        Compare fixed-tool and dynamic-tool agents on multi-step tasks.
+    \begin{column}{0.47\textwidth}
+      \begin{block}{A: No synthesis}
+        Agent authors the required SQL/JavaScript inline; the logic is
+        produced again for every request.
       \end{block}
-      \vspace{0.3cm}
-      \begin{block}{\faLock\ Security}
-        Run malicious payloads and verify host containment.
+      \vspace{0.12cm}
+      \begin{exampleblock}{B: Dynamic synthesis}
+        Same base capability plus one meta-tool that registers generated
+        logic: create once, then reuse with small inputs.
+      \end{exampleblock}
+      \vspace{0.12cm}
+      \begin{block}{Held constant / acceptance}
+        \texttt{deepseek-v4-pro}, settings, seeded fixtures, request order,
+        validation, metric code. B must preserve correctness and cut
+        steps/tokens on repeated work.
       \end{block}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{block}{\faChartLine\ Performance}
-        Measure initialization latency, execution latency, CPU, and memory.
-      \end{block}
-      \vspace{0.3cm}
-      \begin{block}{\faCodeBranch\ Reproducibility}
-        Submit code, configuration, scripts, and execution steps.
-      \end{block}
+    \begin{column}{0.50\textwidth}
+      \renewcommand{\arraystretch}{1.28}
+      \begin{tabular}{clc}
+        \toprule
+        \textbf{ID} & \textbf{Domain (repeated artifact)} & \textbf{Reuse} \\
+        \midrule
+        E1 & SQL: seven-table cancellation query & 6/6 \\
+        E2 & SQL: sparse-reuse variant & 3/6 \\
+        E3 & Parser: hostile legacy log files & 6/6 \\
+        E4 & Parser: sparse-reuse variant & 3/6 \\
+        E5 & Repository: seven-rule compliance audit & 6/6 \\
+        \bottomrule
+      \end{tabular}
+      \vspace{0.25cm}
+
+      Each A/B condition is one six-request conversation --- ten measured
+      conversations in total. The design tests both benefit and break-even
+      behavior.
     \end{column}
   \end{columns}
 \end{frame}
 
-\begin{frame}{Expected Outcome}
-  \begin{itemize}
-    \item Dynamic tools should improve completion on transformation-heavy tasks.
-    \item Firecracker microVMs should contain untrusted generated code better than process-only sandboxes.
-    \item The main cost is startup latency and memory overhead.
-    \item IronClaw makes the utility--security trade-off measurable.
-  \end{itemize}
+\begin{frame}{H1 Results: Repetitive Workloads}
+  \centering
+  \footnotesize
+  \renewcommand{\arraystretch}{1.22}
+  \begin{tabular}{lrrrc}
+    \toprule
+    \textbf{Domain} & \textbf{A input} & \textbf{B input} & \textbf{Change} & \textbf{Correct} \\
+    \midrule
+    E1: SQL & 190{,}031 & \textbf{88{,}566} & $-$53.4\% & 100\% / 100\% \\
+    E3: parser & 193{,}817 & \textbf{74{,}865} & $-$61.4\% & 100\% / 100\% \\
+    E5: repository audit & 140{,}472 & \textbf{65{,}146} & $-$53.6\% & 100\% / 100\% \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.35cm}
+  \begin{exampleblock}{Primary result}
+    With six repeated uses, synthesis reduced billed input tokens by
+    \textbf{53--61\%} without changing answer correctness.
+  \end{exampleblock}
+  \vspace{0.15cm}
+  \footnotesize
+  Input-token totals include the entire growing conversation and every
+  intermediate tool-loop step---the units that are actually billed.
 \end{frame}
 
-\begin{frame}{What's Done / What's Remaining}
-  \small
+\begin{frame}{H1 Results: Why the Token Reduction Occurred}
+  \scriptsize
+  \renewcommand{\arraystretch}{1.18}
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    & \multicolumn{2}{c}{\textbf{Model steps}} &
+      \multicolumn{2}{c}{\textbf{Code chars}} &
+      \multicolumn{2}{c}{\textbf{Wall time}} \\
+    \textbf{Domain} & A & B & A & B & A & B \\
+    \midrule
+    SQL & 28 & 15 & 3{,}142 & 1{,}800 & 103.6\,s & 81.3\,s \\
+    Parser & 18 & 13 & 6{,}109 & 1{,}196 & 91.7\,s & 47.2\,s \\
+    Repository & 19 & 13 & 29{,}176 & 9{,}112 & 134.0\,s & 61.4\,s \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.28cm}
   \begin{columns}[T,totalwidth=\textwidth]
     \begin{column}{0.48\textwidth}
-      \begin{exampleblock}{\faCheckCircle\ Done}
+      \begin{block}{A repeatedly pays}
+        Rediscover/restate logic $\rightarrow$ author code $\rightarrow$ execute
+        it, with the growing transcript resent at later model steps.
+      \end{block}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{exampleblock}{B pays once, then reuses}
+        Create and register the artifact, then later requests send small
+        parameters to deterministic code.
+      \end{exampleblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{H1 Results: Sparse Reuse Is Net-Negative}
+  \footnotesize
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.43\textwidth}
+      \centering
+      \renewcommand{\arraystretch}{1.25}
+      \begin{tabular}{lrr}
+        \toprule
+        \textbf{Input tokens} & \textbf{A} & \textbf{B} \\
+        \midrule
+        E2: SQL & 73{,}452 & 87{,}442 \\
+        E4: parser & 64{,}452 & 106{,}131 \\
+        \bottomrule
+      \end{tabular}
+      \vspace{0.3cm}
+
+      E2: \alert{+19.0\%}\\
+      E4: \alert{+64.7\%}
+    \end{column}
+    \begin{column}{0.53\textwidth}
+      \begin{alertblock}{Why B loses at 3/6}
+        \begin{enumerate}
+          \item Creating a tool requires extra code and model steps.
+          \item That creation transcript remains in later context.
+          \item Only two later requests reuse the created artifact.
+          \item The saved inline work does not repay the creation/context cost.
+        \end{enumerate}
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+  \vspace{0.2cm}
+  \begin{block}{What can and cannot be concluded}
+    In these workloads, 3/6 loses and 6/6 wins. The exact break-even lies
+    somewhere between them, but is task/model dependent and was not estimated.
+  \end{block}
+\end{frame}
+
+\begin{frame}{H1 Design Lesson: Keep Bulk Data Behind the Tool}
+  \footnotesize
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.46\textwidth}
+      \begin{alertblock}{Initial parser design}
+        Created tool receives the \emph{entire log text} as an argument.
         \begin{itemize}
-          \item Host daemon with agent loop and dispatch
-          \item Guest runtime in Firecracker/container/process sandboxes
-          \item Execution envelope and policy gates
-          \item Memory, channels, and smoke tests
+          \item Bulk input enters the model/tool transcript.
+          \item Dynamic condition: \alert{+12\% input tokens}.
+        \end{itemize}
+      \end{alertblock}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{exampleblock}{Final controlled design}
+        Created tool receives a small filename and uses allow-listed
+        \texttt{readFile(name)}.
+        \begin{itemize}
+          \item Data stays behind the capability boundary.
+          \item Dynamic condition: \textbf{$-$61.4\%}.
         \end{itemize}
       \end{exampleblock}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{alertblock}{\faHourglassHalf\ Remaining}
-        \begin{itemize}
-          \item Utility evaluation on multi-step tasks
-          \item Security red-teaming against generated payloads
-          \item Performance profiling: init latency, CPU, memory
-          \item Larger benchmarks and richer policies
-        \end{itemize}
+  \end{columns}
+  \vspace{0.3cm}
+  \centering
+  \Large\textbf{Pass lookup keys, not bulk data.}
+\end{frame}
+
+\begin{frame}{H1 Answer}
+  \begin{exampleblock}{Supported within the tested conditions}
+    Dynamic synthesis preserved 100\% correctness and reduced input tokens,
+    model steps, authored code, and wall time when the same complex operation
+    was reused across all six requests.
+  \end{exampleblock}
+  \vspace{0.25cm}
+  \begin{alertblock}{Not universally beneficial}
+    When only three of six requests required the capability, synthesis increased
+    input tokens by 19.0--64.7\%; creation was not amortized.
+  \end{alertblock}
+  \vspace{0.3cm}
+  \centering
+  \textbf{Decision rule for IronClaw:}\\
+  synthesize when repeated reuse is expected; otherwise execute inline.
+\end{frame}
+
+\begin{frame}{H2 Setup: Boundary Comparison and Five Host Targets}
+  \scriptsize
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.44\textwidth}
+      \begin{alertblock}{Process baseline}
+        Child shell runs directly on the host with the invoking user's
+        permissions.
       \end{alertblock}
+      \vspace{0.12cm}
+      \begin{exampleblock}{Firecracker condition}
+        Identical command runs inside a guest through IronClaw's production
+        manager, authentication, protobuf, and vsock path.
+      \end{exampleblock}
+      \vspace{0.12cm}
+      \begin{block}{Environment and scope}
+        i7-12700K; Firecracker 1.14.0; guest Linux 6.1.155 + Ubuntu 24.04;
+        2 vCPU, 512\,MiB. Networking disabled; tests filesystem, environment,
+        device, and namespace containment.
+      \end{block}
+    \end{column}
+    \begin{column}{0.52\textwidth}
+      \renewcommand{\arraystretch}{1.22}
+      \begin{tabular}{>{\raggedright\arraybackslash}p{0.32\columnwidth}
+                      >{\raggedright\arraybackslash}p{0.60\columnwidth}}
+        \toprule
+        \textbf{Payload} & \textbf{What the command attempts} \\
+        \midrule
+        Host file read & Read a random sentinel file created only on the host \\
+        Host file write & Create a marker inside a host-only directory \\
+        Environment read & Read a random host-only environment variable \\
+        Device access & Detect the host's \texttt{/dev/kvm} \\
+        Namespace observe & Read the host hostname through \texttt{/proc} \\
+        \bottomrule
+      \end{tabular}
+      \vspace{0.2cm}
+
+      Breakout \(=\) the targeted \emph{host} resource is observed or
+      modified.\\[0.1cm]
+      \textbf{Security criterion:} 0/5 host-resource accesses in
+      Firecracker.\\[0.1cm]
+      \textbf{Init target:} $t_{\text{init}}<500$\,ms for snapshot-resumed
+      guests; cold boot is reported separately and does not test this target.
     \end{column}
   \end{columns}
+\end{frame}
+
+\begin{frame}{H2 Security Result: 5/5 vs 0/5}
+  \centering
+  \begin{tikzpicture}[node distance=0.48cm, every node/.style={font=\scriptsize}]
+    \node[box, minimum width=2.1cm] (sentinel) {Create random\\host sentinel};
+    \node[box, right=of sentinel, minimum width=2.1cm] (process) {Run payload\\as process};
+    \node[host, right=of process, minimum width=2.1cm] (vm) {Run identical\\payload in VM};
+    \node[box, right=of vm, minimum width=2.1cm] (verify) {Inspect output\\and host state};
+    \node[host, right=of verify, minimum width=2.1cm] (cleanup) {Record result\\and clean up};
+    \draw[arrow] (sentinel) -- (process);
+    \draw[arrow] (process) -- (vm);
+    \draw[arrow] (vm) -- (verify);
+    \draw[arrow] (verify) -- (cleanup);
+  \end{tikzpicture}
+  \vspace{0.35cm}
+  \small
+  \renewcommand{\arraystretch}{1.13}
+  \begin{tabular}{lccc}
+    \toprule
+    \textbf{Target} & \textbf{Process attack} & \textbf{VM attack} & \textbf{Contained} \\
+    \midrule
+    file read / file write & 2/2 succeeded & 0/2 succeeded & 2/2 \\
+    environment / device & 2/2 succeeded & 0/2 succeeded & 2/2 \\
+    namespace observation & 1/1 succeeded & 0/1 succeeded & 1/1 \\
+    \midrule
+    \textbf{Total} & \alert{\textbf{5/5}} & \textbf{0/5} & \textbf{5/5} \\
+    \bottomrule
+  \end{tabular}
+\end{frame}
+
+\begin{frame}{H2 Performance Results}
+  \scriptsize
+  \renewcommand{\arraystretch}{1.16}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrr}
+    \toprule
+    \textbf{Metric} & \textbf{Process} & \textbf{Firecracker} \\
+    \midrule
+    Start/cold median (p95) & 36.45\,ms (94.00) & 6{,}083.67\,ms (6{,}102.59) \\
+    Warm no-op median (p95) & 36.45\,ms (94.00) & 1.74\,ms (3.68) \\
+    Host resident memory & 4{,}108\,KiB & 72{,}672\,KiB \\
+    Configured guest memory & --- & 512\,MiB \\
+    CPU-loop utilization & 92.2\% & 99.6\% \\
+    Stop + restart + probe median (p95) & --- & 6{,}622.87\,ms (6{,}632.47) \\
+    \bottomrule
+  \end{tabular}
+  \vspace{0.24cm}
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.48\textwidth}
+      \begin{alertblock}{Dominant cost}
+        Cold boot is approximately \textbf{167$\times$} process start and uses
+        roughly 67\,MiB more host RSS; recovery succeeded 5/5 at 6.62\,s.
+      \end{alertblock}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{exampleblock}{Steady state}
+        Cold start is a per-session lifecycle cost, amortized over many tool
+        calls; warm 1.74\,ms reuses an existing guest, so it is not directly
+        comparable to process creation.
+      \end{exampleblock}
+    \end{column}
+  \end{columns}
+  \vspace{0.12cm}
+  \centering
+  Fits long-lived tenant sessions, not interactive per-request VM creation.
+\end{frame}
+
+\begin{frame}{H2 Answer}
+  \begin{exampleblock}{Containment component supported}
+    All five attacks reached their host target under process execution; none
+    reached it through the Firecracker boundary.
+  \end{exampleblock}
+  \vspace{0.25cm}
+  \begin{alertblock}{Initialization overhead: bounded for long-lived VMs}
+    Cold start (6.08\,s) and recovery (6.62\,s) are too slow for per-request
+    isolation but acceptable for long-lived tenant sessions. The
+    $<500$\,ms target applies to snapshot resume, which is not implemented,
+    so it remains \emph{unevaluated}, not failed.
+  \end{alertblock}
+  \vspace{0.3cm}
+  \centering
+  \Large\textbf{H2 is partially supported.}
+\end{frame}
+
+\begin{frame}{Validity Limits and Future Extensions}
+  \scriptsize
+  \begin{columns}[T,totalwidth=\textwidth]
+    \begin{column}{0.50\textwidth}
+      \begin{alertblock}{What the evidence does not prove}
+        \begin{itemize}
+          \item H1: one model, one measured run per condition, two reuse
+            frequencies; exact break-even not identified.
+          \item H2: one host/VM configuration; five non-destructive payloads
+            are not a proof of no vulnerabilities; network, fuzzing, side
+            channels excluded; baseline is an unisolated process.
+        \end{itemize}
+      \end{alertblock}
+      \vspace{0.15cm}
+      \begin{exampleblock}{Bounded claim}
+        The experiments establish the measured effect for these conditions;
+        no universal token savings or complete microVM security is claimed.
+      \end{exampleblock}
+    \end{column}
+    \begin{column}{0.46\textwidth}
+      \begin{block}{\faHourglassHalf\ Future extensions}
+        \begin{itemize}
+          \item Snapshot create/restore and $<500$\,ms resume measurement.
+          \item TAP-layer network allow-lists.
+          \item Broader fuzzing; seccomp/container/WASM baselines.
+          \item Larger benchmarks, more models, repeated trials.
+        \end{itemize}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Publishing Avenue}
+  \begin{exampleblock}{\faBullseye\ Target venue}
+    \textbf{ACM Transactions on AI Security and Privacy (TAISAP)}
+  \end{exampleblock}
+  \vspace{0.3cm}
+  \footnotesize
+  \begin{itemize}
+    \item The evaluation pairs an AI-utility claim (H1, dynamic tool
+      synthesis) with a security/systems claim (H2, microVM containment and
+      overhead).
+    \item TAISAP's scope covers AI systems evaluated under security and
+      privacy constraints, matching the IronClaw contribution profile.
+    \item Planned submission after extending the security suite and adding
+      snapshot-resume measurements.
+  \end{itemize}
 \end{frame}
 
 \begin{frame}{Thank You}
