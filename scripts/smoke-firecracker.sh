@@ -5,8 +5,7 @@ set -euo pipefail
 # this avoids tcp websocket bind requirements and validates vm bootstrap directly.
 
 KERNEL_PATH="${KERNEL_PATH:-kernels/firecracker/vmlinux-6.1.155.bin}"
-ROOTFS_DIR="${ROOTFS_DIR:-rootfs/build/guest-root}"
-ROOTFS_PATH="${ROOTFS_PATH:-rootfs/build/guest-rootfs.ext4}"
+ROOTFS_PATH="${ROOTFS_PATH:-rootfs/build/ubuntu-24.04.ext4}"
 API_SOCKET_DIR="${API_SOCKET_DIR:-/tmp/ironclaw-fc}"
 VSOCK_UDS_DIR="${VSOCK_UDS_DIR:-/tmp/ironclaw/vsock}"
 VSOCK_PORT="${VSOCK_PORT:-5000}"
@@ -15,7 +14,7 @@ FIRECRACKER_BIN="${FIRECRACKER_BIN:-firecracker}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
-./scripts/build-guest-rootfs.sh "${ROOTFS_DIR}" "${ROOTFS_PATH}"
+./scripts/build-ubuntu-rootfs.sh "${ROOTFS_PATH}"
 
 rm -f "${API_SOCKET_DIR}"/*.sock "${VSOCK_UDS_DIR}"/*.sock 2>/dev/null || true
 pgrep -af firecracker >/dev/null 2>&1 && pkill -9 firecracker 2>/dev/null || true

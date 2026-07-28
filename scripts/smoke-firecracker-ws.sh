@@ -8,9 +8,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 KERNEL_PATH="${KERNEL_PATH:-kernels/firecracker/vmlinux-6.1.155.bin}"
-ROOTFS_DIR="${ROOTFS_DIR:-rootfs/build/guest-root}"
-ROOTFS_PATH="${ROOTFS_PATH:-rootfs/build/guest-rootfs.ext4}"
-HOST_CONFIG="${HOST_CONFIG:-configs/ironclawd.firecracker.toml}"
+ROOTFS_PATH="${ROOTFS_PATH:-rootfs/build/ubuntu-24.04.ext4}"
+HOST_CONFIG="${HOST_CONFIG:-configs/ironclawd.cli.toml}"
 FIRECRACKER_BIN="${FIRECRACKER_BIN:-firecracker}"
 ADDR="${ADDR:-127.0.0.1:9938}"
 WS_URL="${WS_URL:-ws://${ADDR}/ws}"
@@ -81,7 +80,6 @@ cleanup() {
 trap cleanup EXIT
 
 require_bin cargo
-require_bin node
 require_bin "${FIRECRACKER_BIN}"
 
 if [[ ! -e /dev/kvm ]]; then
@@ -103,7 +101,7 @@ bind_host="${ADDR%:*}"
 bind_port="${ADDR##*:}"
 preflight_ws_bind "${bind_host}" "${bind_port}"
 
-./scripts/build-guest-rootfs.sh "${ROOTFS_DIR}" "${ROOTFS_PATH}"
+./scripts/build-ubuntu-rootfs.sh "${ROOTFS_PATH}"
 
 rm -f "${HOST_LOG}" "${CLIENT_LOG}" "${FC_CONSOLE_LOG}" 2>/dev/null || true
 rm -f "${API_SOCKET_DIR}"/*.sock "${VSOCK_UDS_DIR}"/*.sock 2>/dev/null || true
@@ -115,9 +113,8 @@ IRONCLAWD_PID=$!
 attempt=1
 passed=0
 while [[ "${attempt}" -le "${MAX_ATTEMPTS}" ]]; do
-  marker="step4-ws-${attempt}-$(date +%s%N)"
-  if WS_TIMEOUT_MS=15000 node ./scripts/smoke-firecracker-ws.mjs \
-    "${WS_URL}" "${marker}" >"${CLIENT_LOG}" 2>&1; then
+  if cargo run -q -p ironclaw-cli -- doctor \
+    --url "${WS_URL}" --timeout-secs 15 >"${CLIENT_LOG}" 2>&1; then
     echo "PASS: $(tail -n 1 "${CLIENT_LOG}")"
     passed=1
     break

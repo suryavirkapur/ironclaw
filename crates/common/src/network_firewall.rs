@@ -107,14 +107,65 @@ fn resolve_domain(domain: &str) -> Result<String, FirewallError> {
 }
 
 pub fn setup_vm_network(user_id: &str, allowed_domains: &[String]) -> Result<(), FirewallError> {
-    let fw = NetworkFirewall::new(user_id);
-    fw.setup(allowed_domains)?;
+    let _ = user_id;
+    if !allowed_domains.is_empty() {
+        tracing::warn!(
+            "direct Ubuntu guest networking is enabled; domain allowlists are not enforced at the TAP layer"
+        );
+    }
+    if let Err(err) = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1\n") {
+        tracing::warn!(
+            "could not enable ip_forward from daemon ({err}); it must be enabled by host setup"
+        );
+    }
+    ensure_iptables_rule(&[], &["FORWARD", "-i", "tap+", "-j", "ACCEPT"])?;
+    ensure_iptables_rule(
+        &[],
+        &[
+            "FORWARD",
+            "-o",
+            "tap+",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
+        ],
+    )?;
+    ensure_iptables_rule(
+        &["-t", "nat"],
+        &["POSTROUTING", "-s", "172.16.0.0/24", "-j", "MASQUERADE"],
+    )?;
     Ok(())
 }
 
 pub fn cleanup_vm_network(user_id: &str) -> Result<(), FirewallError> {
-    let fw = NetworkFirewall::new(user_id);
-    fw.cleanup()?;
+    let _ = user_id;
+    Ok(())
+}
+
+fn ensure_iptables_rule(table_args: &[&str], rule: &[&str]) -> Result<(), FirewallError> {
+    let check = Command::new("iptables")
+        .arg("-w")
+        .args(table_args)
+        .arg("-C")
+        .args(rule)
+        .output()?;
+    if check.status.success() {
+        return Ok(());
+    }
+    let add = Command::new("iptables")
+        .arg("-w")
+        .args(table_args)
+        .arg("-A")
+        .args(rule)
+        .output()?;
+    if !add.status.success() {
+        return Err(FirewallError::Iptables(
+            String::from_utf8_lossy(&add.stderr).trim().to_string(),
+        ));
+    }
     Ok(())
 }
 
