@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use crate::Tool;
 
-use super::{BrowserTool, BrowserToolConfig};
+use super::{
+    domain_allowed, parse_request, readable_brave_results, readable_rss, BraveSearchCredentials,
+    BrowserRequest, BrowserTool, BrowserToolConfig,
+};
 
 fn temp_path(name: &str) -> PathBuf {
     let ts = std::time::SystemTime::now()
@@ -92,4 +95,66 @@ fn blocked_domain_returns_error() {
     assert!(result.is_err());
 
     let _ = fs::remove_file(fake);
+}
+
+#[test]
+fn native_search_request_uses_query_field() {
+    let request = parse_request(r#"{"action":"search","query":"Argentina Spain 2026 final"}"#)
+        .expect("parse search request");
+    assert!(matches!(
+        request,
+        BrowserRequest::Search { query } if query == "Argentina Spain 2026 final"
+    ));
+}
+
+#[test]
+fn wildcard_domain_is_explicitly_unrestricted() {
+    assert!(domain_allowed("www.fifa.com", &["*".to_string()]));
+    assert!(domain_allowed("news.google.com", &["*".to_string()]));
+}
+
+#[test]
+fn rss_search_results_are_concise_and_keep_evidence_links() {
+    let xml = r#"<?xml version="1.0"?><rss><channel>
+        <item><title>Spain 1-0 Argentina - BBC</title>
+        <link>https://news.google.com/articles/result</link>
+        <pubDate>Sun, 19 Jul 2026 23:41:56 GMT</pubDate></item>
+        </channel></rss>"#;
+    let output = readable_rss(xml);
+    assert!(output.contains("1. Spain 1-0 Argentina - BBC"));
+    assert!(output.contains("Published: Sun, 19 Jul 2026 23:41:56 GMT"));
+    assert!(output.contains("URL: https://news.google.com/articles/result"));
+    assert!(!output.contains("<item>"));
+}
+
+#[test]
+fn brave_search_results_are_concise_and_keep_exact_urls() {
+    let response = r#"{
+        "web": {
+            "results": [{
+                "title": "Spain 1-0 Argentina",
+                "url": "https://example.com/exact-result",
+                "description": "Spain won the 2026 final.",
+                "extra_snippets": ["Ferran Torres scored in extra time."]
+            }]
+        }
+    }"#;
+    let output = readable_brave_results(response).expect("parse Brave results");
+    assert!(output.contains("Live Brave Search results:"));
+    assert!(output.contains("URL: https://example.com/exact-result"));
+    assert!(output.contains("Snippet: Spain won the 2026 final."));
+    assert!(output.contains("Additional snippet: Ferran Torres scored in extra time."));
+}
+
+#[test]
+fn brave_credentials_are_shared_without_exposing_the_key_in_debug() {
+    let credentials = BraveSearchCredentials::default();
+    let shared = credentials.clone();
+    credentials
+        .set_api_key("test-secret-key")
+        .expect("store credential");
+    assert!(matches!(shared.api_key().as_deref(), Ok("test-secret-key")));
+    let debug = format!("{credentials:?}");
+    assert!(debug.contains("configured: true"));
+    assert!(!debug.contains("test-secret-key"));
 }

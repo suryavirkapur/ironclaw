@@ -42,6 +42,7 @@ impl<T> AuthTransport<T> {
                 cap_token,
                 allowed_tools,
                 execution_mode: String::new(),
+                brave_api_key: String::new(),
             })),
         }
     }

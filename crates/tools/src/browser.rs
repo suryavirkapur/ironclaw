@@ -1,9 +1,10 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,50 @@ use serde_json::json;
 
 use crate::{Tool, ToolError, ToolResult};
 
+#[derive(Clone, Default)]
+pub struct BraveSearchCredentials {
+    api_key: Arc<RwLock<Option<String>>>,
+}
+
+impl std::fmt::Debug for BraveSearchCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BraveSearchCredentials")
+            .field("configured", &self.api_key().is_ok())
+            .finish()
+    }
+}
+
+impl BraveSearchCredentials {
+    pub fn set_api_key(&self, api_key: impl Into<String>) -> Result<(), ToolError> {
+        let api_key = api_key.into();
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(ToolError::new("BRAVE_API_KEY is empty"));
+        }
+        if api_key
+            .chars()
+            .any(|character| character.is_control() || character == '"' || character == '\\')
+        {
+            return Err(ToolError::new("BRAVE_API_KEY contains invalid characters"));
+        }
+        let mut stored = self
+            .api_key
+            .write()
+            .map_err(|_| ToolError::new("Brave credential lock poisoned"))?;
+        *stored = Some(api_key.to_string());
+        Ok(())
+    }
+
+    fn api_key(&self) -> Result<String, ToolError> {
+        self.api_key
+            .read()
+            .map_err(|_| ToolError::new("Brave credential lock poisoned"))?
+            .clone()
+            .ok_or_else(|| ToolError::new("BRAVE_API_KEY is not configured"))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BrowserToolConfig {
     pub binary_path: Option<PathBuf>,
@@ -23,6 +68,7 @@ pub struct BrowserToolConfig {
     pub allowed_domains: Vec<String>,
     pub max_memory_mb: u64,
     pub max_cpu_seconds: u64,
+    pub brave_search_credentials: BraveSearchCredentials,
 }
 
 impl Default for BrowserToolConfig {
@@ -34,6 +80,7 @@ impl Default for BrowserToolConfig {
             allowed_domains: Vec::new(),
             max_memory_mb: 512,
             max_cpu_seconds: 20,
+            brave_search_credentials: BraveSearchCredentials::default(),
         }
     }
 }
@@ -49,8 +96,12 @@ impl BrowserTool {
 
     fn fetch(&self, url: &str) -> Result<ToolResult, ToolError> {
         self.validate_url(url)?;
-        let output =
-            self.run_chrome([OsString::from("--dump-dom"), OsString::from(url)].as_slice())?;
+        let output = match resolve_browser_binary(&self.config) {
+            Ok(_) => {
+                self.run_chrome([OsString::from("--dump-dom"), OsString::from(url)].as_slice())?
+            }
+            Err(_) => self.run_curl(url)?,
+        };
         if !output.status.success() {
             return Err(ToolError::new(format!(
                 "browser fetch failed: {}",
@@ -58,10 +109,107 @@ impl BrowserTool {
             )));
         }
         let html = String::from_utf8_lossy(&output.stdout).to_string();
-        let _ = Html::parse_document(&html);
-        Ok(ToolResult {
-            output: html,
-            ok: true,
+        let output = format!("Fetched URL: {url}\n{}", readable_html(&html));
+        Ok(ToolResult { output, ok: true })
+    }
+
+    fn search(&self, query: &str) -> Result<ToolResult, ToolError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(ToolError::new("missing search query"));
+        }
+        let api_key = self.config.brave_search_credentials.api_key()?;
+        let mut url = Url::parse("https://api.search.brave.com/res/v1/web/search")
+            .map_err(|err| ToolError::new(format!("search url build failed: {err}")))?;
+        url.query_pairs_mut()
+            .append_pair("q", query)
+            .append_pair("count", "10")
+            .append_pair("country", "US")
+            .append_pair("search_lang", "en")
+            .append_pair("extra_snippets", "true");
+        let output = self.run_brave_search(url.as_str(), &api_key)?;
+        if !output.status.success() {
+            return Err(ToolError::new(format!(
+                "Brave Search request failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let response = String::from_utf8_lossy(&output.stdout);
+        let output = readable_brave_results(&response)?;
+        Ok(ToolResult { output, ok: true })
+    }
+
+    fn run_brave_search(&self, url: &str, api_key: &str) -> Result<ChromeOutput, ToolError> {
+        let timeout_seconds = self.config.timeout_ms.saturating_add(999) / 1_000;
+        let timeout_seconds = timeout_seconds.max(1).to_string();
+        let mut command = Command::new("curl");
+        command
+            .args([
+                "--fail-with-body",
+                "--silent",
+                "--show-error",
+                "--compressed",
+                "--max-time",
+                &timeout_seconds,
+                "--header",
+                "Accept: application/json",
+                "--config",
+                "-",
+                url,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        apply_process_limits(&mut command, &self.config);
+        let mut child = command
+            .spawn()
+            .map_err(|err| ToolError::new(format!("Brave Search exec failed: {err}")))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ToolError::new("Brave Search stdin unavailable"))?;
+        stdin
+            .write_all(format!("header = \"X-Subscription-Token: {api_key}\"\n").as_bytes())
+            .map_err(|err| ToolError::new(format!("Brave Search auth write failed: {err}")))?;
+        drop(stdin);
+        let output = child
+            .wait_with_output()
+            .map_err(|err| ToolError::new(format!("Brave Search wait failed: {err}")))?;
+        Ok(ChromeOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn run_curl(&self, url: &str) -> Result<ChromeOutput, ToolError> {
+        let timeout_seconds = self.config.timeout_ms.saturating_add(999) / 1_000;
+        let timeout_seconds = timeout_seconds.max(1).to_string();
+        let mut command = Command::new("curl");
+        command
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--max-redirs",
+                "5",
+                "--proto",
+                "=http,https",
+                "--max-time",
+                &timeout_seconds,
+                url,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        apply_process_limits(&mut command, &self.config);
+        let output = command
+            .output()
+            .map_err(|err| ToolError::new(format!("curl browser exec failed: {err}")))?;
+        Ok(ChromeOutput {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 
@@ -227,6 +375,7 @@ impl Tool for BrowserTool {
     fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
         let request = parse_request(input)?;
         match request {
+            BrowserRequest::Search { query } => self.search(&query),
             BrowserRequest::Fetch { url } => self.fetch(&url),
             BrowserRequest::Screenshot { url } => self.screenshot(&url),
             BrowserRequest::Evaluate { url, js } => self.evaluate(&url, &js),
@@ -243,6 +392,7 @@ struct ChromeOutput {
 
 #[derive(Debug)]
 enum BrowserRequest {
+    Search { query: String },
     Fetch { url: String },
     Screenshot { url: String },
     Evaluate { url: String, js: String },
@@ -251,7 +401,10 @@ enum BrowserRequest {
 #[derive(Debug, Deserialize)]
 struct JsonBrowserRequest {
     action: String,
+    #[serde(default)]
     url: String,
+    #[serde(default)]
+    query: String,
     #[serde(default)]
     js: String,
 }
@@ -265,9 +418,17 @@ fn parse_request(input: &str) -> Result<BrowserRequest, ToolError> {
     if trimmed.starts_with('{') {
         let json: JsonBrowserRequest = serde_json::from_str(trimmed)
             .map_err(|err| ToolError::new(format!("browser input parse failed: {err}")))?;
+        if json.action == "search" {
+            return Ok(BrowserRequest::Search { query: json.query });
+        }
         return from_parts(&json.action, &json.url, &json.js);
     }
 
+    if let Some(query) = trimmed.strip_prefix("search ") {
+        return Ok(BrowserRequest::Search {
+            query: query.trim().to_string(),
+        });
+    }
     if let Some(url) = trimmed.strip_prefix("fetch ") {
         return from_parts("fetch", url.trim(), "");
     }
@@ -415,6 +576,9 @@ fn read_pipe_bytes<T: Read>(pipe: Option<T>) -> Vec<u8> {
 fn domain_allowed(host: &str, allowed_domains: &[String]) -> bool {
     for domain in allowed_domains {
         let normalized = domain.trim().trim_start_matches('.').to_lowercase();
+        if normalized == "*" {
+            return true;
+        }
         if normalized.is_empty() {
             continue;
         }
@@ -427,6 +591,146 @@ fn domain_allowed(host: &str, allowed_domains: &[String]) -> bool {
         }
     }
     false
+}
+
+fn readable_html(html: &str) -> String {
+    const MAX_OUTPUT_CHARS: usize = 50_000;
+    if html.trim_start().starts_with("<?xml") && html.contains("<rss") {
+        return readable_rss(html);
+    }
+    let document = Html::parse_document(html);
+    let mut output = String::new();
+    if let Ok(selector) = Selector::parse("body") {
+        if let Some(body) = document.select(&selector).next() {
+            let text = body.text().collect::<Vec<_>>().join(" ");
+            output.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+        }
+    }
+    if let Ok(selector) = Selector::parse("a[href]") {
+        output.push_str("\n\nLinks:\n");
+        for link in document.select(&selector).take(80) {
+            let Some(href) = link.value().attr("href") else {
+                continue;
+            };
+            let label = link
+                .text()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !label.is_empty() {
+                output.push_str(&format!("- {label}: {href}\n"));
+            }
+        }
+    }
+    output.chars().take(MAX_OUTPUT_CHARS).collect()
+}
+
+fn readable_rss(xml: &str) -> String {
+    const MAX_RESULTS: usize = 12;
+    let mut output = String::from("Live search results:\n");
+    let mut remaining = xml;
+    let mut count = 0;
+
+    while count < MAX_RESULTS {
+        let Some(item_start) = remaining.find("<item>") else {
+            break;
+        };
+        remaining = &remaining[item_start + "<item>".len()..];
+        let Some(item_end) = remaining.find("</item>") else {
+            break;
+        };
+        let item = &remaining[..item_end];
+        remaining = &remaining[item_end + "</item>".len()..];
+
+        let title = xml_tag_text(item, "title").unwrap_or_default();
+        let link = xml_tag_text(item, "link").unwrap_or_default();
+        let published = xml_tag_text(item, "pubDate").unwrap_or_default();
+        if title.is_empty() || link.is_empty() {
+            continue;
+        }
+
+        count += 1;
+        output.push_str(&format!("{count}. {title}\n"));
+        if !published.is_empty() {
+            output.push_str(&format!("   Published: {published}\n"));
+        }
+        output.push_str(&format!("   URL: {link}\n"));
+    }
+
+    if count == 0 {
+        "Live search returned no results.".to_string()
+    } else {
+        output
+    }
+}
+
+#[derive(Deserialize)]
+struct BraveSearchResponse {
+    web: Option<BraveResultGroup>,
+    news: Option<BraveResultGroup>,
+}
+
+#[derive(Deserialize)]
+struct BraveResultGroup {
+    #[serde(default)]
+    results: Vec<BraveResult>,
+}
+
+#[derive(Deserialize)]
+struct BraveResult {
+    title: String,
+    url: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    extra_snippets: Vec<String>,
+}
+
+fn readable_brave_results(raw: &str) -> Result<String, ToolError> {
+    const MAX_RESULTS: usize = 12;
+    let response: BraveSearchResponse = serde_json::from_str(raw)
+        .map_err(|err| ToolError::new(format!("Brave Search response parse failed: {err}")))?;
+    let mut results = response
+        .web
+        .into_iter()
+        .flat_map(|group| group.results)
+        .chain(response.news.into_iter().flat_map(|group| group.results))
+        .take(MAX_RESULTS)
+        .collect::<Vec<_>>();
+    if results.is_empty() {
+        return Err(ToolError::new("Brave Search returned no results"));
+    }
+
+    let mut output = String::from("Live Brave Search results:\n");
+    for (index, result) in results.drain(..).enumerate() {
+        output.push_str(&format!("{}. {}\n", index + 1, result.title));
+        output.push_str(&format!("   URL: {}\n", result.url));
+        if !result.description.trim().is_empty() {
+            output.push_str(&format!("   Snippet: {}\n", result.description.trim()));
+        }
+        for snippet in result.extra_snippets.into_iter().take(2) {
+            if !snippet.trim().is_empty() {
+                output.push_str(&format!("   Additional snippet: {}\n", snippet.trim()));
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn xml_tag_text(input: &str, tag: &str) -> Option<String> {
+    let start_marker = format!("<{tag}>");
+    let end_marker = format!("</{tag}>");
+    let start = input.find(&start_marker)? + start_marker.len();
+    let end = input[start..].find(&end_marker)? + start;
+    let raw = input[start..end]
+        .trim()
+        .trim_start_matches("<![CDATA[")
+        .trim_end_matches("]]>");
+    let fragment = Html::parse_fragment(raw);
+    let text = fragment.root_element().text().collect::<Vec<_>>().join(" ");
+    Some(text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn temp_path(prefix: &str, extension: &str) -> PathBuf {

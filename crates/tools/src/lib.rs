@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-pub use browser::{BrowserTool, BrowserToolConfig};
+pub use browser::{BraveSearchCredentials, BrowserTool, BrowserToolConfig};
 pub use traits::{Tool as ToolAsync, ToolResult as ToolResultAsync, ToolSpec as ToolSpecAsync};
 
 const BROWSER_MAX_OUTPUT_CHARS: usize = 50_000;
@@ -127,6 +127,7 @@ impl Tool for FileWriteTool {
 
 pub struct RestrictedBashTool {
     enabled: bool,
+    unrestricted_in_vm: bool,
     max_output_bytes: usize,
     working_dir: PathBuf,
 }
@@ -644,6 +645,19 @@ impl RestrictedBashTool {
     pub fn new(enabled: bool, working_dir: PathBuf) -> Self {
         Self {
             enabled,
+            unrestricted_in_vm: false,
+            max_output_bytes: 32 * 1024,
+            working_dir,
+        }
+    }
+
+    /// Full root shell for a disposable hardware-isolated microVM.
+    ///
+    /// This must never be registered for host-only or process-level sandboxes.
+    pub fn new_root_sandbox(working_dir: PathBuf) -> Self {
+        Self {
+            enabled: true,
+            unrestricted_in_vm: true,
             max_output_bytes: 32 * 1024,
             working_dir,
         }
@@ -656,25 +670,28 @@ impl Tool for RestrictedBashTool {
             return Err(ToolError::new("bash tool disabled"));
         }
 
-        // very small guardrails. this is still dangerous; enable explicitly.
-        let lower = input.to_lowercase();
-        for banned in [
-            "rm ",
-            "sudo",
-            "curl ",
-            "wget ",
-            "ssh ",
-            "scp ",
-            "nc ",
-            "netcat",
-            "file://",
-            "data:",
-            "javascript:",
-        ] {
-            if lower.contains(banned) {
-                return Err(ToolError::new(format!(
-                    "bash blocked by policy: contains '{banned}'"
-                )));
+        if !self.unrestricted_in_vm {
+            // Small guardrails for process-level uses. Firecracker root shells use
+            // `new_root_sandbox` and rely on the microVM as the trust boundary.
+            let lower = input.to_lowercase();
+            for banned in [
+                "rm ",
+                "sudo",
+                "curl ",
+                "wget ",
+                "ssh ",
+                "scp ",
+                "nc ",
+                "netcat",
+                "file://",
+                "data:",
+                "javascript:",
+            ] {
+                if lower.contains(banned) {
+                    return Err(ToolError::new(format!(
+                        "bash blocked by policy: contains '{banned}'"
+                    )));
+                }
             }
         }
 
@@ -828,55 +845,78 @@ impl Tool for CodeExecutionTool {
         std::fs::write(&script_path, &spec.code)
             .map_err(|e| ToolError::new(format!("write failed: {}", e)))?;
 
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| ToolError::new(format!("runtime error: {}", e)))?;
+        let mut child = std::process::Command::new(binary)
+            .arg(&script_path)
+            .current_dir(&self.workspace_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| ToolError::new(format!("execution failed: {err}")))?;
 
-        let timeout_secs = self.timeout_secs;
-        let script_path_for_exec = script_path.clone();
-        let result = rt.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs as u64),
-                tokio::task::spawn_blocking(move || {
-                    std::process::Command::new(binary)
-                        .arg(script_path_for_exec)
-                        .output()
-                }),
-            )
-            .await
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ToolError::new("failed to capture stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ToolError::new("failed to capture stderr"))?;
+        let stdout_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut reader = stdout;
+            std::io::Read::read_to_end(&mut reader, &mut bytes).map(|_| bytes)
         });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let mut reader = stderr;
+            std::io::Read::read_to_end(&mut reader, &mut bytes).map(|_| bytes)
+        });
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(self.timeout_secs as u64);
+        let (status, timed_out) = loop {
+            match child
+                .try_wait()
+                .map_err(|err| ToolError::new(format!("execution failed: {err}")))?
+            {
+                Some(status) => break (status, false),
+                None if std::time::Instant::now() >= deadline => {
+                    child
+                        .kill()
+                        .map_err(|err| ToolError::new(format!("execution kill failed: {err}")))?;
+                    let status = child
+                        .wait()
+                        .map_err(|err| ToolError::new(format!("execution reap failed: {err}")))?;
+                    break (status, true);
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        };
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| ToolError::new("stdout reader panicked"))?
+            .map_err(|err| ToolError::new(format!("stdout read failed: {err}")))?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| ToolError::new("stderr reader panicked"))?
+            .map_err(|err| ToolError::new(format!("stderr read failed: {err}")))?;
 
         let _ = std::fs::remove_file(&script_path);
 
-        match result {
-            Ok(Ok(Ok(output))) => {
-                let code_result = CodeResult {
-                    exit_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    timed_out: false,
-                };
-                Ok(ToolResult {
-                    ok: output.status.success(),
-                    output: serde_json::to_string(&code_result)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                })
-            }
-            Ok(Ok(Err(e))) => Err(ToolError::new(format!("execution failed: {}", e))),
-            Ok(Err(e)) => Err(ToolError::new(format!("task failed: {}", e))),
-            Err(_) => {
-                let code_result = CodeResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: format!("execution timed out after {}s", timeout_secs),
-                    timed_out: true,
-                };
-                Ok(ToolResult {
-                    ok: false,
-                    output: serde_json::to_string(&code_result)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                })
-            }
-        }
+        let code_result = CodeResult {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: if timed_out {
+                format!("execution timed out after {}s", self.timeout_secs)
+            } else {
+                String::from_utf8_lossy(&stderr).to_string()
+            },
+            timed_out,
+        };
+        Ok(ToolResult {
+            ok: status.success() && !timed_out,
+            output: serde_json::to_string(&code_result).unwrap_or_else(|_| "{}".to_string()),
+        })
     }
 }
 
