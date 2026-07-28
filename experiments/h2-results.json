@@ -1,0 +1,181 @@
+{
+  "generated_at_ms": 1785135029608,
+  "environment": {
+    "kernel": "Linux 7.0.12-arch1-1",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700K",
+    "firecracker": "Firecracker v1.14.0",
+    "vcpus": 2,
+    "guest_memory_mib": 512,
+    "cold_start_trials": 10,
+    "restart_trials": 5,
+    "execution_trials": 20
+  },
+  "security": {
+    "payloads": [
+      {
+        "id": "host-file-read",
+        "category": "host filesystem confidentiality",
+        "command": "cat '/home/sk/Projekts/ironclaw/target/h2-evaluation/1785134906722-2733048/host-fixtures/host-secret.txt'",
+        "process": {
+          "ok": true,
+          "output": "IRONCLAW_H2_SECRET_1785134906722-2733048",
+          "latency_ms": 31.800033
+        },
+        "microvm": {
+          "ok": false,
+          "output": "cat: /home/sk/Projekts/ironclaw/target/h2-evaluation/1785134906722-2733048/host-fixtures/host-secret.txt: No such file or directory\n",
+          "latency_ms": 7.021197
+        },
+        "process_attack_succeeded": true,
+        "microvm_attack_succeeded": false,
+        "microvm_contained": true
+      },
+      {
+        "id": "host-file-write",
+        "category": "host filesystem integrity",
+        "command": "printf '%s' compromised > '/home/sk/Projekts/ironclaw/target/h2-evaluation/1785134906722-2733048/host-fixtures/host-marker.txt' && echo WRITE_OK",
+        "process": {
+          "ok": true,
+          "output": "WRITE_OK",
+          "latency_ms": 84.052436
+        },
+        "microvm": {
+          "ok": false,
+          "output": "sh: 1: cannot create /home/sk/Projekts/ironclaw/target/h2-evaluation/1785134906722-2733048/host-fixtures/host-marker.txt: Directory nonexistent\n",
+          "latency_ms": 5.434561
+        },
+        "process_attack_succeeded": true,
+        "microvm_attack_succeeded": false,
+        "microvm_contained": true
+      },
+      {
+        "id": "host-environment-read",
+        "category": "host environment confidentiality",
+        "command": "printenv IRONCLAW_H2_SECRET",
+        "process": {
+          "ok": true,
+          "output": "IRONCLAW_H2_SECRET_1785134906722-2733048",
+          "latency_ms": 66.992209
+        },
+        "microvm": {
+          "ok": false,
+          "output": "",
+          "latency_ms": 9.427075
+        },
+        "process_attack_succeeded": true,
+        "microvm_attack_succeeded": false,
+        "microvm_contained": true
+      },
+      {
+        "id": "host-device-access",
+        "category": "host device isolation",
+        "command": "if [ -r /dev/kvm ]; then echo KVM_VISIBLE; else echo KVM_HIDDEN; fi",
+        "process": {
+          "ok": true,
+          "output": "KVM_VISIBLE",
+          "latency_ms": 90.618506
+        },
+        "microvm": {
+          "ok": true,
+          "output": "KVM_HIDDEN\n",
+          "latency_ms": 9.075410000000002
+        },
+        "process_attack_succeeded": true,
+        "microvm_attack_succeeded": false,
+        "microvm_contained": true
+      },
+      {
+        "id": "host-namespace-observation",
+        "category": "host namespace isolation",
+        "command": "cat /proc/sys/kernel/hostname",
+        "process": {
+          "ok": true,
+          "output": "skpc-arch",
+          "latency_ms": 88.512428
+        },
+        "microvm": {
+          "ok": true,
+          "output": "(none)\n",
+          "latency_ms": 8.808263
+        },
+        "process_attack_succeeded": true,
+        "microvm_attack_succeeded": false,
+        "microvm_contained": true
+      }
+    ],
+    "process_attacks_succeeded": 5,
+    "microvm_attacks_succeeded": 0,
+    "microvm_payloads_contained": 5,
+    "total_payloads": 5
+  },
+  "performance": {
+    "process_start_ms": {
+      "samples": 20,
+      "mean": 44.70603575,
+      "median": 36.448197,
+      "p95": 94.004255,
+      "min": 25.528226,
+      "max": 94.004255
+    },
+    "microvm_cold_start_ms": {
+      "samples": 10,
+      "mean": 6080.0113174,
+      "median": 6083.671050999999,
+      "p95": 6102.5858499999995,
+      "min": 6052.566065,
+      "max": 6102.5858499999995
+    },
+    "microvm_recovery_ms": {
+      "samples": 5,
+      "mean": 6613.8757574,
+      "median": 6622.865863999999,
+      "p95": 6632.473980000001,
+      "min": 6592.086954,
+      "max": 6632.473980000001
+    },
+    "process_noop_ms": {
+      "samples": 20,
+      "mean": 44.70603575,
+      "median": 36.448197,
+      "p95": 94.004255,
+      "min": 25.528226,
+      "max": 94.004255
+    },
+    "microvm_noop_ms": {
+      "samples": 20,
+      "mean": 1.8492505000000001,
+      "median": 1.7409050000000001,
+      "p95": 3.675941,
+      "min": 1.669891,
+      "max": 3.675941
+    },
+    "process_peak_rss_kib": 4108,
+    "microvm_host_rss_kib": 72672,
+    "configured_guest_memory_mib": 512,
+    "process_cpu_workload": {
+      "wall_ms": 922.271068,
+      "cpu_ms": 850.0,
+      "cpu_utilization_percent": 92.16379321572732
+    },
+    "microvm_cpu_workload": {
+      "wall_ms": 321.314932,
+      "cpu_ms": 320.0,
+      "cpu_utilization_percent": 99.59076536162969
+    }
+  },
+  "determination": {
+    "h2_supported": false,
+    "containment_supported": true,
+    "overhead_measured": true,
+    "overhead_acceptable_for_long_lived_sessions": true,
+    "cold_start_acceptable_for_per_request_isolation": false,
+    "snapshot_start_target_evaluated": false,
+    "summary": "H2 is partially supported. Firecracker contained 5/5 evaluated host-resource attacks and its warm overhead is acceptable for long-lived sessions, but the 6.08-second cold start is not acceptable for per-request isolation. The sub-500 ms snapshot-resume target is unevaluated because snapshot restore is not implemented."
+  },
+  "limitations": [
+    "The payload suite tests host filesystem, environment, device, process-namespace, and write isolation; it is not a proof that Firecracker, the guest kernel, or the host integration has no vulnerabilities.",
+    "The microVM was deliberately offline. Current TAP networking does not enforce domain allow-lists, so network-policy containment is outside this H2 result.",
+    "Measurements are from one host and one Firecracker/kernel/rootfs configuration; CPU and latency values should not be generalized to other machines.",
+    "Cold starts are measured without snapshots. Snapshot-resume latency and the stated sub-500 ms target remain future work."
+  ]
+}

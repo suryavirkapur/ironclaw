@@ -7,9 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    let temp_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/firecracker-tmp");
+    std::fs::create_dir_all(&temp_dir).map_err(|err| format!("create temp dir failed: {err}"))?;
+    std::env::set_var("TMPDIR", &temp_dir);
+
     let firecracker_bin = env_or_default("FIRECRACKER_BIN", "firecracker");
     let kernel_path = path_env_or_default("KERNEL_PATH", "kernels/firecracker/vmlinux-6.1.155.bin");
-    let rootfs_path = path_env_or_default("ROOTFS_PATH", "rootfs/build/guest-rootfs.ext4");
+    let rootfs_path = path_env_or_default("ROOTFS_PATH", "rootfs/build/ubuntu-24.04.ext4");
     let api_socket_dir = path_env_or_default("API_SOCKET_DIR", "/tmp/ironclaw-fc");
     let vsock_uds_dir = path_env_or_default("VSOCK_UDS_DIR", "/tmp/ironclaw/vsock");
     let vsock_port = std::env::var("VSOCK_PORT")
@@ -24,10 +28,16 @@ async fn main() -> Result<(), String> {
         api_socket_dir,
         vsock_uds_dir,
         vsock_port,
+        vcpus: 2,
+        memory_mib: 2048,
+        enable_network: false,
     });
 
     let user_id = format!("smoke-{}", std::process::id());
-    let brain_path = PathBuf::from(format!("/tmp/ironclaw-smoke-{}", std::process::id()));
+    let brain_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/firecracker-smoke")
+        .join(&user_id)
+        .join("brain.ext4");
 
     let mut vm = manager
         .start_vm(VmConfig {
@@ -50,6 +60,7 @@ async fn main() -> Result<(), String> {
             cap_token: cap_token.clone(),
             allowed_tools: vec![],
             execution_mode: "host_only".to_string(),
+            brave_api_key: String::new(),
         })),
     };
 

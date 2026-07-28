@@ -25,6 +25,7 @@ pub struct VmInstance {
 pub trait VmManager: Send + Sync {
     async fn start_vm(&self, config: VmConfig) -> Result<VmInstance, VmError>;
     async fn stop_vm(&self, user_id: &str) -> Result<(), VmError>;
+    async fn stop_all(&self) -> Result<(), VmError>;
     async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError>;
 }
 
@@ -111,6 +112,14 @@ impl VmManager for StubVmManager {
         Ok(())
     }
 
+    async fn stop_all(&self) -> Result<(), VmError> {
+        self.running_users
+            .lock()
+            .map_err(|_| VmError::new("stub vm manager lock poisoned"))?
+            .clear();
+        Ok(())
+    }
+
     async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError> {
         let running_users = self
             .running_users
@@ -124,6 +133,7 @@ impl VmManager for StubVmManager {
 pub struct FirecrackerManager {
     config: FirecrackerManagerConfig,
     handles: Arc<Mutex<HashMap<String, znskr_firecracker::runtime::handle::MicroVmHandle>>>,
+    storage_lock: Arc<Mutex<()>>,
 }
 
 #[cfg(feature = "firecracker")]
@@ -141,8 +151,8 @@ pub struct FirecrackerManagerConfig {
     pub vcpus: u8,
     /// Memory in MiB for each VM.
     pub memory_mib: u32,
-    /// Disk quota in MB for brain storage.
-    pub disk_quota_mb: u32,
+    /// Attach a TAP network device. Disable for offline workloads.
+    pub enable_network: bool,
 }
 
 #[cfg(feature = "firecracker")]
@@ -151,6 +161,7 @@ impl FirecrackerManager {
         Self {
             config,
             handles: Arc::new(Mutex::new(HashMap::new())),
+            storage_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -166,13 +177,135 @@ impl FirecrackerManager {
         self.handles.lock().await.contains_key(user_id)
     }
 
-    fn check_brain_quota(&self, brain_path: &std::path::Path) -> Option<(u64)> {
-        if brain_path.exists() {
-            if let Ok(metadata) = std::fs::metadata(brain_path) {
-                return Some(metadata.len());
-            }
+    fn prepare_instance_rootfs(
+        base_rootfs: &std::path::Path,
+        brain_path: &std::path::Path,
+    ) -> Result<PathBuf, VmError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = std::fs::metadata(base_rootfs)
+            .map_err(|err| VmError::new(format!("base rootfs metadata failed: {err}")))?;
+        if !metadata.is_file() {
+            return Err(VmError::new("base rootfs must be a regular ext4 image"));
         }
-        None
+        if metadata.permissions().mode() & 0o222 != 0 {
+            return Err(VmError::new(format!(
+                "base rootfs must be immutable (chmod 0444 {}); refusing to attach a writable base",
+                base_rootfs.display()
+            )));
+        }
+
+        let user_dir = brain_path
+            .parent()
+            .ok_or_else(|| VmError::new("brain path has no per-user parent"))?;
+        let vm_dir = user_dir.join("vm");
+        std::fs::create_dir_all(&vm_dir)
+            .map_err(|err| VmError::new(format!("create per-user vm dir failed: {err}")))?;
+
+        let instance_path = vm_dir.join("rootfs.ext4");
+        let origin_path = vm_dir.join("rootfs.origin");
+        let base_identity = Self::base_rootfs_identity(base_rootfs, &metadata)?;
+
+        if instance_path.exists() {
+            let origin = std::fs::read_to_string(&origin_path).map_err(|err| {
+                VmError::new(format!(
+                    "per-user rootfs exists without readable origin metadata: {err}; \
+                     preserve or remove {} explicitly",
+                    instance_path.display()
+                ))
+            })?;
+            if origin.trim() != base_identity {
+                tracing::warn!(
+                    "per-user rootfs {} was created from a different base; preserving it",
+                    instance_path.display()
+                );
+            }
+            return Ok(instance_path);
+        }
+        if origin_path.exists() {
+            return Err(VmError::new(format!(
+                "rootfs origin metadata exists without {}; remove the incomplete metadata explicitly",
+                instance_path.display()
+            )));
+        }
+
+        let temp_suffix = format!("tmp-{}", std::process::id());
+        let temp_instance = vm_dir.join(format!("rootfs.ext4.{temp_suffix}"));
+        let temp_origin = vm_dir.join(format!("rootfs.origin.{temp_suffix}"));
+        if temp_instance.exists() || temp_origin.exists() {
+            return Err(VmError::new(format!(
+                "stale rootfs preparation files exist under {}; remove them explicitly",
+                vm_dir.display()
+            )));
+        }
+
+        let prepare_result = (|| -> Result<(), VmError> {
+            let copy = std::process::Command::new("cp")
+                .arg("--reflink=always")
+                .arg("--sparse=auto")
+                .arg("--")
+                .arg(base_rootfs)
+                .arg(&temp_instance)
+                .output()
+                .map_err(|err| VmError::new(format!("rootfs clone command failed: {err}")))?;
+            if !copy.status.success() {
+                let stderr = String::from_utf8_lossy(&copy.stderr);
+                return Err(VmError::new(format!(
+                    "copy-on-write rootfs clone failed with status {}: {}; \
+                     the per-user storage filesystem must support reflinks",
+                    copy.status,
+                    stderr.trim()
+                )));
+            }
+            std::fs::set_permissions(&temp_instance, std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| {
+                    VmError::new(format!("set instance rootfs permissions failed: {err}"))
+                })?;
+            std::fs::write(&temp_origin, format!("{base_identity}\n"))
+                .map_err(|err| VmError::new(format!("write rootfs origin failed: {err}")))?;
+            std::fs::rename(&temp_instance, &instance_path)
+                .map_err(|err| VmError::new(format!("publish instance rootfs failed: {err}")))?;
+            std::fs::rename(&temp_origin, &origin_path)
+                .map_err(|err| VmError::new(format!("publish rootfs origin failed: {err}")))?;
+            Ok(())
+        })();
+        if let Err(err) = prepare_result {
+            let _ = std::fs::remove_file(&temp_instance);
+            let _ = std::fs::remove_file(&temp_origin);
+            let _ = std::fs::remove_file(&instance_path);
+            return Err(err);
+        }
+
+        tracing::info!(
+            "created isolated per-user rootfs {} from immutable base {}",
+            instance_path.display(),
+            base_rootfs.display()
+        );
+        Ok(instance_path)
+    }
+
+    fn base_rootfs_identity(
+        base_rootfs: &std::path::Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<String, VmError> {
+        let sidecar = PathBuf::from(format!("{}.sha256", base_rootfs.display()));
+        if sidecar.exists() {
+            let value = std::fs::read_to_string(&sidecar)
+                .map_err(|err| VmError::new(format!("read rootfs checksum failed: {err}")))?;
+            let hash = value.split_whitespace().next().unwrap_or_default();
+            if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(VmError::new("base rootfs checksum sidecar is malformed"));
+            }
+            return Ok(format!("sha256:{hash}"));
+        }
+
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        Ok(format!("metadata:{}:{modified}", metadata.len()))
     }
 }
 
@@ -192,27 +325,17 @@ impl VmManager for FirecrackerManager {
             tracing::warn!("failed to setup network firewall for {}: {}", user_id, e);
         }
 
-        if let Some(limit) = self.check_brain_quota(&config.brain_path) {
-            tracing::info!(
-                "brain disk usage for {}: {} bytes (limit: {} MB)",
-                user_id,
-                limit.0,
-                self.config.disk_quota_mb
-            );
-            if limit.0 >= (self.config.disk_quota_mb as u64) * 1024 * 1024 {
-                return Err(VmError::new(format!(
-                    "disk quota exceeded for {}: {} bytes at limit {} MB",
-                    user_id, limit.0, self.config.disk_quota_mb
-                )));
-            }
-        }
-
         // If one already exists, stop it first.
         let existing = { self.handles.lock().await.remove(&user_id) };
         if let Some(mut handle) = existing {
             let _ = handle.shutdown().await;
             let _ = handle.kill().await;
         }
+
+        let instance_rootfs = {
+            let _storage_guard = self.storage_lock.lock().await;
+            Self::prepare_instance_rootfs(&self.config.rootfs_path, &config.brain_path)?
+        };
 
         let api_socket = self.config.api_socket_dir.join(format!("{user_id}.sock"));
         let vsock_uds_path = self
@@ -225,7 +348,7 @@ impl VmManager for FirecrackerManager {
         }
 
         let mut builder = znskr_firecracker::runtime::builder::MicroVmBuilder::<
-            znskr_firecracker::network::slirp::SlirpNetBackend,
+            znskr_firecracker::network::tap_backend::TapNetBackend,
         >::new()
         .firecracker_bin(&self.config.firecracker_bin)
         .kernel(&self.config.kernel_path)
@@ -233,12 +356,11 @@ impl VmManager for FirecrackerManager {
         .vm_id(user_id.clone())
         .vsock(3, &vsock_uds_path)
         .vcpus(self.config.vcpus)
-        .memory_mib(self.config.memory_mib);
-
-        if self.config.rootfs_path.is_dir() {
-            builder = builder.rootfs_dir(&self.config.rootfs_path);
-        } else {
-            builder = builder.rootfs(&self.config.rootfs_path);
+        .memory_mib(self.config.memory_mib)
+        .rootfs(&instance_rootfs);
+        if self.config.enable_network {
+            builder =
+                builder.network(znskr_firecracker::network::tap_backend::TapNetBackend::default());
         }
 
         let handle = builder
@@ -334,11 +456,8 @@ impl VmManager for FirecrackerManager {
     async fn stop_vm(&self, user_id: &str) -> Result<(), VmError> {
         let handle = { self.handles.lock().await.remove(user_id) };
         if let Some(mut handle) = handle {
-            let _ = handle.shutdown().await;
-            handle
-                .kill()
-                .await
-                .map_err(|e| VmError::new(format!("firecracker kill failed: {e}")))?;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = handle.kill().await;
         }
 
         if let Err(e) = crate::network_firewall::cleanup_vm_network(user_id) {
@@ -352,7 +471,103 @@ impl VmManager for FirecrackerManager {
         Ok(())
     }
 
+    async fn stop_all(&self) -> Result<(), VmError> {
+        let handles = {
+            let mut handles = self.handles.lock().await;
+            handles.drain().collect::<Vec<_>>()
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        for (user_id, mut handle) in handles {
+            if let Err(err) = handle.kill().await {
+                tracing::debug!("firecracker {} already stopped: {}", user_id, err);
+            }
+            if let Err(err) = crate::network_firewall::cleanup_vm_network(&user_id) {
+                tracing::warn!(
+                    "failed to cleanup network firewall for {}: {}",
+                    user_id,
+                    err
+                );
+            }
+            if let Err(err) = crate::cgroup::cleanup_cgroup(&user_id) {
+                tracing::warn!("failed to cleanup cgroup for {}: {}", user_id, err);
+            }
+        }
+        Ok(())
+    }
+
     async fn is_vm_running(&self, user_id: &str) -> Result<bool, VmError> {
         Ok(self.is_running_inner(user_id).await)
+    }
+}
+
+#[cfg(all(test, feature = "firecracker"))]
+mod tests {
+    use super::FirecrackerManager;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn test_root(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!(
+                "ironclaw-rootfs-{name}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+    }
+
+    #[test]
+    fn immutable_base_is_cloned_and_each_user_keeps_private_changes() {
+        let root = test_root("isolated");
+        let base = root.join("base.ext4");
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(&base, b"clean-base").expect("write base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o444))
+            .expect("make base immutable");
+
+        let alice_brain = root.join("alice/brain.ext4");
+        let bob_brain = root.join("bob/brain.ext4");
+        let alice =
+            FirecrackerManager::prepare_instance_rootfs(&base, &alice_brain).expect("clone alice");
+        let bob =
+            FirecrackerManager::prepare_instance_rootfs(&base, &bob_brain).expect("clone bob");
+        assert_ne!(alice, bob);
+        assert_eq!(std::fs::read(&alice).expect("read alice"), b"clean-base");
+        assert_eq!(std::fs::read(&bob).expect("read bob"), b"clean-base");
+
+        std::fs::write(&alice, b"alice-private").expect("modify alice clone");
+        let alice_reused =
+            FirecrackerManager::prepare_instance_rootfs(&base, &alice_brain).expect("reuse alice");
+        assert_eq!(alice_reused, alice);
+        assert_eq!(
+            std::fs::read(&alice_reused).expect("read alice private"),
+            b"alice-private"
+        );
+        assert_eq!(std::fs::read(&bob).expect("read bob again"), b"clean-base");
+        assert_eq!(
+            std::fs::read(&base).expect("read immutable base"),
+            b"clean-base"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writable_base_is_rejected() {
+        let root = test_root("writable");
+        let base = root.join("base.ext4");
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(&base, b"mutable").expect("write base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o644))
+            .expect("make base writable");
+
+        let result =
+            FirecrackerManager::prepare_instance_rootfs(&base, &root.join("user/brain.ext4"));
+        assert!(result.is_err());
+        assert!(result
+            .expect_err("writable base should fail")
+            .to_string()
+            .contains("must be immutable"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -26,3 +26,7 @@ firecracker = ["znskr-firecracker"]
 [[example]]
 name = "firecracker_vsock_roundtrip"
 required-features = ["firecracker"]
+
+[[example]]
+name = "h2_security_performance"
+required-features = ["firecracker"]

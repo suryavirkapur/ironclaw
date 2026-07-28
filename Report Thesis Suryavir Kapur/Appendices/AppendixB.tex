@@ -18,17 +18,18 @@ by allowing the agent to generate executable code during a task, but doing so
 introduces a severe security problem: generated code is untrusted and may be
 incorrect, malicious, prompt-injected, or resource-exhaustive.
 
-This paper will present IronClaw, a self-hosted agent platform that separates
+This paper presents IronClaw, a self-hosted agent platform that separates
 trusted host control from untrusted guest execution. The host daemon manages
 model interaction, policy, memory, configuration, and sandbox lifecycle, while a
 guest runtime executes generated tools inside a restricted environment. The
 system supports process, container, and Firecracker-backed microVM runtimes over
-a shared protobuf protocol. The planned evaluation will compare fixed-tool and
-dynamic-tool agents on multi-step tasks, measure containment against malicious
-payloads, and quantify latency and resource overhead across sandbox backends.
-The expected contribution is a practical architecture and empirical methodology
-for making runtime tool synthesis useful without collapsing the host trust
-boundary.
+a shared protobuf protocol. Across three repetitive domains, dynamic synthesis
+reduced billed input tokens by 53--61\% relative to having no synthesis while
+preserving correctness. Firecracker contained all five evaluated host-resource
+attacks, while the ordinary process baseline contained none, at the cost of a
+6.08-second median cold start and a 512\,MiB configured guest-memory ceiling.
+The contribution is a practical architecture and empirical methodology for
+making runtime tool synthesis useful without collapsing the host trust boundary.
 
 \section{Planned Paper Sections}
 \begin{enumerate}
@@ -77,7 +78,7 @@ boundary.
 
     \item \textbf{Evaluation Methodology}
     \begin{itemize}
-        \item Utility benchmarks for fixed-tool versus dynamic-tool agents.
+        \item Utility benchmarks for no synthesis versus dynamic synthesis.
         \item Security red-team payload suite.
         \item Performance measurements for latency, CPU, memory, and startup.
         \item Reproducibility and environment details.
@@ -94,7 +95,7 @@ boundary.
     \item \textbf{Discussion}
     \begin{itemize}
         \item When dynamic synthesis helps.
-        \item When fixed tools are sufficient.
+        \item When synthesis reuse is sufficient to amortize creation.
         \item Security and usability trade-offs.
         \item Operational limits of microVM-based isolation.
     \end{itemize}

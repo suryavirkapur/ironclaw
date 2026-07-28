@@ -17,6 +17,8 @@ The submitted project package should include the following folders and files:
     \item \texttt{kernels/firecracker/}: kernel images used by the Firecracker
     runtime.
     \item \texttt{docs/}: supporting architecture and setup documentation.
+    \item \texttt{experiments/}: H1 TypeScript harness, deterministic fixtures,
+    raw JSON results, and rendered H1/H2 result reports.
     \item \texttt{Report Thesis Suryavir Kapur/}: thesis report source and
     generated PDF.
 \end{itemize}
@@ -37,6 +39,11 @@ cargo build --workspace
 Run the test suite using:
 \begin{verbatim}
 cargo test --workspace
+\end{verbatim}
+
+Check every feature and target, including the Firecracker evaluation example:
+\begin{verbatim}
+cargo check --workspace --all-targets --all-features
 \end{verbatim}
 
 Build the thesis PDF from the report directory using:
@@ -60,12 +67,34 @@ permissions, and guest execution mode. Before running Firecracker tests, verify
 that the configured kernel path, root filesystem path, vsock settings, and file
 permissions match the local machine.
 
+\section{Evaluation Reproduction}
+Reproduce H1 from the \texttt{experiments/} directory:
+\begin{verbatim}
+export DEEPSEEK_API_KEY=...
+npm install
+npm run experiment
+\end{verbatim}
+This regenerates \texttt{RESULTS.md} and \texttt{results.json}. Individual
+conditions can be selected, for example \texttt{npm run experiment -{}- E5:B}.
+
+Reproduce H2 from the repository root on a Linux host with KVM, Firecracker,
+the documented guest kernel, and the immutable Ubuntu root filesystem:
+\begin{verbatim}
+cargo run -p common --features firecracker \
+  --example h2_security_performance
+\end{verbatim}
+This writes \texttt{experiments/H2\_RESULTS.md} and
+\texttt{experiments/h2-results.json}.
+
 \section{Configuration Details}
 The main configuration files are:
 \begin{itemize}
-    \item \texttt{configs/ironclawd.toml}: host daemon configuration.
-    \item \texttt{configs/irowclaw.default.toml}: default guest runtime
-    configuration.
+    \item \texttt{configs/ironclawd.firecracker.toml}: Firecracker-backed host
+    daemon configuration.
+    \item \texttt{configs/ironclawd.guest-tools.toml}: guest-tools execution
+    mode.
+    \item \texttt{configs/ironclawd.guest-autonomous.toml}: autonomous guest
+    execution mode.
     \item \texttt{configs/irowclaw.allow-bash.toml}: guest runtime configuration
     that permits shell execution for controlled test scenarios.
 \end{itemize}
@@ -80,5 +109,6 @@ and evaluation environment. Before submission, verify that:
     mode;
     \item Firecracker kernel and root filesystem paths are documented;
     \item smoke-test commands and expected outputs are recorded;
+    \item H1 and H2 result JSON files can be regenerated with the commands above;
     \item generated report and presentation PDFs are included.
 \end{itemize}

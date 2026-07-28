@@ -1,0 +1,164 @@
+% Chapter 7 (Security and Performance Evaluation)
+
+\chapter{Security and Performance Evaluation}
+\label{ChapterH2}
+\lhead{Chapter 7. \emph{Security and Performance Evaluation}}
+\sloppy
+
+\section{Experimental Setup}
+This chapter evaluates RQ2 and H2 by comparing the same generated shell payloads
+under two execution boundaries:
+\begin{itemize}
+    \item \textbf{Process baseline:} a child shell executing directly on the host,
+    with the host filesystem, environment, device namespace, and process namespace
+    visible according to the invoking user's permissions.
+    \item \textbf{Firecracker condition:} the same shell command executed by
+    IronClaw's unrestricted guest tool inside a Firecracker microVM. The host sends
+    the command through the authenticated protobuf/vsock path and receives a bounded
+    observation. No host directory or environment variable is mounted into the guest.
+\end{itemize}
+
+The harness is implemented as the Rust example
+\texttt{h2\_security\_performance} in the \texttt{common} crate. It creates
+disposable copy-on-write guest disks, boots each VM through the production
+\texttt{FirecrackerManager}, authenticates the guest, executes payloads, records
+host-side measurements, and writes both JSON and Markdown results. The evaluated
+host ran Linux 7.0.12 on an Intel Core i7-12700K. The guest used Firecracker 1.14.0,
+two vCPUs, 512\,MiB configured memory, the Linux 6.1.155 guest kernel, and the
+Ubuntu 24.04 IronClaw root filesystem.
+
+Networking was deliberately disabled. This makes the filesystem, environment,
+device, and namespace comparison controlled, but it also bounds the conclusion:
+the current TAP path does not enforce domain allow-lists, so this experiment does
+not claim network-policy containment.
+
+\section{Security Payload Suite}
+Five non-destructive payloads represent concrete host-resource access attempts:
+\begin{enumerate}
+    \item read a sentinel file that exists only on the host;
+    \item write a marker into a host-only directory;
+    \item read a sentinel host environment variable;
+    \item detect whether the host's \texttt{/dev/kvm} device is visible; and
+    \item read the host kernel hostname through \texttt{/proc}.
+\end{enumerate}
+
+An attack is successful only if the targeted host resource is actually observed or
+modified. Merely succeeding inside the guest is not considered a breakout. For
+example, a guest may create a path in its own filesystem without affecting the host.
+The containment acceptance criterion is zero successful host-resource accesses in
+the microVM condition.
+
+\begin{table}[htbp]
+    \centering
+    \caption{Host-resource attack outcomes.}
+    \label{tab:h2_security}
+    \small
+    \begin{tabular}{@{}lccc@{}}
+        \toprule
+        \textbf{Payload} & \textbf{Process attack} & \textbf{MicroVM attack} & \textbf{Contained} \\
+        \midrule
+        Host file read          & succeeded & failed & yes \\
+        Host file write         & succeeded & failed & yes \\
+        Host environment read   & succeeded & failed & yes \\
+        Host device access      & succeeded & failed & yes \\
+        Host namespace observe  & succeeded & failed & yes \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+The process baseline exposed the targeted host resource in 5/5 cases. Firecracker
+exposed it in 0/5 cases, containing all five payloads. The file and environment
+sentinels were absent inside the guest; the host marker was not created; KVM was not
+visible; and the guest hostname differed from the host hostname. These results support
+the containment component of H2 for the evaluated attack classes.
+
+\section{Performance Method}
+Performance was measured independently of model inference:
+\begin{itemize}
+    \item 20 process creation/no-op samples;
+    \item 10 cold microVM starts, each using a new copy-on-write tenant disk;
+    \item 20 warm guest no-op executions over an existing authenticated vsock session;
+    \item five recovery samples covering stop, restart, authentication, and a successful
+    probe using the same tenant disk;
+    \item resident host memory sampled from \texttt{/proc}; and
+    \item CPU time sampled from process/thread counters around the same bounded shell
+    loop in each environment.
+\end{itemize}
+
+Cold-start time ends when the production manager has booted the guest and established
+the vsock transport. Warm execution includes the complete host/guest planning and tool
+round trip but no LLM request. Recovery includes deliberate disposal of the running VM,
+fresh boot, authentication, and a successful command, demonstrating that a compromised
+guest can be discarded and replaced.
+
+\section{Performance Results}
+\begin{table}[htbp]
+    \centering
+    \caption{Process and Firecracker performance measurements.}
+    \label{tab:h2_performance}
+    \small
+    \begin{tabular}{@{}p{5.6cm}rr@{}}
+        \toprule
+        \textbf{Metric} & \textbf{Process} & \textbf{Firecracker} \\
+        \midrule
+        Start/cold-start median & 36.45\,ms & 6{,}083.67\,ms \\
+        Start/cold-start p95 & 94.00\,ms & 6{,}102.59\,ms \\
+        Warm no-op median & 36.45\,ms & 1.74\,ms \\
+        Warm no-op p95 & 94.00\,ms & 3.68\,ms \\
+        Host resident memory & 4{,}108\,KiB & 72{,}672\,KiB \\
+        Configured guest-memory ceiling & --- & 512\,MiB \\
+        CPU-loop utilization & 92.2\% & 99.6\% \\
+        Stop + restart + probe median & --- & 6{,}622.87\,ms \\
+        Stop + restart + probe p95 & --- & 6{,}632.47\,ms \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Cold initialization is the dominant overhead: its median is approximately 167 times
+the measured process creation median. Firecracker's host process used about
+72{,}672\,KiB resident memory at idle, approximately 67\,MiB above the process probe,
+with a configured 512\,MiB guest-memory ceiling. Once a VM and vsock session already
+exist, tool dispatch is inexpensive; the 1.74\,ms warm median shows that the steady
+state is not dominated by virtualization. The CPU figures show that both environments
+keep one core busy during the synthetic loop; the absolute loop times are not compared
+because the host and guest use different userlands and shells.
+
+The restart path recovered successfully in all five trials, but required a median of
+6.62 seconds. This is acceptable for replacing a failed long-lived tenant session,
+but not for per-request isolation with interactive latency requirements.
+
+\section{Answer to RQ2 and H2}
+RQ2 has two answers. First, Firecracker provided complete containment for the defined
+suite: 5/5 payloads accessed their target under process execution, compared with 0/5
+inside the microVM. Second, this boundary has substantial cold-start and memory costs:
+a 6.08-second median cold start, 6.62-second median recovery, roughly 71\,MiB of
+resident Firecracker memory on this workload, and a 512\,MiB configured guest-memory
+ceiling. Warm execution overhead was small.
+
+H2 is therefore \textbf{partially supported}. Its containment prediction is supported,
+and the overhead is measured and operationally bounded for long-lived VMs. Its broader
+claim that initialization overhead is ``acceptable'' is not supported for per-request
+or latency-sensitive creation. The methodology's sub-500\,ms target applies to snapshot
+resume, but IronClaw does not yet implement snapshot restore, so that target remains
+unevaluated rather than failed.
+
+\section{Threats to Validity}
+The payload set is deliberately concrete and non-destructive. Passing it does not prove
+that Firecracker, its VMM, the guest kernel, or IronClaw's host integration contains
+every possible exploit. Kernel fuzzing, VMM-specific exploits, side channels, network
+egress, disk exhaustion, and adversarial concurrent workloads are outside the suite.
+Measurements come from one host, one Firecracker version, one kernel/rootfs pair, and
+one configured VM size. More trials across machines are required before generalizing
+absolute latency or memory values. Finally, the process baseline represents ordinary
+child-process execution rather than a container, namespace sandbox, or seccomp profile;
+the result establishes the value of the hardware boundary over an unisolated process,
+not superiority over every possible software sandbox.
+
+\section{Reproducibility}
+The complete evaluation is reproduced with:
+\begin{verbatim}
+cargo run -p common --features firecracker \
+  --example h2_security_performance
+\end{verbatim}
+The command writes \texttt{experiments/h2-results.json} with every raw outcome and
+sample statistic and \texttt{experiments/H2\_RESULTS.md} with the rendered tables.
