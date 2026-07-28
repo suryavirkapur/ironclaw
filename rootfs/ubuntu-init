@@ -1,0 +1,51 @@
+#!/bin/bash
+set -u
+exec >/dev/ttyS0 2>&1
+
+echo "ironclaw ubuntu guest: starting as uid=$(id -u)"
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+export DEBIAN_FRONTEND=noninteractive
+
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+
+ip link set lo up
+for attempt in $(seq 1 50); do
+  if ip link show eth0 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+ip link set eth0 up
+ip addr replace 172.16.0.2/24 dev eth0
+ip route replace default via 172.16.0.1 dev eth0
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' >/etc/resolv.conf
+
+mkdir -p /mnt/brain/workspace /mnt/brain/cron /mnt/brain/logs /mnt/brain/db
+if [[ ! -f /mnt/brain/cron/jobs.toml ]]; then
+  printf 'jobs = []\n' >/mnt/brain/cron/jobs.toml
+fi
+
+export IRONCLAW_VSOCK=1
+export IRONCLAW_VSOCK_PORT="${IRONCLAW_VSOCK_PORT:-5000}"
+export IROWCLAW_CONFIG="${IROWCLAW_CONFIG:-/mnt/brain/config/irowclaw.toml}"
+
+while true; do
+  echo "ironclaw ubuntu guest: starting root agent"
+  /usr/local/bin/irowclaw
+  status=$?
+  if [[ "${status}" -eq 0 ]]; then
+    echo "ironclaw ubuntu guest: agent stopped cleanly; powering off"
+    sync
+    mount -o remount,ro /dev/vda /
+    poweroff -f
+    exit 0
+  fi
+  echo "ironclaw ubuntu guest: agent exited status=${status}; restarting"
+  sleep 1
+done
