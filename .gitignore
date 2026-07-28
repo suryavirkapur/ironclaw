@@ -13,7 +13,28 @@
 
 # Generated guest rootfs build output
 /rootfs/build/
+/rootfs/cache/
+
+# Artifacts received from guest sessions
+/artifacts/
 
 # Local kernel artifacts (do not commit)
 /kernels/linux-src-*
 /kernels/fc-*
+
+# Generated thesis build artifacts
+/Report Thesis Suryavir Kapur/**/*.aux
+/Report Thesis Suryavir Kapur/**/*.bbl
+/Report Thesis Suryavir Kapur/**/*.blg
+/Report Thesis Suryavir Kapur/**/*.lof
+/Report Thesis Suryavir Kapur/**/*.log
+/Report Thesis Suryavir Kapur/**/*.lot
+/Report Thesis Suryavir Kapur/**/*.nav
+/Report Thesis Suryavir Kapur/**/*.out
+/Report Thesis Suryavir Kapur/**/*.snm
+/Report Thesis Suryavir Kapur/**/*.toc
+/Report Thesis Suryavir Kapur/**/*.vrb
+/Report Thesis Suryavir Kapur/Figures/src/build/
+/Report Thesis Suryavir Kapur/Thesis.pdf
+/Report Thesis Suryavir Kapur/main.pdf
+/Report Thesis Suryavir Kapur/slides.pdf

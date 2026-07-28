@@ -46,6 +46,14 @@ fn main() {
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );
     config.type_attribute(
+        ".ironclaw.Artifact",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.UploadedFile",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
         ".ironclaw.JobTrigger",
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );

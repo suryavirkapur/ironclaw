@@ -20,7 +20,9 @@ use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
 use common::logging::{init_logging, LoggingConfig, LoggingHandle};
-use common::proto::ironclaw::{agent_control, message_envelope, AgentControl, MessageEnvelope};
+use common::proto::ironclaw::{
+    agent_control, message_envelope, AgentControl, Artifact, MessageEnvelope, UploadedFile,
+};
 use common::slack::{
     parse_slack_message, validate_slack_signature, SlackResponse, SlackUrlVerification,
 };
@@ -28,12 +30,13 @@ use daemon::GatewayCommand;
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
-use llm_client::{ConversationMessage, LlmClient, ToolPlan};
+use llm_client::{ConversationMessage, LlmClient, ToolLoopObservation, ToolPlan};
 use memory::{
     build_memory_block, forget_memories_by_query, forget_memory_by_id, initialize_schema,
     list_pinned_memories, maybe_summarize_session, redact_secrets, retrieve_memories,
     upsert_memory, NewMemory,
 };
+use prost::Message as ProstMessage;
 use rusqlite::Connection;
 use security::auth::{channel_allowed, validate_webhook_secret};
 use security::pairing::PairingManager;
@@ -55,6 +58,7 @@ use whatsapp::should_enable_whatsapp;
 
 static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
+const MAX_INBOUND_FILE_BYTES: usize = 8 * 1024 * 1024;
 const TELEGRAM_TRANSCRIPT_MAX_TURNS: usize = 50;
 const TELEGRAM_RETRY_MAX_ATTEMPTS: usize = 2;
 const MEMORY_RETRIEVAL_LIMIT: usize = 10;
@@ -204,7 +208,7 @@ async fn run_server(
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|err| IronclawError::new(format!("sigterm signal setup failed: {err}")))?;
 
-    tokio::select! {
+    let result = tokio::select! {
         result = &mut server_task => {
             let _ = shutdown_tx.send(true);
             join_server_task_result(result)
@@ -247,7 +251,11 @@ async fn run_server(
             )
             .await
         }
+    };
+    if let Err(err) = state.vm_manager.stop_all().await {
+        tracing::warn!("vm shutdown cleanup failed: {err}");
     }
+    result
 }
 
 fn test_no_bind_enabled() -> bool {
@@ -414,7 +422,10 @@ impl AppState {
         let firecracker_runtime_enabled =
             config.firecracker.enabled && cfg!(feature = "firecracker");
         if config.firecracker.enabled && !cfg!(feature = "firecracker") {
-            eprintln!("firecracker requested but feature is disabled; falling back to local guest");
+            return Err(IronclawError::new(
+                "firecracker is enabled in config but this binary was built without the \
+                 firecracker feature",
+            ));
         }
         let local_guest = !firecracker_runtime_enabled;
         let guest_config_path = Arc::new(guest_config_path());
@@ -436,6 +447,9 @@ impl AppState {
                         .firecracker
                         .vsock_port
                         .unwrap_or_else(common::firecracker::default_vsock_port),
+                    vcpus: config.firecracker.vcpus,
+                    memory_mib: config.firecracker.memory_mib,
+                    enable_network: true,
                 });
                 (Arc::new(manager) as Arc<dyn VmManager>, None)
             }
@@ -553,6 +567,14 @@ async fn ws_handler(
     headers: HeaderMap,
     Query(query): Query<WsQuery>,
 ) -> Response {
+    if state.local_guest || state.execution_mode == RuntimeExecutionMode::HostOnly {
+        tracing::warn!("websocket denied: Firecracker guest execution is required");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Firecracker guest execution is required",
+        )
+            .into_response();
+    }
     if let Err(err) = ensure_channel_allowed(&state, "websocket") {
         tracing::warn!("websocket denied by channel allowlist: {err}");
         return (StatusCode::FORBIDDEN, "channel not allowed").into_response();
@@ -651,6 +673,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 cap_token: cap_token.clone(),
                 allowed_tools: guest_allowed_tools.clone(),
                 execution_mode: state.execution_mode.to_wire().to_string(),
+                brave_api_key: String::new(),
             })),
         };
         let challenge_json = match serde_json::to_string(&challenge) {
@@ -721,6 +744,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 cap_token: cap_token.clone(),
                 allowed_tools: guest_allowed_tools.clone(),
                 execution_mode: state.execution_mode.to_wire().to_string(),
+                brave_api_key: brave_api_key_for_guest(),
             })),
         };
         if let Err(err) = transport.send(challenge).await {
@@ -899,6 +923,81 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                             break;
                         }
                     }
+                } else if let Message::Binary(data) = message {
+                    let upload = match decode_websocket_upload(data.as_ref()) {
+                        Ok(upload) => upload,
+                        Err(err) => {
+                            let envelope = MessageEnvelope {
+                                user_id: user_id.clone(),
+                                session_id: session_id.clone(),
+                                msg_id,
+                                timestamp_ms: now_ms().unwrap_or(0),
+                                cap_token: String::new(),
+                                payload: Some(message_envelope::Payload::StreamDelta(
+                                    common::proto::ironclaw::StreamDelta {
+                                        delta: err.to_string(),
+                                        done: true,
+                                    },
+                                )),
+                            };
+                            msg_id = msg_id.saturating_add(1);
+                            let Ok(payload) = serde_json::to_string(&envelope) else {
+                                break;
+                            };
+                            if sender.send(Message::Text(payload.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    if let Err(err) = enforce_rate_limit(
+                        &state,
+                        &user_id,
+                        "websocket",
+                        upload.data.len() as u64,
+                    ) {
+                        tracing::warn!(
+                            "rate limit hit user_id={} channel=websocket upload err={}",
+                            user_id,
+                            err
+                        );
+                        break;
+                    }
+                    if state.execution_mode == RuntimeExecutionMode::HostOnly {
+                        tracing::warn!("websocket upload denied outside Firecracker");
+                        break;
+                    }
+                    last_user_activity = std::time::Instant::now();
+                    if guest_sleeping {
+                        if send_agent_control(
+                            &mut transport,
+                            &user_id,
+                            &session_id,
+                            msg_id,
+                            agent_control::Command::Wake,
+                            "uploaded_file",
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        msg_id = msg_id.saturating_add(1);
+                        guest_sleeping = false;
+                    }
+                    let envelope = MessageEnvelope {
+                        user_id: user_id.clone(),
+                        session_id: session_id.clone(),
+                        msg_id,
+                        timestamp_ms: now_ms().unwrap_or(0),
+                        cap_token: String::new(),
+                        payload: Some(message_envelope::Payload::UploadedFile(upload)),
+                    };
+                    msg_id = msg_id.saturating_add(1);
+                    if let Err(err) = transport.send(envelope).await {
+                        tracing::error!("send uploaded file to guest failed: {err}");
+                        break;
+                    }
                 }
             }
 
@@ -1033,6 +1132,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
             }
         }
     }
+
+    let _ = send_agent_control(
+        &mut transport,
+        &user_id,
+        &session_id,
+        msg_id,
+        agent_control::Command::Shutdown,
+        "websocket_closed",
+    )
+    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), transport.recv()).await;
+    drop(transport);
+    if let Err(err) = state.vm_manager.stop_vm(&user_id).await {
+        tracing::warn!("websocket vm cleanup failed for {}: {}", user_id, err);
+    }
 }
 
 async fn send_agent_control(
@@ -1067,7 +1181,7 @@ async fn handle_guest_job_trigger(
     guest_sleeping: &mut bool,
     trigger: common::proto::ironclaw::JobTrigger,
     source: &str,
-) -> Result<(), IronclawError> {
+) -> Result<String, IronclawError> {
     tracing::debug!(
         "job trigger route source={} user_id={} session_id={} job_id={} guest_sleeping={}",
         source,
@@ -1106,13 +1220,16 @@ async fn handle_guest_job_trigger(
         trigger.job_id,
         call_id
     );
-    let status_text =
-        run_scheduled_job_via_guest(transport, user_id, session_id, call_id, &trigger.job_id)
+    let (status_text, notification) =
+        match run_scheduled_job_via_guest(transport, user_id, session_id, call_id, &trigger.job_id)
             .await
-            .unwrap_or_else(|err| {
+        {
+            Ok(output) => ("success", output),
+            Err(err) => {
                 tracing::error!("scheduled job execution failed: {err}");
-                "failed".to_string()
-            });
+                ("failed", "scheduled job failed".to_string())
+            }
+        };
 
     let status_envelope = MessageEnvelope {
         user_id: user_id.to_string(),
@@ -1123,7 +1240,7 @@ async fn handle_guest_job_trigger(
         payload: Some(message_envelope::Payload::JobStatus(
             common::proto::ironclaw::JobStatus {
                 job_id: trigger.job_id,
-                status: status_text,
+                status: status_text.to_string(),
             },
         )),
     };
@@ -1138,7 +1255,7 @@ async fn handle_guest_job_trigger(
         user_id,
         session_id
     );
-    Ok(())
+    Ok(notification)
 }
 
 async fn run_scheduled_job_via_guest(
@@ -1177,7 +1294,7 @@ async fn run_scheduled_job_via_guest(
         if let Some(message_envelope::Payload::ToolCallResponse(resp)) = envelope.payload {
             if resp.call_id == call_id {
                 if resp.ok {
-                    return Ok("success".to_string());
+                    return Ok(resp.output);
                 }
                 return Ok("failed".to_string());
             }
@@ -1668,7 +1785,24 @@ fn guest_config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/mnt/brain/config/irowclaw.toml"))
 }
 
+fn brave_api_key_for_guest() -> String {
+    std::env::var("BRAVE_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+}
+
 fn brain_ext4_path(root: &StdPath, user_id: &str) -> Result<PathBuf, IronclawError> {
+    if user_id.is_empty()
+        || !user_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(IronclawError::new(
+            "user id may contain only ASCII letters, digits, '-' and '_'",
+        ));
+    }
     let user_dir = root.join(user_id);
     std::fs::create_dir_all(&user_dir)
         .map_err(|err| IronclawError::new(format!("create user dir failed: {err}")))?;
@@ -1834,6 +1968,38 @@ fn now_epoch_seconds() -> Result<i64, IronclawError> {
     now_ms().map(|value| (value / 1000) as i64)
 }
 
+fn decode_websocket_upload(data: &[u8]) -> Result<UploadedFile, IronclawError> {
+    let envelope = MessageEnvelope::decode(data)
+        .map_err(|err| IronclawError::new(format!("invalid file upload envelope: {err}")))?;
+    let Some(message_envelope::Payload::UploadedFile(mut upload)) = envelope.payload else {
+        return Err(IronclawError::new(
+            "binary WebSocket messages must contain an uploaded file",
+        ));
+    };
+    validate_inbound_upload(&upload)?;
+    if upload.mime_type.trim().is_empty() {
+        upload.mime_type = "application/octet-stream".to_string();
+    }
+    Ok(upload)
+}
+
+fn validate_inbound_upload(upload: &UploadedFile) -> Result<(), IronclawError> {
+    if upload.data.len() > MAX_INBOUND_FILE_BYTES {
+        return Err(IronclawError::new(format!(
+            "file exceeds {} byte upload limit",
+            MAX_INBOUND_FILE_BYTES
+        )));
+    }
+    let valid_filename = StdPath::new(&upload.filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| !name.is_empty() && name != "." && name != "..");
+    if !valid_filename {
+        return Err(IronclawError::new("uploaded filename is invalid"));
+    }
+    Ok(())
+}
+
 fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::Payload, u64) {
     if let Some(rest) = text.strip_prefix("!toolcall ") {
         let mut parts = rest.splitn(2, '\n');
@@ -1864,43 +2030,76 @@ fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::
 async fn host_plan_tool_response(
     state: &AppState,
     user_id: &str,
-    user_text: &str,
+    raw_request: &str,
     allowed_tools: &[String],
     history: Option<&[ConversationMessage]>,
 ) -> Result<String, String> {
-    if let Some(plan) = deterministic_guest_tools_plan(user_text, allowed_tools) {
-        return tool_plan_to_json(&plan);
+    let request = decode_host_plan_request(raw_request);
+    if request.observations.is_empty() {
+        if let Some(plan) = deterministic_guest_tools_plan(&request.user_text, allowed_tools) {
+            return tool_plan_to_json(&plan);
+        }
     }
 
-    let memory_block = load_memory_block(state, user_id, user_text, MEMORY_PROMPT_BUDGET_CHARS)
-        .map_err(|err| format!("memory retrieval failed: {err}"))?;
-
-    let plan = match state
-        .llm_client
-        .plan_tool_or_answer(
-            user_text,
-            allowed_tools,
-            Some(memory_block.as_str()),
-            history,
-        )
-        .await
-    {
-        Ok(plan) => plan,
-        Err(err) => {
-            // GuestTools mode should remain usable even when no LLM key is configured.
-            // Fall back to a deterministic stub answer instead of failing the whole guest loop.
-            let msg = err.to_string();
-            if msg.contains("missing openai_api_key") {
-                ToolPlan::Answer {
-                    text: format!("stub: {}", user_text.trim()),
-                }
-            } else {
-                return Err(format!("host plan failed: {err}"));
-            }
+    let memory_block = load_memory_block(
+        state,
+        user_id,
+        &request.user_text,
+        MEMORY_PROMPT_BUDGET_CHARS,
+    )
+    .map_err(|err| format!("memory retrieval failed: {err}"))?;
+    const HOST_PLANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+    let planning = state.llm_client.plan_tool_or_answer(
+        &request.user_text,
+        allowed_tools,
+        Some(memory_block.as_str()),
+        history,
+        Some(&request.observations),
+    );
+    let plan = match tokio::time::timeout(HOST_PLANNER_TIMEOUT, planning).await {
+        Err(_) => {
+            return Err(format!(
+                "host planner timed out after {} seconds",
+                HOST_PLANNER_TIMEOUT.as_secs()
+            ));
         }
+        Ok(result) => match result {
+            Ok(plan) => plan,
+            Err(err) => {
+                // GuestTools mode should remain usable even when no LLM key is configured.
+                // Fall back to a deterministic stub answer instead of failing the whole guest loop.
+                let msg = err.to_string();
+                if msg.contains("missing openai_api_key") {
+                    ToolPlan::Answer {
+                        text: format!("stub: {}", request.user_text.trim()),
+                    }
+                } else {
+                    return Err(format!("host plan failed: {err}"));
+                }
+            }
+        },
     };
 
     tool_plan_to_json(&plan)
+}
+
+#[derive(Debug, Deserialize)]
+struct HostPlanRequest {
+    version: u8,
+    user_text: String,
+    #[serde(default)]
+    observations: Vec<ToolLoopObservation>,
+}
+
+fn decode_host_plan_request(raw: &str) -> HostPlanRequest {
+    match serde_json::from_str::<HostPlanRequest>(raw) {
+        Ok(request) if request.version == 1 && !request.user_text.trim().is_empty() => request,
+        _ => HostPlanRequest {
+            version: 0,
+            user_text: raw.to_string(),
+            observations: Vec::new(),
+        },
+    }
 }
 
 fn deterministic_guest_tools_plan(user_text: &str, allowed_tools: &[String]) -> Option<ToolPlan> {
@@ -2010,6 +2209,7 @@ async fn run_host_turn(
             allowed_tools,
             Some(memory_block.as_str()),
             history,
+            None,
         )
         .await
         .map_err(|err| IronclawError::new(format!("tool planning failed: {err}")))?;
@@ -2120,12 +2320,27 @@ struct TelegramUpdate {
 #[derive(Clone, Deserialize)]
 struct TelegramMessage {
     text: Option<String>,
+    caption: Option<String>,
+    document: Option<TelegramDocument>,
     chat: TelegramChat,
+}
+
+#[derive(Clone, Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    file_size: Option<u64>,
 }
 
 #[derive(Clone, Deserialize)]
 struct TelegramChat {
     id: i64,
+}
+
+#[derive(Deserialize)]
+struct TelegramFile {
+    file_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2139,6 +2354,7 @@ struct TelegramGetUpdatesRequest<'a> {
 struct TelegramSendMessageRequest<'a> {
     chat_id: i64,
     text: &'a str,
+    parse_mode: &'static str,
 }
 
 impl TelegramClient {
@@ -2181,8 +2397,94 @@ impl TelegramClient {
         Ok(body.result)
     }
 
+    async fn download_document(
+        &self,
+        document: &TelegramDocument,
+        prompt: &str,
+    ) -> Result<UploadedFile, IronclawError> {
+        if document
+            .file_size
+            .is_some_and(|size| size > MAX_INBOUND_FILE_BYTES as u64)
+        {
+            return Err(IronclawError::new(format!(
+                "file exceeds {} byte upload limit",
+                MAX_INBOUND_FILE_BYTES
+            )));
+        }
+        let response = self
+            .client
+            .post(self.url("getFile"))
+            .json(&serde_json::json!({"file_id": document.file_id}))
+            .send()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram getfile request failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| IronclawError::new(format!("telegram getfile failed: {err}")))?;
+        let body: TelegramApiResponse<TelegramFile> = response
+            .json()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram getfile decode failed: {err}")))?;
+        if !body.ok {
+            return Err(IronclawError::new("telegram getfile returned not ok"));
+        }
+        let file_path = body
+            .result
+            .file_path
+            .ok_or_else(|| IronclawError::new("telegram getfile omitted file path"))?;
+        let response = self
+            .client
+            .get(format!(
+                "https://api.telegram.org/file/bot{}/{}",
+                self.bot_token, file_path
+            ))
+            .send()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram file download failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| IronclawError::new(format!("telegram file download failed: {err}")))?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_INBOUND_FILE_BYTES as u64)
+        {
+            return Err(IronclawError::new(format!(
+                "file exceeds {} byte upload limit",
+                MAX_INBOUND_FILE_BYTES
+            )));
+        }
+        let data = response
+            .bytes()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram file read failed: {err}")))?
+            .to_vec();
+        let filename = document
+            .file_name
+            .as_deref()
+            .or_else(|| {
+                StdPath::new(&file_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+            })
+            .unwrap_or("upload.bin")
+            .to_string();
+        let upload = UploadedFile {
+            filename,
+            mime_type: document
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            data,
+            prompt: prompt.to_string(),
+        };
+        validate_inbound_upload(&upload)?;
+        Ok(upload)
+    }
+
     async fn send_message(&self, chat_id: i64, text: &str) -> Result<(), IronclawError> {
-        let request = TelegramSendMessageRequest { chat_id, text };
+        let request = TelegramSendMessageRequest {
+            chat_id,
+            text,
+            parse_mode: "HTML",
+        };
         let response = self
             .client
             .post(self.url("sendMessage"))
@@ -2201,6 +2503,55 @@ impl TelegramClient {
             })?;
         if !body.ok {
             return Err(IronclawError::new("telegram sendmessage returned not ok"));
+        }
+        Ok(())
+    }
+
+    async fn send_artifact(&self, chat_id: i64, artifact: &Artifact) -> Result<(), IronclawError> {
+        const TELEGRAM_ARTIFACT_MAX_BYTES: usize = 8 * 1024 * 1024;
+        if artifact.data.len() > TELEGRAM_ARTIFACT_MAX_BYTES {
+            return Err(IronclawError::new("artifact exceeds Telegram size limit"));
+        }
+        let is_photo = matches!(artifact.mime_type.as_str(), "image/png" | "image/jpeg");
+        let method = if is_photo {
+            "sendPhoto"
+        } else {
+            "sendDocument"
+        };
+        let field = if is_photo { "photo" } else { "document" };
+        let filename = StdPath::new(&artifact.filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| IronclawError::new("artifact filename is invalid"))?;
+        let part = reqwest::multipart::Part::bytes(artifact.data.clone())
+            .file_name(filename.to_string())
+            .mime_str(&artifact.mime_type)
+            .map_err(|err| IronclawError::new(format!("artifact MIME failed: {err}")))?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part(field, part);
+        if !artifact.caption.trim().is_empty() {
+            form = form.text(
+                "caption",
+                artifact.caption.chars().take(1024).collect::<String>(),
+            );
+        }
+        let response = self
+            .client
+            .post(self.url(method))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram artifact request failed: {err}")))?
+            .error_for_status()
+            .map_err(|err| IronclawError::new(format!("telegram artifact failed: {err}")))?;
+        let body: TelegramApiResponse<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|err| IronclawError::new(format!("telegram artifact decode failed: {err}")))?;
+        if !body.ok {
+            return Err(IronclawError::new("telegram artifact returned not ok"));
         }
         Ok(())
     }
@@ -2329,6 +2680,19 @@ async fn run_telegram_loop(
     let client = TelegramClient::new(settings.bot_token.clone());
     let mut offset = load_telegram_offset(&settings.offset_file)?;
     let mut sessions = HashMap::<i64, TelegramSession>::new();
+    let mut owner_session = TelegramSession::load(
+        settings.owner_chat_id,
+        &state.host_config.storage.users_root,
+    )?;
+    if state.execution_mode != RuntimeExecutionMode::HostOnly {
+        match ensure_telegram_session_transport(&state, &mut owner_session).await {
+            Ok(()) => tracing::info!("telegram owner Firecracker session is ready"),
+            Err(err) => tracing::warn!(
+                "telegram owner Firecracker session startup failed; will retry on message: {err}"
+            ),
+        }
+    }
+    sessions.insert(settings.owner_chat_id, owner_session);
 
     loop {
         if *shutdown.borrow() {
@@ -2352,28 +2716,48 @@ async fn run_telegram_loop(
                     let Some(message) = update.message else {
                         continue;
                     };
-                    let Some(text) = message.text else {
-                        continue;
-                    };
+                    let chat_id = message.chat.id;
                     tracing::debug!(
                         "channel route source=telegram chat_id={} event=ingress",
-                        message.chat.id
+                        chat_id
                     );
-                    if message.chat.id != settings.owner_chat_id {
-                        tracing::warn!("telegram message denied from chat {}", message.chat.id);
+                    if chat_id != settings.owner_chat_id {
+                        tracing::warn!("telegram message denied from chat {}", chat_id);
                         continue;
                     }
-                    if !sessions.contains_key(&message.chat.id) {
-                        let session = TelegramSession::load(
-                            message.chat.id,
-                            &state.host_config.storage.users_root,
-                        )?;
-                        sessions.insert(message.chat.id, session);
+                    if !sessions.contains_key(&chat_id) {
+                        let session =
+                            TelegramSession::load(chat_id, &state.host_config.storage.users_root)?;
+                        sessions.insert(chat_id, session);
                     }
-                    let Some(session) = sessions.get_mut(&message.chat.id) else {
+                    let upload = if let Some(document) = message.document.as_ref() {
+                        let prompt = message
+                            .caption
+                            .as_deref()
+                            .filter(|caption| !caption.trim().is_empty())
+                            .unwrap_or("Analyze this file and report the important findings.");
+                        match client.download_document(document, prompt).await {
+                            Ok(upload) => Some(upload),
+                            Err(err) => {
+                                tracing::warn!("telegram document download rejected: {err}");
+                                let _ = client.send_message(chat_id, &err.to_string()).await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let text = message.text.as_deref().or(message.caption.as_deref());
+                    if text.is_none() && upload.is_none() {
+                        continue;
+                    }
+                    let Some(session) = sessions.get_mut(&chat_id) else {
                         continue;
                     };
-                    if let Err(err) = enforce_rate_limit(&state, &session.user_id, "telegram", 0) {
+                    let request_cost = upload.as_ref().map_or(0, |file| file.data.len() as u64);
+                    if let Err(err) =
+                        enforce_rate_limit(&state, &session.user_id, "telegram", request_cost)
+                    {
                         tracing::warn!(
                             "rate limit hit user_id={} channel=telegram err={}",
                             session.user_id,
@@ -2384,8 +2768,11 @@ async fn run_telegram_loop(
                             .await;
                         continue;
                     }
+                    let prompt =
+                        text.unwrap_or("Analyze this file and report the important findings.");
                     if let Err(err) =
-                        handle_telegram_text(&state, &client, session, text.as_str()).await
+                        handle_telegram_text(&state, &client, session, prompt, upload.as_ref())
+                            .await
                     {
                         tracing::error!("telegram message handling failed: {err}");
                         let _ = session
@@ -2400,11 +2787,66 @@ async fn run_telegram_loop(
             }
         }
 
+        if let Err(err) = drain_telegram_background_events(&client, &mut sessions).await {
+            tracing::warn!("telegram background event drain failed: {err}");
+        }
         if let Err(err) = enforce_telegram_idle_timeouts(&state, &mut sessions).await {
             tracing::warn!("telegram idle timeout check failed: {err}");
         }
     }
 
+    Ok(())
+}
+
+async fn drain_telegram_background_events(
+    client: &TelegramClient,
+    sessions: &mut HashMap<i64, TelegramSession>,
+) -> Result<(), IronclawError> {
+    const EVENT_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5);
+    for session in sessions.values_mut() {
+        let Some(transport) = session.transport.as_mut() else {
+            continue;
+        };
+        loop {
+            let received = tokio::time::timeout(EVENT_POLL_TIMEOUT, transport.recv()).await;
+            let envelope = match received {
+                Err(_) => break,
+                Ok(Ok(Some(envelope))) => envelope,
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) => {
+                    return Err(IronclawError::new(format!(
+                        "telegram background transport recv failed: {err}"
+                    )));
+                }
+            };
+            match envelope.payload {
+                Some(message_envelope::Payload::JobTrigger(trigger)) => {
+                    let notification = handle_guest_job_trigger(
+                        transport,
+                        &session.user_id,
+                        &session.session_id,
+                        &mut session.msg_id,
+                        &mut session.guest_sleeping,
+                        trigger,
+                        "telegram",
+                    )
+                    .await?;
+                    if !notification.trim().is_empty() {
+                        send_stream_to_telegram(client, session.chat_id, notification.trim())
+                            .await?;
+                    }
+                }
+                Some(message_envelope::Payload::AgentState(_)) => {}
+                Some(other) => {
+                    tracing::warn!(
+                        "telegram ignored unexpected idle guest payload: {:?}",
+                        other
+                    );
+                }
+                None => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2455,6 +2897,7 @@ async fn handle_telegram_text(
     client: &TelegramClient,
     session: &mut TelegramSession,
     text: &str,
+    upload: Option<&UploadedFile>,
 ) -> Result<(), IronclawError> {
     if !session.runtime_banner_sent {
         let banner = telegram_runtime_banner(state.local_guest);
@@ -2481,7 +2924,7 @@ async fn handle_telegram_text(
     let mut attempt = 0usize;
     let mut last_error = IronclawError::new("telegram request failed");
     while attempt < TELEGRAM_RETRY_MAX_ATTEMPTS {
-        match handle_telegram_text_once(state, client, session, text, &history).await {
+        match handle_telegram_text_once(state, client, session, text, upload, &history).await {
             Ok(assistant_text) => {
                 session.append_assistant_message(&assistant_text, now_ms().unwrap_or(0))?;
                 session.transport_failures = 0;
@@ -2516,6 +2959,7 @@ async fn handle_telegram_text_once(
     client: &TelegramClient,
     session: &mut TelegramSession,
     text: &str,
+    upload: Option<&UploadedFile>,
     history: &[ConversationMessage],
 ) -> Result<String, IronclawError> {
     if let Some(message) =
@@ -2531,6 +2975,11 @@ async fn handle_telegram_text_once(
         state.guest_allow_browser,
     );
     if state.execution_mode == RuntimeExecutionMode::HostOnly {
+        if upload.is_some() {
+            return Err(IronclawError::new(
+                "file analysis requires a Firecracker guest",
+            ));
+        }
         let output = run_host_turn(
             state,
             &session.user_id,
@@ -2567,9 +3016,14 @@ async fn handle_telegram_text_once(
         session.guest_sleeping = false;
     }
 
-    let payload = message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
-        text: text.to_string(),
-    });
+    let payload = upload.map_or_else(
+        || {
+            message_envelope::Payload::UserMessage(common::proto::ironclaw::UserMessage {
+                text: text.to_string(),
+            })
+        },
+        |file| message_envelope::Payload::UploadedFile(file.clone()),
+    );
     let timestamp_ms = now_ms().unwrap_or(0);
     let envelope = MessageEnvelope {
         user_id: session.user_id.clone(),
@@ -2597,6 +3051,7 @@ async fn handle_telegram_text_once(
 
     let mut streamed_any = false;
     let mut output = String::new();
+    let mut pending_job_triggers = Vec::new();
     loop {
         let maybe = transport
             .recv()
@@ -2606,17 +3061,7 @@ async fn handle_telegram_text_once(
             return Err(IronclawError::new("guest transport closed"));
         };
         if let Some(message_envelope::Payload::JobTrigger(trigger)) = envelope.payload.clone() {
-            handle_guest_job_trigger(
-                transport,
-                &session.user_id,
-                &session.session_id,
-                &mut session.msg_id,
-                &mut session.guest_sleeping,
-                trigger,
-                "telegram",
-            )
-            .await
-            .map_err(|err| IronclawError::new(format!("job trigger handling failed: {err}")))?;
+            pending_job_triggers.push(trigger);
             continue;
         }
         if matches!(
@@ -2673,6 +3118,16 @@ async fn handle_telegram_text_once(
                 .map_err(|err| IronclawError::new(format!("tool response send failed: {err}")))?;
             continue;
         }
+        if let Some(message_envelope::Payload::Artifact(artifact)) = envelope.payload.clone() {
+            client.send_artifact(session.chat_id, &artifact).await?;
+            output = if artifact.caption.trim().is_empty() {
+                format!("sent artifact {}", artifact.filename)
+            } else {
+                artifact.caption
+            };
+            streamed_any = true;
+            break;
+        }
         if let Some(message_envelope::Payload::StreamDelta(delta)) = envelope.payload {
             if !delta.delta.is_empty() {
                 output.push_str(&delta.delta);
@@ -2682,6 +3137,23 @@ async fn handle_telegram_text_once(
             if delta.done {
                 break;
             }
+        }
+    }
+
+    for trigger in pending_job_triggers {
+        let notification = handle_guest_job_trigger(
+            transport,
+            &session.user_id,
+            &session.session_id,
+            &mut session.msg_id,
+            &mut session.guest_sleeping,
+            trigger,
+            "telegram",
+        )
+        .await
+        .map_err(|err| IronclawError::new(format!("job trigger handling failed: {err}")))?;
+        if !notification.trim().is_empty() {
+            send_stream_to_telegram(client, session.chat_id, notification.trim()).await?;
         }
     }
 
@@ -2712,6 +3184,7 @@ async fn send_guest_auth_challenge(
                 cap_token: cap_token.to_string(),
                 allowed_tools: guest_allowed_tools.to_vec(),
                 execution_mode: execution_mode.to_wire().to_string(),
+                brave_api_key: brave_api_key_for_guest(),
             },
         )),
     };
@@ -2853,7 +3326,17 @@ fn allowed_tools_for_runtime(
     guest_allow_bash: bool,
     guest_allow_browser: bool,
 ) -> Vec<String> {
-    let mut tools = vec!["file_read".to_string(), "file_write".to_string()];
+    let mut tools = vec![
+        "file_read".to_string(),
+        "file_write".to_string(),
+        "schedule_job".to_string(),
+        "list_jobs".to_string(),
+        "weather".to_string(),
+        "publish_artifact".to_string(),
+        "code_exec".to_string(),
+        "tool_install".to_string(),
+        "tool_call".to_string(),
+    ];
     if bash_allowed(local_guest, guest_allow_bash) {
         tools.push("bash".to_string());
     }
@@ -2893,7 +3376,8 @@ async fn send_stream_to_telegram(
 ) -> Result<(), IronclawError> {
     let normalized = if text.trim().is_empty() { " " } else { text };
     for chunk in split_telegram_chunks(normalized, TELEGRAM_CHUNK_MAX_CHARS) {
-        client.send_message(chat_id, &chunk).await?;
+        let html = render_telegram_html(&chunk);
+        client.send_message(chat_id, &html).await?;
     }
     Ok(())
 }
@@ -2906,11 +3390,304 @@ fn split_telegram_chunks(text: &str, max_chars: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut index = 0usize;
     while index < chars.len() {
-        let end = min(chars.len(), index.saturating_add(max_chars));
+        let hard_end = min(chars.len(), index.saturating_add(max_chars));
+        let end = if hard_end == chars.len() {
+            hard_end
+        } else {
+            chars[index..hard_end]
+                .iter()
+                .rposition(|character| *character == '\n')
+                .map(|relative| index + relative + 1)
+                .filter(|boundary| *boundary > index)
+                .unwrap_or(hard_end)
+        };
         out.push(chars[index..end].iter().collect::<String>());
         index = end;
     }
     out
+}
+
+fn render_telegram_html(markdown: &str) -> String {
+    let mut output = String::new();
+    let mut in_code_block = false;
+    let lines = markdown.lines().collect::<Vec<_>>();
+    let mut line_index = 0usize;
+
+    while line_index < lines.len() {
+        let line = lines[line_index];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                output.push_str("</code></pre>\n");
+            } else {
+                output.push_str("<pre><code>");
+            }
+            in_code_block = !in_code_block;
+            line_index += 1;
+            continue;
+        }
+
+        if in_code_block {
+            output.push_str(&escape_telegram_html(line));
+            output.push('\n');
+            line_index += 1;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            output.push('\n');
+            line_index += 1;
+            continue;
+        }
+
+        if line_index + 1 < lines.len()
+            && telegram_table_cells(line).is_some()
+            && telegram_table_separator(lines[line_index + 1])
+        {
+            let mut table_rows = vec![telegram_table_cells(line).unwrap_or_default()];
+            line_index += 2;
+            while line_index < lines.len() {
+                let Some(row) = telegram_table_cells(lines[line_index]) else {
+                    break;
+                };
+                table_rows.push(row);
+                line_index += 1;
+            }
+            output.push_str(&render_telegram_table(&table_rows));
+            output.push('\n');
+            continue;
+        }
+
+        if trimmed.chars().count() >= 3
+            && trimmed
+                .chars()
+                .all(|character| matches!(character, '-' | '_'))
+        {
+            output.push_str("────────\n");
+            line_index += 1;
+            continue;
+        }
+
+        if let Some(heading) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            output.push_str("<b>");
+            output.push_str(&render_telegram_inline(heading));
+            output.push_str("</b>\n");
+            line_index += 1;
+            continue;
+        }
+
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            output.push_str("• ");
+            output.push_str(&render_telegram_inline(item));
+            output.push('\n');
+            line_index += 1;
+            continue;
+        }
+
+        if let Some((number, item)) = telegram_ordered_list_item(trimmed) {
+            output.push_str(number);
+            output.push_str(". ");
+            output.push_str(&render_telegram_inline(item));
+            output.push('\n');
+            line_index += 1;
+            continue;
+        }
+
+        if let Some(quote) = trimmed.strip_prefix("> ") {
+            output.push_str("<blockquote>");
+            output.push_str(&render_telegram_inline(quote));
+            output.push_str("</blockquote>\n");
+            line_index += 1;
+            continue;
+        }
+
+        output.push_str(&render_telegram_inline(line));
+        output.push('\n');
+        line_index += 1;
+    }
+
+    if in_code_block {
+        output.push_str("</code></pre>\n");
+    }
+    let output = output.trim_end();
+    if output.is_empty() {
+        " ".to_string()
+    } else {
+        output.to_string()
+    }
+}
+
+fn telegram_table_cells(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return None;
+    }
+    let cells = trimmed
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| telegram_table_cell_text(cell.trim()))
+        .collect::<Vec<_>>();
+    (cells.len() >= 2).then_some(cells)
+}
+
+fn telegram_table_separator(line: &str) -> bool {
+    let Some(cells) = telegram_table_cells(line) else {
+        return false;
+    };
+    cells.iter().all(|cell| {
+        !cell.is_empty()
+            && cell
+                .chars()
+                .all(|character| matches!(character, '-' | ':' | ' '))
+            && cell.contains('-')
+    })
+}
+
+fn telegram_table_cell_text(cell: &str) -> String {
+    cell.replace("**", "").replace('`', "")
+}
+
+fn render_telegram_table(rows: &[Vec<String>]) -> String {
+    const MAX_CELL_CHARS: usize = 32;
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0usize; column_count];
+    let normalized = rows
+        .iter()
+        .map(|row| {
+            (0..column_count)
+                .map(|column| {
+                    let cell = row.get(column).map(String::as_str).unwrap_or_default();
+                    let truncated = truncate_telegram_table_cell(cell, MAX_CELL_CHARS);
+                    widths[column] = widths[column].max(truncated.chars().count());
+                    truncated
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut table = String::from("<pre>");
+    for (row_index, row) in normalized.iter().enumerate() {
+        for (column, cell) in row.iter().enumerate() {
+            if column > 0 {
+                table.push_str(" | ");
+            }
+            table.push_str(&escape_telegram_html(cell));
+            let padding = widths[column].saturating_sub(cell.chars().count());
+            table.extend(std::iter::repeat_n(' ', padding));
+        }
+        table.push('\n');
+        if row_index == 0 {
+            for (column, width) in widths.iter().enumerate() {
+                if column > 0 {
+                    table.push_str("-+-");
+                }
+                table.extend(std::iter::repeat_n('-', *width));
+            }
+            table.push('\n');
+        }
+    }
+    table.push_str("</pre>");
+    table
+}
+
+fn truncate_telegram_table_cell(cell: &str, max_chars: usize) -> String {
+    let count = cell.chars().count();
+    if count <= max_chars {
+        return cell.to_string();
+    }
+    cell.chars()
+        .take(max_chars.saturating_sub(1))
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+fn telegram_ordered_list_item(line: &str) -> Option<(&str, &str)> {
+    let (number, item) = line.split_once(". ")?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((number, item))
+}
+
+fn render_telegram_inline(input: &str) -> String {
+    let mut output = String::new();
+    let mut remaining = input;
+
+    while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix("**") {
+            if let Some(end) = rest.find("**") {
+                output.push_str("<b>");
+                output.push_str(&render_telegram_inline(&rest[..end]));
+                output.push_str("</b>");
+                remaining = &rest[end + 2..];
+                continue;
+            }
+        }
+        if let Some(rest) = remaining.strip_prefix("~~") {
+            if let Some(end) = rest.find("~~") {
+                output.push_str("<s>");
+                output.push_str(&render_telegram_inline(&rest[..end]));
+                output.push_str("</s>");
+                remaining = &rest[end + 2..];
+                continue;
+            }
+        }
+        if let Some(rest) = remaining.strip_prefix('`') {
+            if let Some(end) = rest.find('`') {
+                output.push_str("<code>");
+                output.push_str(&escape_telegram_html(&rest[..end]));
+                output.push_str("</code>");
+                remaining = &rest[end + 1..];
+                continue;
+            }
+        }
+        if let Some(label) = remaining.strip_prefix('[') {
+            if let Some(label_end) = label.find("](") {
+                let url_start = label_end + 2;
+                if let Some(url_end) = label[url_start..].find(')') {
+                    let url = &label[url_start..url_start + url_end];
+                    if url.starts_with("https://") || url.starts_with("http://") {
+                        output.push_str("<a href=\"");
+                        output.push_str(&escape_telegram_html(url));
+                        output.push_str("\">");
+                        output.push_str(&render_telegram_inline(&label[..label_end]));
+                        output.push_str("</a>");
+                        remaining = &label[url_start + url_end + 1..];
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let character = remaining
+            .chars()
+            .next()
+            .expect("remaining is known to be non-empty");
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            _ => output.push(character),
+        }
+        remaining = &remaining[character.len_utf8()..];
+    }
+    output
+}
+
+fn escape_telegram_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn telegram_transcript_path(users_root: &StdPath, session_id: &str) -> PathBuf {
@@ -3439,16 +4216,19 @@ fn summarize_whatsapp_session_memory(
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_tools_for_runtime, deterministic_guest_tools_plan, handle_guest_job_trigger,
-        load_telegram_offset, load_telegram_transcript, resolve_owner_user_id,
-        save_telegram_offset, save_telegram_transcript, should_enter_idle_sleep,
-        split_telegram_chunks, telegram_firecracker_requirement_error, telegram_transcript_path,
-        ws_text_to_guest_payload, ChannelSource, RuntimeExecutionMode, TelegramApiResponse,
-        TelegramTranscript, TelegramTranscriptMessage, TelegramUpdate, ToolPlan,
+        allowed_tools_for_runtime, brain_ext4_path, decode_host_plan_request,
+        decode_websocket_upload, deterministic_guest_tools_plan, handle_guest_job_trigger,
+        load_telegram_offset, load_telegram_transcript, render_telegram_html,
+        resolve_owner_user_id, save_telegram_offset, save_telegram_transcript,
+        should_enter_idle_sleep, split_telegram_chunks, telegram_firecracker_requirement_error,
+        telegram_transcript_path, validate_inbound_upload, ws_text_to_guest_payload, ChannelSource,
+        RuntimeExecutionMode, TelegramApiResponse, TelegramSendMessageRequest, TelegramTranscript,
+        TelegramTranscriptMessage, TelegramUpdate, ToolPlan, MAX_INBOUND_FILE_BYTES,
         TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
-    use common::proto::ironclaw::{message_envelope, MessageEnvelope};
+    use common::proto::ironclaw::{message_envelope, MessageEnvelope, UploadedFile};
     use common::transport::{LocalTransport, Transport};
+    use prost::Message;
 
     #[test]
     fn tooltest_write_plans_file_write() {
@@ -3490,6 +4270,77 @@ mod tests {
         assert_eq!(chunks[0].chars().count(), 4096);
         assert_eq!(chunks[1].chars().count(), 4096);
         assert_eq!(chunks[2].chars().count(), 808);
+    }
+
+    #[test]
+    fn telegram_chunks_prefer_line_boundaries() {
+        let chunks = split_telegram_chunks("first line\nsecond line\nthird", 13);
+        assert_eq!(chunks, vec!["first line\n", "second line\n", "third"]);
+    }
+
+    #[test]
+    fn telegram_commonmark_is_rendered_as_safe_html() {
+        let markdown = r#"The IP address **5.32.57.218** appears to be from a cloud provider.
+
+---
+
+Done! Here's what I did:
+
+1. **Cleared** the old cron schedule
+2. **Created** a new cron job
+
+- **ID**: thesis-reminder
+- **Schedule**: Every 30 minutes (`*/30 * * * *`)
+- **Message**: "<remind & notify>""#;
+        let html = render_telegram_html(markdown);
+        assert!(html.contains("<b>5.32.57.218</b>"));
+        assert!(html.contains("1. <b>Cleared</b>"));
+        assert!(html.contains("• <b>ID</b>: thesis-reminder"));
+        assert!(html.contains("<code>*/30 * * * *</code>"));
+        assert!(html.contains("&quot;&lt;remind &amp; notify&gt;&quot;"));
+        assert!(!html.contains("**"));
+    }
+
+    #[test]
+    fn telegram_markdown_tables_render_as_aligned_code_tables() {
+        let markdown = r#"**Database Summary**
+
+| Table | Rows | Description |
+|-------|------|-------------|
+| users | 50,000 | Registered users |
+| order_items | 347,266 | Individual mod purchases |
+
+__________
+
+**Top Mod Buyer**
+
+| Metric | Value |
+|--------|-------|
+| Mods Purchased | 45 |
+| Total Spent | $107.10 |"#;
+        let html = render_telegram_html(markdown);
+        assert!(html.contains("<b>Database Summary</b>"));
+        assert!(html.contains("<pre>Table"));
+        assert!(html.contains("users"));
+        assert!(html.contains("order_items"));
+        assert!(html.contains("Metric"));
+        assert!(html.contains("Total Spent"));
+        assert!(html.contains("────────"));
+        assert_eq!(html.matches("<pre>").count(), 2);
+        assert_eq!(html.matches("</pre>").count(), 2);
+        assert!(!html.contains("|-------|"));
+        assert!(!html.contains("__________"));
+    }
+
+    #[test]
+    fn telegram_send_message_selects_html_parse_mode() {
+        let request = TelegramSendMessageRequest {
+            chat_id: 42,
+            text: "<b>formatted</b>",
+            parse_mode: "HTML",
+        };
+        let json = serde_json::to_value(request).expect("serialize sendMessage request");
+        assert_eq!(json["parse_mode"], "HTML");
     }
 
     #[test]
@@ -3639,6 +4490,68 @@ mod tests {
     }
 
     #[test]
+    fn telegram_update_json_parses_pdf_document_and_caption() {
+        let json = r#"{
+            "ok": true,
+            "result": [{
+                "update_id": 78,
+                "message": {
+                    "caption": "Summarize this draft",
+                    "document": {
+                        "file_id": "telegram-file-id",
+                        "file_name": "thesis.tex",
+                        "mime_type": "application/x-tex",
+                        "file_size": 321
+                    },
+                    "chat": { "id": 12345 }
+                }
+            }]
+        }"#;
+        let parsed: TelegramApiResponse<Vec<TelegramUpdate>> =
+            serde_json::from_str(json).expect("parse document update");
+        let message = parsed.result[0].message.as_ref().expect("message");
+        let document = message.document.as_ref().expect("document");
+        assert_eq!(message.caption.as_deref(), Some("Summarize this draft"));
+        assert_eq!(document.file_name.as_deref(), Some("thesis.tex"));
+        assert_eq!(document.mime_type.as_deref(), Some("application/x-tex"));
+        assert_eq!(document.file_size, Some(321));
+    }
+
+    #[test]
+    fn websocket_binary_upload_decodes_protobuf_envelope() {
+        let envelope = MessageEnvelope {
+            user_id: "cli".to_string(),
+            session_id: "test".to_string(),
+            msg_id: 9,
+            timestamp_ms: 0,
+            cap_token: "cap".to_string(),
+            payload: Some(message_envelope::Payload::UploadedFile(UploadedFile {
+                filename: "draft.pdf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                data: b"%PDF".to_vec(),
+                prompt: "Summarize".to_string(),
+            })),
+        };
+        let encoded = envelope.encode_to_vec();
+        let upload = decode_websocket_upload(&encoded).expect("decode upload");
+        assert_eq!(upload.filename, "draft.pdf");
+        assert_eq!(upload.data, b"%PDF");
+        assert_eq!(upload.prompt, "Summarize");
+    }
+
+    #[test]
+    fn inbound_upload_rejects_files_over_eight_megabytes() {
+        let upload = UploadedFile {
+            filename: "too-large.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            data: vec![0; MAX_INBOUND_FILE_BYTES + 1],
+            prompt: String::new(),
+        };
+        let error = validate_inbound_upload(&upload).expect_err("must reject oversized upload");
+        assert!(error.to_string().contains("upload limit"));
+    }
+
+    #[test]
     fn websocket_toolcall_messages_route_as_tool_calls() {
         let (payload, next_msg_id) =
             ws_text_to_guest_payload("!toolcall file_read\nnotes/a.txt", 9);
@@ -3723,7 +4636,7 @@ mod tests {
 
         let mut msg_id = 2u64;
         let mut guest_sleeping = true;
-        handle_guest_job_trigger(
+        let notification = handle_guest_job_trigger(
             &mut host_box,
             "owner",
             "session",
@@ -3736,6 +4649,7 @@ mod tests {
         )
         .await
         .expect("handle job trigger");
+        assert_eq!(notification, "ok");
         assert!(!guest_sleeping);
         assert_eq!(msg_id, 5);
         guest_task.await.expect("guest task");
@@ -3764,5 +4678,36 @@ mod tests {
                 .unwrap_or(now),
             timeout,
         ));
+    }
+
+    #[test]
+    fn iterative_plan_request_decodes_tool_observations() {
+        let raw = serde_json::json!({
+            "version": 1,
+            "user_text": "create and verify a report",
+            "observations": [{
+                "iteration": 1,
+                "tool": "code_exec",
+                "input": "{\"language\":\"python\",\"code\":\"print('ok')\"}",
+                "ok": true,
+                "output": "report.png created"
+            }]
+        })
+        .to_string();
+        let request = decode_host_plan_request(&raw);
+        assert_eq!(request.user_text, "create and verify a report");
+        assert_eq!(request.observations.len(), 1);
+        assert_eq!(request.observations[0].tool, "code_exec");
+        assert!(request.observations[0].ok);
+        assert_eq!(request.observations[0].output, "report.png created");
+    }
+
+    #[test]
+    fn per_user_storage_rejects_path_traversal_ids() {
+        let root = std::env::temp_dir().join("ironclaw-user-id-validation");
+        assert!(brain_ext4_path(&root, "../other-user").is_err());
+        assert!(brain_ext4_path(&root, "owner/session").is_err());
+        assert!(brain_ext4_path(&root, "owner_123").is_ok());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

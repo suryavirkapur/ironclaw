@@ -16,7 +16,8 @@ security = { path = "../security" }
 tools = { path = "../tools" }
 mime_guess = "*"
 nix = { version = "*", features = ["signal"] }
-reqwest = { version = "*", default-features = false, features = ["json", "rustls-tls"] }
+prost = "*"
+reqwest = { version = "*", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rig-core = "0.33"
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }

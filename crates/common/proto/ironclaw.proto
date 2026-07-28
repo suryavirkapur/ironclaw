@@ -17,6 +17,8 @@ message MessageEnvelope {
     AuthAck auth_ack = 8;
     AgentControl agent_control = 18;
     AgentState agent_state = 19;
+    Artifact artifact = 20;
+    UploadedFile uploaded_file = 21;
 
     UserMessage user_message = 10;
     ToolCallRequest tool_call_request = 16;
@@ -34,6 +36,8 @@ message AuthChallenge {
   string cap_token = 1;
   repeated string allowed_tools = 2;
   string execution_mode = 3;
+  // Ephemeral host-to-guest credential. Never persist this in the guest image.
+  string brave_api_key = 4;
 }
 
 message AuthAck {
@@ -44,6 +48,7 @@ message AgentControl {
   enum Command {
     SLEEP = 0;
     WAKE = 1;
+    SHUTDOWN = 2;
   }
 
   Command command = 1;
@@ -80,6 +85,20 @@ message ToolResult {
 message StreamDelta {
   string delta = 1;
   bool done = 2;
+}
+
+message Artifact {
+  string filename = 1;
+  string mime_type = 2;
+  bytes data = 3;
+  string caption = 4;
+}
+
+message UploadedFile {
+  string filename = 1;
+  string mime_type = 2;
+  bytes data = 3;
+  string prompt = 4;
 }
 
 message JobTrigger {

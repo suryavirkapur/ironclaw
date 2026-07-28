@@ -9,7 +9,7 @@ Large Language Model-based autonomous agents are being widely applied in a varie
 
 The goal of dynamic tool synthesis is to provide agents the ability to dynamically create new capabilities by executing small programs, examining their results, and using those results as a capability for performing a particular type of task. However, the generation of new capabilities changes the underlying security model. It is possible for generated capabilities to include maliciously intended destructive operations, command injection prompts, resource consumption attacks, or deliberately designed host escapes. Therefore, simply sandboxing the process hosting the agent is often insufficient protection against maliciously generated code created during an open-ended conversation.
 
-IronClaw addresses the challenge of integrating dynamic tool synthesis with Firecracker microVM isolation. The host process will be responsible for managing policy, LLM context and microVM lifecycle decisions. Untrusted tool code will run in a guest runtime within a microVM. Data exchange between the host and guest will occur over a controlled transport boundary which allows the system to deliver the output of a given tool execution to the host without providing direct access to host resources to the generated tool code.
+IronClaw addresses the challenge of integrating dynamic tool synthesis with Firecracker microVM isolation. The host process manages policy, LLM context, and microVM lifecycle decisions. Untrusted tool code runs in a guest runtime within a microVM. Data exchange occurs over a controlled transport boundary, allowing the system to return tool results without providing generated code with direct access to host resources.
 
 \section{Use Cases}
 IronClaw is designed for scenarios where autonomous agents need to solve tasks
@@ -34,11 +34,11 @@ bounded outputs. If generated code tries to breach containment, it stays
 confined to disposable guest environment.
 
 \subsection{Dynamic Integration of APIs and Services}
-Fixed tool registries cannot anticipate every external API an agent will need
-for a long task. When the agent needs to interact with a new service, it
-generates minimal HTTP clients or SDK wrappers on demand. IronClaw runs
-generated clients in the guest with network policies enforced by the host and
-thus integrates without giving tools persistent network privileges on the host.
+An agent may encounter an external API for which no purpose-built capability is
+available. It can then generate a minimal HTTP client or SDK wrapper on demand.
+IronClaw runs generated clients in the guest with network policies enforced by
+the host and thus integrates without giving tools persistent network privileges
+on the host.
 
 \subsection{Iterative Code Generation and Testing}
 Often software engineering tasks require writing, running and refining small
@@ -48,7 +48,14 @@ runs in an isolated guest so buggy code or hostile code cannot corrupt workspace
 on the host or persist between iterations.
 
 \section{Problem Statement}
-The core issue that this dissertation will address is, do self-governing entities receive a quantifiable measure of "utility" as they create their own tools dynamically while maintaining a very high level of runtime separation from the hosting entity. Fixed tool systems have been safer for reasoning about (due to less complex dynamic behavior), but struggle to accommodate new workflow patterns. A less restricted environment may provide better flexibility but could reduce the security of the hosting system. IronClaw will make the utility/security trade-off quantifiable via comparisons among fixed tool systems, execution at the process level and executing dynamic tools using microVMs.
+This dissertation asks whether autonomous agents gain measurable utility by
+synthesizing and reusing their own tools while maintaining strong separation
+from the host. When no purpose-built capability is available, repeatedly
+authoring task logic inline may consume additional model steps and tokens.
+Dynamic synthesis may avoid that repeated effort, but generated code increases
+the risk to the host. IronClaw makes this utility/security trade-off measurable
+by comparing no synthesis with dynamic synthesis for utility, and ordinary
+process execution with microVM execution for containment and systems cost.
 
 \section{Objectives}
 The objectives of this thesis are:
@@ -57,8 +64,8 @@ The objectives of this thesis are:
     tools in IronClaw.
     \item To isolate untrusted generated code using Firecracker microVMs and a
     strict host/guest boundary.
-    \item To compare dynamic-tool agents against fixed-tool baselines on
-    complex multi-step tasks.
+    \item To compare agents with dynamic tool synthesis against otherwise
+    equivalent agents that must author task logic inline on every request.
     \item To evaluate containment against simulated malicious generated tools.
     \item To profile the latency and resource overhead introduced by microVM
     isolation.
@@ -67,9 +74,10 @@ The objectives of this thesis are:
 \section{Research Questions}
 This thesis is guided by the following research questions:
 \begin{itemize}
-    \item \textbf{RQ1: Utility.} Do autonomous agents capable of dynamic tool
-    synthesis within a secure runtime outperform agents constrained to a fixed
-    toolset on complex, multi-step tasks?
+    \item \textbf{RQ1: Utility.} On repeated, complex tasks for which no
+    purpose-built tool is available, does dynamic tool synthesis reduce agent
+    interaction steps and token consumption relative to authoring the required
+    logic inline, without reducing answer correctness?
     \item \textbf{RQ2: Security and Systems.} What is the measurable security
     containment capability and performance overhead of Firecracker microVM
     isolation compared to traditional process-level sandboxing when executing
@@ -79,9 +87,10 @@ This thesis is guided by the following research questions:
 \section{Hypotheses}
 The thesis evaluates two hypotheses:
 \begin{itemize}
-    \item \textbf{H1: Utility.} Agents using dynamic tool synthesis achieve a
-    higher task success rate and require fewer interaction turns on
-    data-transformation-heavy tasks than fixed-tool agents.
+    \item \textbf{H1: Utility.} On repeated tasks for which no purpose-built
+    tool is available, policy-guided dynamic tool synthesis reduces model
+    interaction steps and token consumption relative to generic capabilities
+    alone, while preserving task correctness. The benefit increases with reuse.
     \item \textbf{H2: Security and Performance.} IronClaw's microVM architecture
     contains simulated host-breakout attempts from malicious synthesized tools,
     at the cost of measurable but acceptable initialization latency and memory
