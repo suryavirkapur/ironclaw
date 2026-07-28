@@ -5,21 +5,9 @@
 \lhead{Chapter 3. \emph{System Architecture}}
 
 \section{Overview}
-IronClaw is a self-hosted autonomous-agent platform designed around a strict
-host/guest split. The host daemon, \texttt{ironclawd}, owns privileged
-responsibilities such as configuration loading, policy enforcement, memory
-management, LLM interaction, and microVM lifecycle control. The guest runtime,
-\texttt{irowclaw}, executes inside the Firecracker boundary and handles untrusted
-tool requests sent by the host.
+IronClaw is an autonomous-agent hosting platform that has a very strict host / guest split. The host process (daemons), ironclawd, is responsible for all of the "privileged" things in the system; these include loading the configuration file, enforcing policies, managing memory, interacting with large language models (LLM), and controlling the lifecycle of micro-VMs. The guest runtime, irowclaw, is executing within a Firecracker boundary and will execute untrusted tool requests coming from the host.
 
-The architecture is intentionally asymmetric. The host is trusted and
-stateful: it stores conversation state, keeps long-lived configuration, decides
-which tools are permitted, and owns the connection to external model providers.
-The guest is deliberately small and disposable: it receives bounded execution
-requests, runs them under policy, returns structured results, and can be
-discarded after a task. This separation keeps the complicated agent-control
-logic outside the untrusted execution environment while preventing synthesized
-tools from directly accessing the host workspace.
+This design was intended to be asymmetric. The host is assumed to be trusted and stateful: it maintains the conversation state, holds onto long-term configurations, makes decisions about what tools are allowed, and retains connections to external model providers. Conversely, the guest is intentionally small and ephemeral: it accepts bounded executions on behalf of the host, run those executions against a set of policies, returns structured data back to the host and can be discarded once it's completed its task. This separation allows the complex logic for controlling agents to exist in a trusted location away from the potentially un-trusted execution environment while also prevents synthesized tools from being able to access resources held by the host workspace.
 
 \begin{figure}[htbp]
     \centering
@@ -31,55 +19,27 @@ tools from directly accessing the host workspace.
 \fref{fig:architecture} shows the resulting host/guest split.
 
 \section{Host Daemon}
-The host daemon coordinates the agent loop and decides which capabilities are
-available for a session. It is responsible for receiving user tasks, preparing
-LLM prompts, dispatching tool calls, and recording memory. The host also starts,
-stops, and supervises guest runtimes. Since generated tools are treated as
-untrusted, the host does not execute them directly. Instead, it packages the tool
-specification and code for execution inside the guest.
+In addition to starting and stopping Guest Runtimes, the Host Daemon also has control of what capabilities are enabled during a Session. The Host receives the User's Tasks, generates Model Prompts based on Task Context, Memory, Tool Results and Policy Reminders, Dispatches Tool Calls, and records Memory Usage.
 
-Internally, the host can be understood as five cooperating subsystems:
-\begin{itemize}
-    \item \textbf{Agent loop:} maintains the plan-act-observe cycle and decides
-    whether the next action is a fixed tool call, a generated tool, or a final
-    answer.
-    \item \textbf{Prompt and provider layer:} builds model prompts from task
-    context, memory, tool results, and policy reminders, then sends them to the
-    configured LLM provider.
-    \item \textbf{Dispatcher:} normalizes model actions into typed execution
-    requests and routes them to local fixed tools or the guest runtime.
-    \item \textbf{Policy manager:} attaches limits for filesystem access,
-    network access, CPU time, memory, output size, and allowed interpreters.
-    \item \textbf{Sandbox supervisor:} creates, monitors, times out, and
-    destroys guest runtimes.
-\end{itemize}
+Since Generated Tools are considered Un-trusted, the Host does not execute them. The Host Packages the Tool Specification and Code in order to have that executed by the Guest Runtime.
 
-The host also performs result triage. A guest response is not blindly inserted
-back into the model context. It is bounded, decoded, tagged with status metadata,
-and summarized where necessary. This prevents very large outputs or malformed
-responses from destabilizing the next agent turn.
+There are five Subsystems that work together Internally to allow the Host Daemon to Function. There is an Agent Loop that Maintains the Plan-Act-Observation Cycle, and determines if the Next Action is a Fixed Tool Call, a Generated Tool, or Final Answer. There is a Prompt/Provider Layer that Builds Model Prompts based on Task Context, Memory, Tool Results and Policy Reminders, and sends those Prompts to the Configured LLM Provider. There is a Dispatcher that Normalizes Model Actions into Typed Execution Requests, and Routes those Typed Execution Requests to either Local Fixed Tools, or the Guest Runtime. There is a Policy Manager that Determines Limits for Filesystem Access, Network Access, CPU Time, Memory, Output Size and Allowed Interpreters. Finally, there is a Sandbox Supervisor that Creates, Monitors/Times Out/Destroys Guest Runtimes.
+
+Additionally, the Host Daemon performs Result Triage. A Response from a Guest Runtime is not simply Replaced Back into the Model Context. Rather it is Bounded, Decoded, Tagged with Status Metadata Summarized Where Necessary to prevent Destabilization of the Next Agent Turn due to Large Outputs or Malformed Responses.
 
 \section{Guest Runtime}
-The guest runtime is intentionally smaller than the host. It accepts execution
-requests, validates the request envelope, runs allowed commands or generated
-tool code, captures standard output and standard error, and returns structured
-results. This runtime is placed inside an ephemeral Firecracker microVM so that
-file-system changes, process state, and memory effects are confined to the guest
-session.
+The guest runtime is much smaller in size than the host. It accepts execution requests from the host, validates the request envelope (to ensure integrity), runs allowed commands or generates tool code based on the input provided in the request, captures standard output and error from the command or code that was run, and returns structured results back to the host.
+This is done by placing a guest runtime inside an ephemeral Firecracker microVM so that file system changes, process state, memory effects are confined to the guest session only.
 
-The guest runtime has three main responsibilities. First, it verifies that the
-request matches the expected protocol and that required fields such as request
-identifier, tool name, input payload, and execution limits are present. Second,
-it materializes the execution environment by writing input files, selecting the
-interpreter or binary path, and applying local process limits. Third, it captures
-the result as a structured response containing exit status, stdout, stderr,
-duration, and error classification.
+There are three main responsibilities of the guest runtime.
 
-The guest should not contain secrets, long-lived credentials, or broad host
-mounts. Any data required for a tool execution is explicitly sent by the host as
-part of the request. This makes the guest easier to reason about: if a payload
-tries to inspect the system, it should only see the minimal guest filesystem and
-the specific inputs provided for that run.
+Firstly it verifies whether the request sent by the host matches expected protocol & required fields such as: request identifier, tool name, input payload, & execution limits are present.
+
+Secondly it creates the execution environment for the guest runtime which includes creating/populating files necessary for the tool execution, selecting the interpreter or binary path used for execution, applying local process limitations.
+
+Thirdly it catches the result of the execution of the tool as a structured response containing exit status, stdout, stderr, duration of execution & error classification.
+
+A guest should not be responsible for holding secrets, long-term credentials or broader host mounts. All data needed for the execution of a tool will be explicitly sent by the host with each request. This makes reasoning about what the guest can see much simpler: if a payload tries to inspect the system it should only see the minimal guest file system & only the inputs specifically provided for that single run.
 
 \section{Transport Boundary}
 IronClaw uses a controlled host/guest communication path. The project includes
@@ -108,12 +68,7 @@ timeout, policy denial, runtime crash, or successful result differently instead
 of treating every guest response as plain text.
 
 \section{Dynamic Execution Engine}
-The dynamic execution engine handles tools synthesized during an agent run. A
-tool request contains a name, intended purpose, executable code, input
-parameters, and execution constraints. The guest interprets or compiles the code
-inside the isolated runtime, executes it, and returns the result. Failures are
-reported as structured errors so the agent can revise the tool or fall back to a
-fixed capability.
+The runtime dynamically runs tools that have been created by the agent running. Tool requests contain the name of the tool, what the user intends for the tool to do, the code (executable) to be run with in the isolated runtime, input parameters for the code, and any execution constraints on how the code should execute. The guest takes the code and either interprets or compiles it inside the isolated runtime, then executes it. Once executed, the guest sends the results back to the agent. If there is an error when executing a tool, the agent will receive the failure as structured error information; this allows the agent to potentially correct the creation of the tool, or use a fixed capability instead.
 
 The dynamic execution loop proceeds in six stages:
 \begin{enumerate}
@@ -181,16 +136,7 @@ this chapter. In the next chapter we will describe the evaluation method for the
 system.
 
 \section{Failure Modeling}
-IronClaw views failures as an integral component of its operational model.
-Therefore, when tools are generated they may either fail to compile; run out of
-time; provide wrong answers (invalid output); or perform unauthorized actions.
-For each possible failure scenario, IronClaw surfaces the failure classification
-in a compact format so the next step does not expose the host to potential risks.
+The failures that occur during the operation of the micro-vm are a key part of how ironclaw operates. Therefore when generating tools for the user they can fail to compile; time-out; generate incorrect results (provide invalid output); or attempt to execute malicious code. For every type of failure ironclaw will capture the specific failure classification with respect to the tool being executed, so the next process is done without exposing the host to the risk associated with that particular failure.
 
 \section{Operational Considerations}
-Each request ID logged by the host includes a corresponding policy decision; each
-microVM event; each execution duration; each exit status; and each output
-truncation event. However, the guest should only be logging execution-related
-information. It should also never have access to the host's secret information.
-All these logs are useful in debugging, analyzing benchmarks, and reviewing
-security; however, they do not compromise the isolation boundaries.
+In addition to tracking which application was requested based on the unique id of the request; what policy decision was made at that time; what the duration of the execution was; what the final exit status was of the last task executed; and whether there were any truncations in the output. The guest should not log anything but information related to executing tasks. Also the guest should not have access to any secret information from the host. All this information is helpful for debugging; benchmarking; and security audits; none of them would violate the isolation boundaries.
