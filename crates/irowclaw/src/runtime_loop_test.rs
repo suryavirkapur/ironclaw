@@ -9,6 +9,11 @@ use common::proto::ironclaw::{
 };
 use common::transport::{LocalTransport, Transport};
 
+// Guest startup currently reads its brain root from a process-global environment
+// variable. Serialize tests that override it so parallel test execution cannot
+// redirect one guest into another test's sandbox.
+static BRAIN_ROOT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn envelope(payload: message_envelope::Payload, cap_token: &str, msg_id: u64) -> MessageEnvelope {
     MessageEnvelope {
         user_id: "test-user".to_string(),
@@ -58,6 +63,7 @@ fn uploaded_filenames_are_reduced_to_safe_basenames() {
 
 #[tokio::test]
 async fn guest_accepts_an_a2a_task_and_reports_state_to_the_host() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(16);
     let root = std::env::temp_dir().join(format!("irowclaw-a2a-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -139,6 +145,7 @@ async fn guest_accepts_an_a2a_task_and_reports_state_to_the_host() {
 
 #[tokio::test]
 async fn uploaded_pdf_is_written_inside_the_firecracker_workspace() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(16);
     let root = std::env::temp_dir().join(format!("irowclaw-upload-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -227,6 +234,7 @@ async fn uploaded_pdf_is_written_inside_the_firecracker_workspace() {
 
 #[tokio::test]
 async fn guest_executes_tools_and_enforces_policy_and_leak_checks() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(32);
     let config_path = std::env::temp_dir().join("irowclaw-missing-config.toml");
     let brain_root = std::env::temp_dir().join("irowclaw-runtime-loop-test");
@@ -363,6 +371,7 @@ async fn guest_executes_tools_and_enforces_policy_and_leak_checks() {
 
 #[tokio::test]
 async fn scheduler_trigger_wakes_and_runs_job_on_host_request() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(32);
     let root = std::env::temp_dir().join("irowclaw-runtime-cron-trigger-test");
     let _ = std::fs::remove_dir_all(&root);
@@ -491,6 +500,7 @@ async fn scheduler_trigger_wakes_and_runs_job_on_host_request() {
 
 #[tokio::test]
 async fn guest_tools_turn_observes_multiple_tools_before_answering() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(32);
     let root = std::env::temp_dir().join(format!(
         "irowclaw-iterative-turn-test-{}",
@@ -647,6 +657,7 @@ async fn guest_tools_turn_observes_multiple_tools_before_answering() {
 
 #[tokio::test]
 async fn guest_tools_turn_continues_beyond_eight_tool_calls() {
+    let _brain_root_guard = BRAIN_ROOT_ENV_LOCK.lock().await;
     let (mut host, guest) = LocalTransport::pair(64);
     let root = std::env::temp_dir().join(format!(
         "irowclaw-unbounded-turn-test-{}",
