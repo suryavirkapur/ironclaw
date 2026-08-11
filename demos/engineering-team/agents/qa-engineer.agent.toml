@@ -24,4 +24,3 @@ max_concurrent_tasks = 4
 [[skills]]
 id = "verify_release"
 description = "Design and execute release verification, then report pass/fail evidence and residual risk."
-

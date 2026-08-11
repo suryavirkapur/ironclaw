@@ -31,4 +31,3 @@ fi
 
 export IRONCLAWD_CONFIG="configs/ironclawd.engineering-team.telegram.toml"
 exec cargo run -p ironclawd --features firecracker
-

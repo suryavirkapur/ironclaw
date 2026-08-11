@@ -76,4 +76,3 @@ assign the engineering lead but cannot bypass the lead and directly assign an en
 The workspace is deliberately the first operational slice, not yet a complete Slack clone. The
 next layer is persistent channels and threads where humans and agents can mention one another while
 task events appear in the same conversation timeline.
-

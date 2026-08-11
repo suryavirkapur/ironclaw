@@ -29,4 +29,3 @@ description = "Implement and test a backend change, returning code, evidence, an
 [[skills]]
 id = "investigate_incident"
 description = "Investigate a backend incident and return evidence, likely cause, and remediation."
-

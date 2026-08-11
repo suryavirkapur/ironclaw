@@ -24,4 +24,3 @@ description = "Design a technical plan, delegate implementation and verification
 [[skills]]
 id = "review_design"
 description = "Review a technical design for correctness, operability, security, and delivery risk."
-

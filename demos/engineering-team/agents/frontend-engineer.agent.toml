@@ -25,4 +25,3 @@ max_concurrent_tasks = 3
 [[skills]]
 id = "implement_frontend"
 description = "Implement and test a user-facing change with accessibility and interaction evidence."
-
