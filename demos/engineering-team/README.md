@@ -35,6 +35,17 @@ Build the VM image if necessary, then run the demo:
 
 Open <http://127.0.0.1:9938/ui> for the team workspace.
 
+## Verified workspace screenshots
+
+The workspace has been exercised in Chromium against a live local daemon, including loading all
+five agents, selecting a valid A2A capability, submitting a task, and observing its completed state.
+
+![Five-agent team view](../../docs/screenshots/engineering-workspace-team.png)
+
+![Capability-aware task assignment](../../docs/screenshots/engineering-workspace-new-task.png)
+
+![Completed task and inspector](../../docs/screenshots/engineering-workspace-completed-task.png)
+
 ## Telegram walkthrough
 
 ```text

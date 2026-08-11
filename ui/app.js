@@ -276,7 +276,8 @@ async function submitTask(event) {
     elements.taskDialog.close();
     state.selectedTaskId = task.id;
     await refresh();
-    inspectTask(task);
+    const currentTask = state.tasks.find((candidate) => candidate.id === task.id);
+    if (currentTask) inspectTask(currentTask);
   } catch (error) {
     elements.formError.textContent = error.message;
   }
@@ -294,6 +295,10 @@ async function refresh() {
     elements.healthDot.classList.add("online");
     elements.connectionLabel.textContent = `${health.status} · live`;
     render();
+    if (state.selectedTaskId) {
+      const selectedTask = state.tasks.find((task) => task.id === state.selectedTaskId);
+      if (selectedTask) inspectTask(selectedTask);
+    }
   } catch (error) {
     elements.healthDot.classList.remove("online");
     elements.connectionLabel.textContent = "offline";
