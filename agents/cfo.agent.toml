@@ -1,0 +1,27 @@
+id = "cfo"
+name = "Grace"
+role = "Chief Financial Officer"
+reports_to = "ceo"
+
+[model]
+provider = "openrouter"
+model = "anthropic/claude-sonnet"
+
+[a2a]
+accept_from = ["ceo"]
+max_delegation_depth = 1
+max_concurrent_tasks = 3
+
+[[mcp]]
+id = "finance"
+server = "https://mcp.internal.example/finance"
+credential = "finance"
+tools = ["ledger.query", "forecast.run"]
+resources = ["policies", "chart-of-accounts"]
+scopes = ["finance:read"]
+data_classes = ["confidential-financial"]
+
+[[skills]]
+id = "prepare_forecast"
+description = "Prepare a financial forecast with assumptions, evidence, and uncertainty."
+data_classes = ["confidential-financial"]

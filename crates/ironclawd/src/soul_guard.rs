@@ -364,7 +364,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let hash = hasher.finalize();
-    format!("{hash:x}")
+    hex::encode(hash)
 }
 
 fn now_ms_i64() -> Result<i64, IronclawError> {

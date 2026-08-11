@@ -1,0 +1,24 @@
+[package]
+name = "farm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "*"
+hex = "*"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+sha2 = "*"
+thiserror = "*"
+toml = "*"
+wasmtime = { version = "36", optional = true }
+
+[features]
+default = []
+wasm-runtime = ["wasmtime"]
+
+[dev-dependencies]
+tempfile = "*"
+tokio = { version = "*", features = ["macros", "rt"] }
+wat = "*"

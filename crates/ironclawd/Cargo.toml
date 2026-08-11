@@ -45,6 +45,7 @@ qr2term = "0.3"
 log = "0.4"
 channels = { path = "../channels" }
 heartbeat = { path = "../heartbeat" }
+farm = { path = "../farm" }
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-scalar = { version = "0.3", features = ["axum"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }

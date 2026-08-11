@@ -573,6 +573,28 @@ fn tool_definition(name: &str) -> ToolDefinition {
                 "additionalProperties": true
             }),
         ),
+        "mcp_call" => (
+            "Call one MCP tool explicitly granted to this agent. Credentials remain on the host.",
+            object_schema(
+                json!({
+                    "server": {"type": "string"},
+                    "tool": {"type": "string"},
+                    "arguments": {"type": "object", "additionalProperties": true}
+                }),
+                &["server", "tool", "arguments"],
+            ),
+        ),
+        "delegate_task" => (
+            "Delegate a durable child task to an authorized specialist agent.",
+            object_schema(
+                json!({
+                    "assignee": {"type": "string"},
+                    "skill": {"type": "string"},
+                    "input": {"type": "object", "additionalProperties": true}
+                }),
+                &["assignee", "skill", "input"],
+            ),
+        ),
         _ => (
             "Run an allowlisted tool inside the Firecracker guest.",
             object_schema(json!({"input": {"type": "string"}}), &["input"]),

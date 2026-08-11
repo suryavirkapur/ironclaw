@@ -8,6 +8,7 @@ license.workspace = true
 async-trait = "*"
 chrono = "*"
 common = { path = "../common" }
+farm = { path = "../farm", features = ["wasm-runtime"] }
 memory = { path = "../memory" }
 rusqlite = { version = "*", features = ["bundled"] }
 serde = { version = "*", features = ["derive"] }

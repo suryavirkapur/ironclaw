@@ -617,6 +617,7 @@ async fn authenticate(vm: VmInstance) -> Result<GuestSession, String> {
                 allowed_tools: vec!["bash".to_string()],
                 execution_mode: "guest_tools".to_string(),
                 brave_api_key: String::new(),
+                agent_manifest_toml: String::new(),
             }),
         ))
         .await

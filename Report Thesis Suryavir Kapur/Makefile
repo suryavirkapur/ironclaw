@@ -19,6 +19,16 @@ $(thesis): FORCE
 $(MAIN).pdf: .refresh $(SOURCES)
 	$(LATEXMK) -f -pdf $(LATEXOPT) $(THESIS)
 
+# Conference paper (IEEEtran). Needs local Times metrics + binhex on the
+# search path because they are not installed system-wide.
+PAPERENV=TEXINPUTS="./fontmetrics/tex//:" TFMFONTS="./fontmetrics/fonts/tfm//:"
+paper: paper.pdf
+paper.pdf: paper.tex Bibliography.bib IEEEtran.cls IEEEtran.bst
+	$(PAPERENV) pdflatex -interaction=nonstopmode paper.tex
+	bibtex paper
+	$(PAPERENV) pdflatex -interaction=nonstopmode paper.tex
+	$(PAPERENV) pdflatex -interaction=nonstopmode paper.tex
+
 clean:
 	$(LATEXMK) -c $(MAIN).tex
 	find . \( -name "*.toc" -o -name "*.fdb_latexmk" \

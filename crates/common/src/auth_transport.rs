@@ -43,6 +43,7 @@ impl<T> AuthTransport<T> {
                 allowed_tools,
                 execution_mode: String::new(),
                 brave_api_key: String::new(),
+                agent_manifest_toml: String::new(),
             })),
         }
     }

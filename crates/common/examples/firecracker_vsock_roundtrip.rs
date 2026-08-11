@@ -61,6 +61,7 @@ async fn main() -> Result<(), String> {
             allowed_tools: vec![],
             execution_mode: "host_only".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         })),
     };
 

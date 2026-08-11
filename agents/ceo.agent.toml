@@ -1,0 +1,16 @@
+id = "ceo"
+name = "Morgan"
+role = "Chief Executive Officer"
+
+[model]
+provider = "openrouter"
+model = "anthropic/claude-opus"
+
+[a2a]
+delegate_to = ["cto", "cfo"]
+max_delegation_depth = 4
+max_concurrent_tasks = 4
+
+[[skills]]
+id = "set_company_objective"
+description = "Turn an owner request into a bounded company objective and delegate its execution."

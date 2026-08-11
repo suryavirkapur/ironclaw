@@ -1,0 +1,22 @@
+id = "cto"
+name = "Ada"
+role = "Chief Technology Officer"
+reports_to = "ceo"
+
+[model]
+provider = "openrouter"
+model = "anthropic/claude-opus"
+
+[a2a]
+accept_from = ["ceo"]
+delegate_to = ["backend-engineer", "frontend-engineer"]
+max_delegation_depth = 3
+max_concurrent_tasks = 6
+
+[[skills]]
+id = "plan_technical_work"
+description = "Create an architecture and delegate implementation work to engineering specialists."
+
+[[skills]]
+id = "review_architecture"
+description = "Review a proposed architecture and return a decision with evidence."

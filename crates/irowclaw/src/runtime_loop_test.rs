@@ -4,8 +4,8 @@ use super::{
 };
 use chrono::Timelike;
 use common::proto::ironclaw::{
-    agent_control, message_envelope, AgentControl, AuthChallenge, MessageEnvelope, UploadedFile,
-    UserMessage,
+    agent_control, message_envelope, AgentControl, AgentTaskRequest, AuthChallenge,
+    MessageEnvelope, UploadedFile, UserMessage,
 };
 use common::transport::{LocalTransport, Transport};
 
@@ -57,6 +57,87 @@ fn uploaded_filenames_are_reduced_to_safe_basenames() {
 }
 
 #[tokio::test]
+async fn guest_accepts_an_a2a_task_and_reports_state_to_the_host() {
+    let (mut host, guest) = LocalTransport::pair(16);
+    let root = std::env::temp_dir().join(format!("irowclaw-a2a-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create brain root");
+    std::env::set_var("IRONCLAW_BRAIN_ROOT", &root);
+
+    let guest_task = tokio::spawn({
+        let config_path = root.join("missing-config.toml");
+        async move { run_with_transport(guest, config_path).await }
+    });
+    let cap_token = "a2a-cap-token";
+    host.send(envelope(
+        message_envelope::Payload::AuthChallenge(AuthChallenge {
+            cap_token: cap_token.to_string(),
+            allowed_tools: vec!["host_plan".to_string()],
+            execution_mode: "guest_tools".to_string(),
+            brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
+        }),
+        cap_token,
+        1,
+    ))
+    .await
+    .expect("send challenge");
+    let _ = host.recv().await.expect("receive auth ack");
+
+    host.send(envelope(
+        message_envelope::Payload::AgentTaskRequest(AgentTaskRequest {
+            task_id: "task-1".to_string(),
+            context_id: "context-1".to_string(),
+            parent_task_id: String::new(),
+            requester: "cto".to_string(),
+            skill: "investigate_api_incident".to_string(),
+            input_json: r#"{"service":"payments"}"#.to_string(),
+            delegation_depth: 0,
+        }),
+        cap_token,
+        2,
+    ))
+    .await
+    .expect("send A2A task");
+
+    let working = host.recv().await.unwrap().unwrap();
+    assert!(matches!(
+        working.payload,
+        Some(message_envelope::Payload::AgentTaskUpdate(update))
+            if update.task_id == "task-1" && update.state == "working"
+    ));
+    let plan = host.recv().await.unwrap().unwrap();
+    let request = match plan.payload {
+        Some(message_envelope::Payload::ToolCallRequest(request)) => request,
+        other => panic!("expected host plan request, got {other:?}"),
+    };
+    host.send(envelope(
+        message_envelope::Payload::ToolCallResponse(common::proto::ironclaw::ToolCallResponse {
+            call_id: request.call_id,
+            ok: true,
+            output: r#"{"action":"answer","text":"payments is healthy"}"#.to_string(),
+        }),
+        cap_token,
+        3,
+    ))
+    .await
+    .expect("send task answer");
+
+    let completed = host.recv().await.unwrap().unwrap();
+    assert!(matches!(
+        completed.payload,
+        Some(message_envelope::Payload::AgentTaskUpdate(update))
+            if update.task_id == "task-1"
+                && update.state == "completed"
+                && update.output_json.contains("payments is healthy")
+    ));
+
+    drop(host);
+    assert!(guest_task.await.expect("guest join").is_ok());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn uploaded_pdf_is_written_inside_the_firecracker_workspace() {
     let (mut host, guest) = LocalTransport::pair(16);
     let root = std::env::temp_dir().join(format!("irowclaw-upload-test-{}", std::process::id()));
@@ -75,6 +156,7 @@ async fn uploaded_pdf_is_written_inside_the_firecracker_workspace() {
             allowed_tools: vec!["file_read".to_string()],
             execution_mode: "guest_tools".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         }),
         cap_token,
         1,
@@ -161,6 +243,7 @@ async fn guest_executes_tools_and_enforces_policy_and_leak_checks() {
             allowed_tools: vec!["file_read".to_string(), "file_write".to_string()],
             execution_mode: "guest_autonomous".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         }),
         cap_token,
         1,
@@ -331,6 +414,7 @@ async fn scheduler_trigger_wakes_and_runs_job_on_host_request() {
             allowed_tools: vec!["file_read".to_string(), "file_write".to_string()],
             execution_mode: "guest_tools".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         }),
         cap_token,
         1,
@@ -426,6 +510,7 @@ async fn guest_tools_turn_observes_multiple_tools_before_answering() {
             allowed_tools: vec!["file_read".to_string(), "file_write".to_string()],
             execution_mode: "guest_tools".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         }),
         cap_token,
         1,
@@ -581,6 +666,7 @@ async fn guest_tools_turn_continues_beyond_eight_tool_calls() {
             allowed_tools: vec!["file_write".to_string()],
             execution_mode: "guest_tools".to_string(),
             brave_api_key: String::new(),
+            agent_manifest_toml: String::new(),
         }),
         cap_token,
         1,

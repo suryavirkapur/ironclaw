@@ -1,0 +1,22 @@
+id = "frontend-engineer"
+name = "Margaret"
+role = "Frontend Engineer"
+reports_to = "cto"
+
+[model]
+provider = "openrouter"
+model = "anthropic/claude-sonnet"
+
+[wasm]
+tools_dir = "tools"
+may_create = true
+may_publish = false
+
+[a2a]
+accept_from = ["cto"]
+max_delegation_depth = 2
+max_concurrent_tasks = 3
+
+[[skills]]
+id = "implement_frontend_change"
+description = "Implement and verify a frontend change, returning code and test artifacts."

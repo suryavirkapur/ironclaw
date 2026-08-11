@@ -19,6 +19,8 @@ message MessageEnvelope {
     AgentState agent_state = 19;
     Artifact artifact = 20;
     UploadedFile uploaded_file = 21;
+    AgentTaskRequest agent_task_request = 22;
+    AgentTaskUpdate agent_task_update = 23;
 
     UserMessage user_message = 10;
     ToolCallRequest tool_call_request = 16;
@@ -38,6 +40,9 @@ message AuthChallenge {
   string execution_mode = 3;
   // Ephemeral host-to-guest credential. Never persist this in the guest image.
   string brave_api_key = 4;
+  // Validated farm manifest for this agent. The guest uses it to register
+  // Wasm tools; it contains no credentials.
+  string agent_manifest_toml = 5;
 }
 
 message AuthAck {
@@ -99,6 +104,24 @@ message UploadedFile {
   string mime_type = 2;
   bytes data = 3;
   string prompt = 4;
+}
+
+message AgentTaskRequest {
+  string task_id = 1;
+  string context_id = 2;
+  string parent_task_id = 3;
+  string requester = 4;
+  string skill = 5;
+  string input_json = 6;
+  uint32 delegation_depth = 7;
+}
+
+message AgentTaskUpdate {
+  string task_id = 1;
+  string state = 2;
+  string output_json = 3;
+  repeated string artifact_ids = 4;
+  string error = 5;
 }
 
 message JobTrigger {

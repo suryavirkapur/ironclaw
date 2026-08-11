@@ -54,6 +54,14 @@ fn main() {
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );
     config.type_attribute(
+        ".ironclaw.AgentTaskRequest",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
+        ".ironclaw.AgentTaskUpdate",
+        "#[derive(serde::Serialize, serde::Deserialize)]",
+    );
+    config.type_attribute(
         ".ironclaw.JobTrigger",
         "#[derive(serde::Serialize, serde::Deserialize)]",
     );

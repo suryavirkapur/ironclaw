@@ -5,6 +5,7 @@ mod auth_transport;
 mod daemon;
 mod host_tools;
 mod llm_client;
+mod mcp;
 mod soul_guard;
 mod whatsapp;
 
@@ -27,6 +28,7 @@ use common::slack::{
     parse_slack_message, validate_slack_signature, SlackResponse, SlackUrlVerification,
 };
 use daemon::GatewayCommand;
+use farm::{FarmRegistry, FarmTask, TaskLedger, TaskState};
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
 use include_dir::{include_dir, Dir};
@@ -411,10 +413,26 @@ struct AppState {
     guest_allow_browser: bool,
     soul_guard_db_path: Arc<PathBuf>,
     security_db_path: Arc<PathBuf>,
+    farm_registry: Arc<FarmRegistry>,
+    farm_tasks: TaskLedger,
+    mcp_gateway: Arc<mcp::McpGateway>,
+    farm_agent_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
     fn new(config: HostConfig) -> Result<Self, IronclawError> {
+        let farm_registry = if config.farm.enabled {
+            FarmRegistry::load_dir(&config.farm.manifests_dir).map_err(|err| {
+                IronclawError::new(format!("agent farm manifest load failed: {err}"))
+            })?
+        } else {
+            FarmRegistry::default()
+        };
+        let farm_registry = Arc::new(farm_registry);
+        let mcp_gateway = Arc::new(
+            mcp::McpGateway::new(farm_registry.clone(), config.farm.clone())
+                .map_err(|err| IronclawError::new(format!("MCP gateway init failed: {err}")))?,
+        );
         let llm_client = Arc::new(
             LlmClient::new(config.llm.clone())
                 .map_err(|err| IronclawError::new(format!("llm client init failed: {err}")))?,
@@ -467,6 +485,10 @@ impl AppState {
         let execution_mode = RuntimeExecutionMode::from_config(&config);
         let soul_guard_db = soul_guard_db_path(&config.storage.users_root);
         let security_db = security_db_path(&config.storage.users_root);
+        let farm_tasks = TaskLedger::open(
+            config.storage.users_root.join("_farm").join("tasks.json"),
+        )
+        .map_err(|err| IronclawError::new(format!("farm task ledger init failed: {err}")))?;
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -479,6 +501,10 @@ impl AppState {
             guest_allow_browser,
             soul_guard_db_path: Arc::new(soul_guard_db),
             security_db_path: Arc::new(security_db),
+            farm_registry,
+            farm_tasks,
+            mcp_gateway,
+            farm_agent_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -613,19 +639,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
     };
 
     // host tools used only in host-only mode and explicit host fallbacks.
-    let host_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
-    let guest_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let host_allowed_tools = allowed_tools_for_agent(&state, &user_id);
+    let guest_allowed_tools = allowed_tools_for_agent(&state, &user_id);
 
     let cap_token = {
-        use rand::RngCore;
+        use rand::Rng;
         let mut bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
@@ -674,6 +692,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 allowed_tools: guest_allowed_tools.clone(),
                 execution_mode: state.execution_mode.to_wire().to_string(),
                 brave_api_key: String::new(),
+                agent_manifest_toml: String::new(),
             })),
         };
         let challenge_json = match serde_json::to_string(&challenge) {
@@ -745,6 +764,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                 allowed_tools: guest_allowed_tools.clone(),
                 execution_mode: state.execution_mode.to_wire().to_string(),
                 brave_api_key: brave_api_key_for_guest(),
+                agent_manifest_toml: agent_manifest_toml_for(&state, &user_id),
             })),
         };
         if let Err(err) = transport.send(challenge).await {
@@ -1035,32 +1055,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, query: WsQuery) {
                         if let Some(message_envelope::Payload::ToolCallRequest(req)) =
                             envelope.payload.clone()
                         {
-                            let (ok, output) = if req.tool == "host_plan" {
-                                match host_plan_tool_response(
-                                    &state,
-                                    &tool_user_id,
-                                    &req.input,
-                                    &host_allowed_tools,
-                                    None,
-                                )
-                                .await {
-                                    Ok(out) => (true, out),
-                                    Err(err) => (false, truncate_tool_output(&err)),
-                                }
-                            } else {
-                                let result = run_host_tool(
-                                    &host_allowed_tools,
-                                    &state.host_config.security.network.allowed_domains,
-                                    &tool_user_id,
-                                    &req.tool,
-                                    &req.input,
-                                )
-                                .await;
-                                match result {
-                                    Ok(out) => (true, truncate_tool_output(&out)),
-                                    Err(err) => (false, truncate_tool_output(&err)),
-                                }
-                            };
+                            let (ok, output) = execute_requested_host_tool(
+                                &state,
+                                &tool_user_id,
+                                &envelope.session_id,
+                                &req,
+                                &host_allowed_tools,
+                                None,
+                                None,
+                            )
+                            .await;
 
                             let resp = MessageEnvelope {
                                 user_id: envelope.user_id,
@@ -1345,6 +1349,234 @@ async fn start_vm_pair(
         user_id
     );
     Ok((instance, None))
+}
+
+fn spawn_farm_task_dispatch(state: AppState, task: FarmTask) {
+    tokio::spawn(async move {
+        if let Err(error) = dispatch_farm_task(&state, &task).await {
+            tracing::error!(task_id = %task.id, assignee = %task.assignee, "A2A task failed: {error}");
+            let current = state.farm_tasks.get(&task.id).ok().flatten();
+            if current.is_some_and(|current| !current.state.terminal()) {
+                let _ = state.farm_tasks.transition(
+                    &task.id,
+                    TaskState::Failed,
+                    Some(serde_json::json!({"error": error.to_string()})),
+                    now_ms().unwrap_or(task.updated_at_ms),
+                );
+            }
+        }
+    });
+}
+
+struct FarmVmStopGuard {
+    manager: Arc<dyn VmManager>,
+    agent_id: Option<String>,
+}
+
+impl FarmVmStopGuard {
+    fn new(manager: Arc<dyn VmManager>, agent_id: String) -> Self {
+        Self {
+            manager,
+            agent_id: Some(agent_id),
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some(agent_id) = self.agent_id.take() {
+            let _ = self.manager.stop_vm(&agent_id).await;
+        }
+    }
+}
+
+impl Drop for FarmVmStopGuard {
+    fn drop(&mut self) {
+        let Some(agent_id) = self.agent_id.take() else {
+            return;
+        };
+        let manager = self.manager.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = manager.stop_vm(&agent_id).await;
+            });
+        }
+    }
+}
+
+async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), IronclawError> {
+    let agent_lock = {
+        let mut locks = state.farm_agent_locks.lock().await;
+        locks
+            .entry(task.assignee.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _agent_guard = agent_lock.lock().await;
+    if state
+        .vm_manager
+        .is_vm_running(&task.assignee)
+        .await
+        .map_err(|err| IronclawError::new(err.to_string()))?
+    {
+        return Err(IronclawError::new(format!(
+            "agent {} VM transport is already owned by another session",
+            task.assignee
+        )));
+    }
+
+    let (vm_instance, guest_transport) = start_vm_pair(state, &task.assignee).await?;
+    let vm_guard = FarmVmStopGuard::new(state.vm_manager.clone(), task.assignee.clone());
+    let mut transport = vm_instance.transport;
+    if state.local_guest {
+        if let Some(guest_transport) = guest_transport {
+            let brain_root = state
+                .host_config
+                .storage
+                .users_root
+                .join(&task.assignee)
+                .join("guest");
+            let guest_config_path = (*state.guest_config_path).clone();
+            std::fs::create_dir_all(&brain_root)
+                .map_err(|err| IronclawError::new(format!("create brain root failed: {err}")))?;
+            std::env::set_var("IRONCLAW_BRAIN_ROOT", &brain_root);
+            tokio::spawn(async move {
+                if let Err(err) =
+                    irowclaw::runtime::run_with_transport(guest_transport, guest_config_path).await
+                {
+                    tracing::error!("farm guest runtime failed: {err}");
+                }
+            });
+        }
+    }
+
+    let allowed_tools = allowed_tools_for_agent(state, &task.assignee);
+    let cap_token = {
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+    send_guest_auth_challenge(
+        &mut transport,
+        &task.assignee,
+        &task.context_id,
+        &cap_token,
+        &allowed_tools,
+        state.execution_mode,
+        agent_manifest_toml_for(state, &task.assignee),
+    )
+    .await?;
+    let mut transport: Box<dyn common::transport::Transport> =
+        Box::new(AuthenticatedTransport::new(transport, cap_token));
+    transport
+        .send(MessageEnvelope {
+            user_id: task.assignee.clone(),
+            session_id: task.context_id.clone(),
+            msg_id: task.created_at_ms,
+            timestamp_ms: now_ms().unwrap_or(task.created_at_ms),
+            cap_token: String::new(),
+            payload: Some(message_envelope::Payload::AgentTaskRequest(
+                common::proto::ironclaw::AgentTaskRequest {
+                    task_id: task.id.clone(),
+                    context_id: task.context_id.clone(),
+                    parent_task_id: task.parent_task_id.clone().unwrap_or_default(),
+                    requester: task.requester.clone(),
+                    skill: task.skill.clone(),
+                    input_json: serde_json::to_string(&task.input)
+                        .map_err(|err| IronclawError::new(err.to_string()))?,
+                    delegation_depth: u32::from(task.delegation_depth),
+                },
+            )),
+        })
+        .await
+        .map_err(|err| IronclawError::new(format!("A2A task send failed: {err}")))?;
+
+    let run = async {
+        loop {
+            let envelope = transport
+                .recv()
+                .await
+                .map_err(|err| IronclawError::new(format!("A2A task receive failed: {err}")))?
+                .ok_or_else(|| IronclawError::new("A2A agent transport closed"))?;
+            match envelope.payload {
+                Some(message_envelope::Payload::ToolCallRequest(request)) => {
+                    let (ok, output) = execute_requested_host_tool(
+                        state,
+                        &task.assignee,
+                        &task.context_id,
+                        &request,
+                        &allowed_tools,
+                        None,
+                        Some(&task.id),
+                    )
+                    .await;
+                    transport
+                        .send(MessageEnvelope {
+                            user_id: task.assignee.clone(),
+                            session_id: task.context_id.clone(),
+                            msg_id: envelope.msg_id,
+                            timestamp_ms: now_ms().unwrap_or(0),
+                            cap_token: String::new(),
+                            payload: Some(message_envelope::Payload::ToolCallResponse(
+                                common::proto::ironclaw::ToolCallResponse {
+                                    call_id: request.call_id,
+                                    ok,
+                                    output,
+                                },
+                            )),
+                        })
+                        .await
+                        .map_err(|err| IronclawError::new(err.to_string()))?;
+                }
+                Some(message_envelope::Payload::AgentTaskUpdate(update)) => {
+                    let next = match update.state.as_str() {
+                        "working" => TaskState::Working,
+                        "input_required" => TaskState::InputRequired,
+                        "completed" => TaskState::Completed,
+                        "failed" => TaskState::Failed,
+                        "canceled" => TaskState::Canceled,
+                        "rejected" => TaskState::Rejected,
+                        other => {
+                            return Err(IronclawError::new(format!(
+                                "invalid A2A task state: {other}"
+                            )))
+                        }
+                    };
+                    let mut output = if update.output_json.trim().is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::from_str(&update.output_json).map_err(|err| {
+                            IronclawError::new(format!("A2A output JSON failed: {err}"))
+                        })?)
+                    };
+                    if next == TaskState::Failed && !update.error.trim().is_empty() {
+                        output = Some(serde_json::json!({"error": update.error}));
+                    }
+                    state
+                        .farm_tasks
+                        .transition_with_artifacts(
+                            &task.id,
+                            next,
+                            output,
+                            Some(update.artifact_ids),
+                            now_ms().unwrap_or(task.updated_at_ms),
+                        )
+                        .map_err(|err| IronclawError::new(err.to_string()))?;
+                    if next.terminal() {
+                        return Ok(());
+                    }
+                }
+                Some(message_envelope::Payload::JobTrigger(_)) => {
+                    tracing::debug!(agent_id = %task.assignee, "deferred scheduled job during A2A task");
+                }
+                _ => {}
+            }
+        }
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(600), run)
+        .await
+        .map_err(|_| IronclawError::new("A2A task timed out"))?;
+    vm_guard.stop().await;
+    result
 }
 
 async fn ui_index_handler() -> Response {
@@ -2081,6 +2313,161 @@ async fn host_plan_tool_response(
     };
 
     tool_plan_to_json(&plan)
+}
+
+#[derive(Deserialize)]
+struct McpCallInput {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct DelegateTaskInput {
+    assignee: String,
+    skill: String,
+    #[serde(default)]
+    input: serde_json::Value,
+}
+
+async fn execute_requested_host_tool(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+    request: &common::proto::ironclaw::ToolCallRequest,
+    host_allowed_tools: &[String],
+    history: Option<&[ConversationMessage]>,
+    active_task_id: Option<&str>,
+) -> (bool, String) {
+    let result = if request.tool == "host_plan" {
+        host_plan_tool_response(state, user_id, &request.input, host_allowed_tools, history).await
+    } else if request.tool == "mcp_call" {
+        let input = serde_json::from_str::<McpCallInput>(&request.input)
+            .map_err(|err| format!("MCP call input is invalid: {err}"));
+        match input {
+            Ok(input) => state
+                .mcp_gateway
+                .call(
+                    user_id,
+                    &input.server,
+                    &input.tool,
+                    input.arguments,
+                    &format!("{session_id}-{}", request.call_id),
+                )
+                .await
+                .and_then(|value| {
+                    serde_json::to_string(&value)
+                        .map_err(|err| format!("MCP result encode failed: {err}"))
+                }),
+            Err(err) => Err(err),
+        }
+    } else if request.tool == "delegate_task" {
+        match active_task_id {
+            Some(parent_task_id) => {
+                create_delegated_task(state, user_id, parent_task_id, &request.input)
+                    .await
+                    .and_then(|task| {
+                        serde_json::to_string(&task)
+                            .map_err(|err| format!("delegated task encode failed: {err}"))
+                    })
+            }
+            None => Err("delegate_task is only available while executing an A2A task".to_string()),
+        }
+    } else {
+        run_host_tool(
+            host_allowed_tools,
+            &state.host_config.security.network.allowed_domains,
+            user_id,
+            &request.tool,
+            &request.input,
+        )
+        .await
+    };
+    match result {
+        Ok(output) => (true, truncate_tool_output(&output)),
+        Err(error) => (false, truncate_tool_output(&error)),
+    }
+}
+
+async fn create_delegated_task(
+    state: &AppState,
+    requester: &str,
+    parent_task_id: &str,
+    raw_input: &str,
+) -> Result<FarmTask, String> {
+    let input: DelegateTaskInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("delegate task input is invalid: {err}"))?;
+    let capability: farm::CapabilityUri = format!("agent://{}/{}", input.assignee, input.skill)
+        .parse()
+        .map_err(|err| format!("delegate capability is invalid: {err}"))?;
+    let allowed = state
+        .farm_registry
+        .capabilities_for(requester)
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .any(|candidate| candidate.uri == capability);
+    if !allowed {
+        return Err(format!(
+            "agent {requester} may not delegate {} to {}",
+            input.skill, input.assignee
+        ));
+    }
+    let parent = state
+        .farm_tasks
+        .get(parent_task_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("parent task not found: {parent_task_id}"))?;
+    if parent.assignee != requester || parent.state.terminal() {
+        return Err("requester does not own an active parent task".to_string());
+    }
+    let depth = parent.delegation_depth.saturating_add(1);
+    let requester_record = state
+        .farm_registry
+        .get(requester)
+        .ok_or_else(|| format!("unknown requester: {requester}"))?;
+    if depth > requester_record.manifest.a2a.max_delegation_depth {
+        return Err("delegation depth limit exceeded".to_string());
+    }
+    let assignee_record = state
+        .farm_registry
+        .get(&input.assignee)
+        .ok_or_else(|| format!("unknown assignee: {}", input.assignee))?;
+    let active_tasks = state
+        .farm_tasks
+        .list()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|task| task.assignee == input.assignee && !task.state.terminal())
+        .count();
+    if active_tasks >= usize::from(assignee_record.manifest.a2a.max_concurrent_tasks) {
+        return Err(format!(
+            "agent {} has reached its concurrent task limit",
+            input.assignee
+        ));
+    }
+    let now = now_ms().map_err(|err| err.to_string())?;
+    let task = FarmTask {
+        id: format!("task-{now}-{:08x}", rand::random::<u32>()),
+        context_id: parent.context_id,
+        parent_task_id: Some(parent_task_id.to_string()),
+        requester: requester.to_string(),
+        assignee: input.assignee,
+        skill: input.skill,
+        state: TaskState::Submitted,
+        input: input.input,
+        output: None,
+        artifact_ids: Vec::new(),
+        delegation_depth: depth,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    state
+        .farm_tasks
+        .insert(task.clone())
+        .map_err(|err| err.to_string())?;
+    spawn_farm_task_dispatch(state.clone(), task.clone());
+    Ok(task)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2969,11 +3356,7 @@ async fn handle_telegram_text_once(
         return Ok(message.to_string());
     }
 
-    let host_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let host_allowed_tools = allowed_tools_for_agent(state, &session.user_id);
     if state.execution_mode == RuntimeExecutionMode::HostOnly {
         if upload.is_some() {
             return Err(IronclawError::new(
@@ -3043,11 +3426,7 @@ async fn handle_telegram_text_once(
         .await
         .map_err(|err| IronclawError::new(format!("send to guest failed: {err}")))?;
 
-    let host_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let host_allowed_tools = allowed_tools_for_agent(state, &session.user_id);
 
     let mut streamed_any = false;
     let mut output = String::new();
@@ -3071,33 +3450,16 @@ async fn handle_telegram_text_once(
             continue;
         }
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
-            let (ok, output) = if req.tool == "host_plan" {
-                match host_plan_tool_response(
-                    state,
-                    &session.user_id,
-                    &req.input,
-                    &host_allowed_tools,
-                    Some(history),
-                )
-                .await
-                {
-                    Ok(out) => (true, out),
-                    Err(err) => (false, truncate_tool_output(&err)),
-                }
-            } else {
-                match run_host_tool(
-                    &host_allowed_tools,
-                    &state.host_config.security.network.allowed_domains,
-                    &session.user_id,
-                    &req.tool,
-                    &req.input,
-                )
-                .await
-                {
-                    Ok(out) => (true, truncate_tool_output(&out)),
-                    Err(err) => (false, truncate_tool_output(&err)),
-                }
-            };
+            let (ok, output) = execute_requested_host_tool(
+                state,
+                &session.user_id,
+                &session.session_id,
+                &req,
+                &host_allowed_tools,
+                Some(history),
+                None,
+            )
+            .await;
             let resp = MessageEnvelope {
                 user_id: envelope.user_id,
                 session_id: envelope.session_id,
@@ -3172,6 +3534,7 @@ async fn send_guest_auth_challenge(
     cap_token: &str,
     guest_allowed_tools: &[String],
     execution_mode: RuntimeExecutionMode,
+    agent_manifest_toml: String,
 ) -> Result<(), IronclawError> {
     let challenge = MessageEnvelope {
         user_id: user_id.to_string(),
@@ -3185,6 +3548,7 @@ async fn send_guest_auth_challenge(
                 allowed_tools: guest_allowed_tools.to_vec(),
                 execution_mode: execution_mode.to_wire().to_string(),
                 brave_api_key: brave_api_key_for_guest(),
+                agent_manifest_toml,
             },
         )),
     };
@@ -3225,13 +3589,9 @@ async fn ensure_telegram_session_transport(
         session.user_id,
         session.session_id
     );
-    let guest_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let guest_allowed_tools = allowed_tools_for_agent(state, &session.user_id);
     let cap_token = {
-        use rand::RngCore;
+        use rand::Rng;
         let mut bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
@@ -3264,6 +3624,7 @@ async fn ensure_telegram_session_transport(
         &cap_token,
         &guest_allowed_tools,
         state.execution_mode,
+        agent_manifest_toml_for(state, &session.user_id),
     )
     .await?;
     session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));
@@ -3344,6 +3705,43 @@ fn allowed_tools_for_runtime(
         tools.push("browser".to_string());
     }
     tools
+}
+
+fn allowed_tools_for_agent(state: &AppState, agent_id: &str) -> Vec<String> {
+    let mut tools = allowed_tools_for_runtime(
+        state.local_guest,
+        state.guest_allow_bash,
+        state.guest_allow_browser,
+    );
+    let Some(record) = state.farm_registry.get(agent_id) else {
+        return tools;
+    };
+    // Farm agents install reusable tools exclusively as Wasm modules.
+    tools.retain(|tool| !matches!(tool.as_str(), "tool_install" | "tool_call"));
+    tools.extend(
+        record
+            .manifest
+            .wasm_tools
+            .iter()
+            .map(|tool| tool.id.clone()),
+    );
+    if !record.manifest.mcp.is_empty() {
+        tools.push("mcp_call".to_string());
+    }
+    if !record.manifest.a2a.delegate_to.is_empty() {
+        tools.push("delegate_task".to_string());
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+fn agent_manifest_toml_for(state: &AppState, agent_id: &str) -> String {
+    state
+        .farm_registry
+        .get(agent_id)
+        .and_then(|record| toml::to_string(&record.manifest).ok())
+        .unwrap_or_default()
 }
 
 fn bash_allowed(local_guest: bool, guest_allow_bash: bool) -> bool {
@@ -3970,11 +4368,7 @@ async fn handle_whatsapp_text_once(
         return Ok(message.to_string());
     }
 
-    let host_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let host_allowed_tools = allowed_tools_for_agent(state, &session.user_id);
     if state.execution_mode == RuntimeExecutionMode::HostOnly {
         let output = run_host_turn(
             state,
@@ -4065,33 +4459,16 @@ async fn handle_whatsapp_text_once(
             continue;
         }
         if let Some(message_envelope::Payload::ToolCallRequest(req)) = envelope.payload.clone() {
-            let (ok, output) = if req.tool == "host_plan" {
-                match host_plan_tool_response(
-                    state,
-                    &session.user_id,
-                    &req.input,
-                    &host_allowed_tools,
-                    Some(history),
-                )
-                .await
-                {
-                    Ok(out) => (true, out),
-                    Err(err) => (false, truncate_tool_output(&err)),
-                }
-            } else {
-                match run_host_tool(
-                    &host_allowed_tools,
-                    &state.host_config.security.network.allowed_domains,
-                    &session.user_id,
-                    &req.tool,
-                    &req.input,
-                )
-                .await
-                {
-                    Ok(out) => (true, truncate_tool_output(&out)),
-                    Err(err) => (false, truncate_tool_output(&err)),
-                }
-            };
+            let (ok, output) = execute_requested_host_tool(
+                state,
+                &session.user_id,
+                &session.session_id,
+                &req,
+                &host_allowed_tools,
+                Some(history),
+                None,
+            )
+            .await;
             let resp = MessageEnvelope {
                 user_id: envelope.user_id,
                 session_id: envelope.session_id,
@@ -4150,13 +4527,9 @@ async fn ensure_whatsapp_session_transport(
         session.user_id,
         session.session_id
     );
-    let guest_allowed_tools = allowed_tools_for_runtime(
-        state.local_guest,
-        state.guest_allow_bash,
-        state.guest_allow_browser,
-    );
+    let guest_allowed_tools = allowed_tools_for_agent(state, &session.user_id);
     let cap_token = {
-        use rand::RngCore;
+        use rand::Rng;
         let mut bytes = [0u8; 32];
         rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
@@ -4189,6 +4562,7 @@ async fn ensure_whatsapp_session_transport(
         &cap_token,
         &guest_allowed_tools,
         state.execution_mode,
+        agent_manifest_toml_for(state, &session.user_id),
     )
     .await?;
     session.transport = Some(Box::new(AuthenticatedTransport::new(transport, cap_token)));

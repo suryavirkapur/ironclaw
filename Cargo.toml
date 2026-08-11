@@ -9,6 +9,7 @@ members = [
   "crates/channels",
   "crates/heartbeat",
   "crates/ironclaw-cli",
+  "crates/farm",
 ]
 resolver = "2"
 

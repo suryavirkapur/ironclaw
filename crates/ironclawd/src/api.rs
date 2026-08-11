@@ -3,6 +3,9 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_scalar::{Scalar, Servable};
 
@@ -99,6 +102,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/admin/memory/{memory_id}", get(admin_memory_detail))
         // heartbeat
         .route("/api/admin/heartbeat", get(admin_heartbeat_status))
+        // agent farm control plane
+        .route("/api/farm/agents", get(farm_agents_list))
+        .route(
+            "/api/farm/agents/{agent_id}/capabilities",
+            get(farm_agent_capabilities),
+        )
+        .route(
+            "/api/farm/tasks",
+            get(farm_tasks_list).post(farm_task_create),
+        )
+        .route("/api/farm/tasks/{task_id}", get(farm_task_detail))
+        .route(
+            "/a2a/{agent_id}/.well-known/agent-card.json",
+            get(farm_agent_card),
+        )
         .with_state(state);
 
     api_routes.merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
@@ -135,6 +153,31 @@ pub struct ReadinessResponse {
     pub firecracker: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FarmAgentSummary {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub enabled: bool,
+    pub revision: String,
+    pub wasm_tools: usize,
+    pub mcp_servers: usize,
+    pub a2a_skills: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFarmTaskRequest {
+    requester: String,
+    assignee: String,
+    skill: String,
+    #[serde(default)]
+    context_id: Option<String>,
+    #[serde(default)]
+    parent_task_id: Option<String>,
+    #[serde(default)]
+    input: Value,
+}
+
 // ---------------------------------------------------------------------------
 // health endpoints
 // ---------------------------------------------------------------------------
@@ -169,6 +212,239 @@ async fn readiness_handler(State(state): State<AppState>) -> Json<ReadinessRespo
         postgres: false,
         firecracker: firecracker_ok,
     })
+}
+
+// ---------------------------------------------------------------------------
+// agent farm control plane
+// ---------------------------------------------------------------------------
+
+async fn farm_agents_list(State(state): State<AppState>) -> Json<Vec<FarmAgentSummary>> {
+    Json(
+        state
+            .farm_registry
+            .agents()
+            .map(|record| FarmAgentSummary {
+                id: record.manifest.id.clone(),
+                name: record.manifest.name.clone(),
+                role: record.manifest.role.clone(),
+                enabled: record.manifest.enabled,
+                revision: record.revision.clone(),
+                wasm_tools: record.manifest.wasm_tools.len(),
+                mcp_servers: record.manifest.mcp.len(),
+                a2a_skills: record.manifest.skills.len(),
+            })
+            .collect(),
+    )
+}
+
+async fn farm_agent_capabilities(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Vec<farm::Capability>>, (StatusCode, Json<ApiError>)> {
+    state
+        .farm_registry
+        .capabilities_for(&agent_id)
+        .map(Json)
+        .map_err(|err| (StatusCode::NOT_FOUND, Json(ApiError::new(err.to_string()))))
+}
+
+async fn farm_agent_card(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<ApiError>)> {
+    let base_url = state
+        .host_config
+        .farm
+        .public_base_url
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "http://{}:{}",
+                state.host_config.server.bind, state.host_config.server.port
+            )
+        });
+    state
+        .farm_registry
+        .agent_card(&agent_id, &base_url)
+        .map(Json)
+        .map_err(|err| (StatusCode::NOT_FOUND, Json(ApiError::new(err.to_string()))))
+}
+
+async fn farm_tasks_list(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<farm::FarmTask>>, (StatusCode, Json<ApiError>)> {
+    state
+        .farm_tasks
+        .list()
+        .map(Json)
+        .map_err(internal_farm_error)
+}
+
+async fn farm_task_detail(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<farm::FarmTask>, (StatusCode, Json<ApiError>)> {
+    match state
+        .farm_tasks
+        .get(&task_id)
+        .map_err(internal_farm_error)?
+    {
+        Some(task) => Ok(Json(task)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("task not found: {task_id}"))),
+        )),
+    }
+}
+
+async fn farm_task_create(
+    State(state): State<AppState>,
+    Json(request): Json<CreateFarmTaskRequest>,
+) -> Result<(StatusCode, Json<farm::FarmTask>), (StatusCode, Json<ApiError>)> {
+    let capability_name = format!("agent://{}/{}", request.assignee, request.skill);
+    let capability_uri = farm::CapabilityUri::from_str(&capability_name).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(err.to_string())),
+        )
+    })?;
+    let allowed = state
+        .farm_registry
+        .capabilities_for(&request.requester)
+        .map_err(|err| (StatusCode::FORBIDDEN, Json(ApiError::new(err.to_string()))))?
+        .into_iter()
+        .any(|capability| capability.uri == capability_uri);
+    if !allowed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new(format!(
+                "agent {} may not delegate {} to {}",
+                request.requester, request.skill, request.assignee
+            ))),
+        ));
+    }
+
+    let now = now_ms().map_err(internal_farm_error)?;
+    let parent = match request.parent_task_id.as_deref() {
+        Some(parent_id) => Some(
+            state
+                .farm_tasks
+                .get(parent_id)
+                .map_err(internal_farm_error)?
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiError::new(format!("parent task not found: {parent_id}"))),
+                    )
+                })?,
+        ),
+        None => None,
+    };
+    if let Some(parent) = &parent {
+        if parent.state.terminal() {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new("cannot delegate from a terminal parent task")),
+            ));
+        }
+        if parent.assignee != request.requester {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiError::new(
+                    "only the assignee of a parent task may delegate its child task",
+                )),
+            ));
+        }
+        if request
+            .context_id
+            .as_deref()
+            .is_some_and(|context_id| context_id != parent.context_id)
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(
+                    "child task context_id must match its parent task",
+                )),
+            ));
+        }
+    }
+    let depth = parent
+        .as_ref()
+        .map(|task| task.delegation_depth.saturating_add(1))
+        .unwrap_or(0);
+    let requester = state
+        .farm_registry
+        .get(&request.requester)
+        .expect("capability lookup proved requester exists");
+    if depth > requester.manifest.a2a.max_delegation_depth {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("delegation depth limit exceeded")),
+        ));
+    }
+
+    let assignee = state
+        .farm_registry
+        .get(&request.assignee)
+        .expect("capability lookup proved assignee exists");
+    let active_tasks = state
+        .farm_tasks
+        .list()
+        .map_err(internal_farm_error)?
+        .into_iter()
+        .filter(|task| task.assignee == request.assignee && !task.state.terminal())
+        .count();
+    if active_tasks >= usize::from(assignee.manifest.a2a.max_concurrent_tasks) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiError::new(format!(
+                "agent {} has reached its concurrent task limit",
+                request.assignee
+            ))),
+        ));
+    }
+
+    let task_id = format!("task-{now}-{:08x}", rand::random::<u32>());
+    let context_id = parent
+        .as_ref()
+        .map(|task| task.context_id.clone())
+        .or(request.context_id)
+        .unwrap_or_else(|| format!("context-{now}-{:08x}", rand::random::<u32>()));
+    let task = farm::FarmTask {
+        id: task_id.clone(),
+        context_id,
+        parent_task_id: request.parent_task_id,
+        requester: request.requester,
+        assignee: request.assignee,
+        skill: request.skill,
+        state: farm::TaskState::Submitted,
+        input: request.input,
+        output: None,
+        artifact_ids: Vec::new(),
+        delegation_depth: depth,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    state
+        .farm_tasks
+        .insert(task.clone())
+        .map_err(internal_farm_error)?;
+    crate::spawn_farm_task_dispatch(state.clone(), task.clone());
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+fn now_ms() -> Result<u64, farm::TaskError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|err| farm::TaskError::Invalid(format!("system clock error: {err}")))
+}
+
+fn internal_farm_error(error: farm::TaskError) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiError::new(error.to_string())),
+    )
 }
 
 // ---------------------------------------------------------------------------

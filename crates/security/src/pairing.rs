@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 

@@ -25,6 +25,8 @@ pub struct HostConfig {
     pub gateway: HostGatewayConfig,
     #[serde(default)]
     pub security: HostSecurityConfig,
+    #[serde(default)]
+    pub farm: HostFarmConfig,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -278,6 +280,37 @@ impl HostConfig {
             daemon: HostDaemonConfig::default(),
             gateway: HostGatewayConfig::default(),
             security: HostSecurityConfig::default(),
+            farm: HostFarmConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostFarmConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_agent_manifests_dir")]
+    pub manifests_dir: PathBuf,
+    #[serde(default)]
+    pub public_base_url: Option<String>,
+    /// Maps logical MCP credential names to environment-variable names. The
+    /// environment value is read only at invocation time and is never sent to
+    /// an agent guest.
+    #[serde(default)]
+    pub mcp_credential_env: std::collections::BTreeMap<String, String>,
+}
+
+fn default_agent_manifests_dir() -> PathBuf {
+    PathBuf::from("agents")
+}
+
+impl Default for HostFarmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            manifests_dir: default_agent_manifests_dir(),
+            public_base_url: None,
+            mcp_credential_env: std::collections::BTreeMap::new(),
         }
     }
 }

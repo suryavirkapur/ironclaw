@@ -1,0 +1,50 @@
+id = "backend-engineer"
+name = "Linus"
+role = "Backend Engineer"
+reports_to = "cto"
+
+[model]
+provider = "openrouter"
+model = "anthropic/claude-sonnet"
+
+[wasm]
+tools_dir = "tools"
+may_create = true
+may_publish = false
+
+[a2a]
+accept_from = ["cto"]
+max_delegation_depth = 2
+max_concurrent_tasks = 3
+
+[[mcp]]
+id = "observability"
+server = "https://mcp.internal.example/observability"
+credential = "observability"
+tools = ["logs.search", "traces.get"]
+resources = ["service-catalog", "runbooks"]
+scopes = ["observability:read"]
+data_classes = ["internal"]
+
+[[wasm_tools]]
+id = "cluster_logs"
+module = "cluster_logs.wasm"
+description = "Normalize and cluster related log records."
+effect = "read"
+data_classes = ["internal"]
+
+[wasm_tools.permissions]
+mcp_tools = ["mcp://observability/logs.search"]
+
+[wasm_tools.limits]
+memory_mib = 64
+fuel = 10000000
+timeout_ms = 10000
+
+[[skills]]
+id = "implement_backend_change"
+description = "Implement and verify a backend change, returning code and test artifacts."
+
+[[skills]]
+id = "investigate_api_incident"
+description = "Investigate an API incident using logs, traces, code, and runbooks."

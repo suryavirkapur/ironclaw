@@ -4,6 +4,7 @@ use common::proto::ironclaw::{
     agent_control, message_envelope, AgentState, Artifact, MessageEnvelope, UploadedFile,
 };
 use common::transport::Transport;
+use farm::{AgentManifest, WasmExecutor};
 use memory::{
     forget_memories_by_query, forget_memory_by_id, hybrid_search, initialize_schema,
     list_pinned_memories, redact_secrets, reindex_markdown, upsert_memory, Chunk,
@@ -13,6 +14,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tools::{
@@ -49,6 +51,26 @@ pub struct Runtime {
     tool_registry: ToolRegistry,
     safety: SafetyLayer,
     brave_search_credentials: BraveSearchCredentials,
+    agent_manifest: Option<AgentManifest>,
+}
+
+struct WasmGuestTool {
+    executor: Arc<WasmExecutor>,
+    manifest: farm::manifest::WasmTool,
+}
+
+impl Tool for WasmGuestTool {
+    fn run(&self, input: &str) -> Result<ToolResult, ToolError> {
+        let input = serde_json::from_str(input)
+            .map_err(|err| ToolError::new(format!("Wasm tool input must be JSON: {err}")))?;
+        let output = self
+            .executor
+            .invoke(&self.manifest, &input)
+            .map_err(|err| ToolError::new(format!("Wasm tool failed: {err}")))?;
+        let output = serde_json::to_string(&output)
+            .map_err(|err| ToolError::new(format!("Wasm tool output encode failed: {err}")))?;
+        Ok(ToolResult { output, ok: true })
+    }
 }
 
 impl Runtime {
@@ -163,6 +185,7 @@ impl Runtime {
             tool_registry,
             safety: SafetyLayer::new(),
             brave_search_credentials,
+            agent_manifest: None,
         })
     }
 
@@ -173,6 +196,42 @@ impl Runtime {
 
     pub fn set_allowed_tools(&mut self, tools: &[String]) {
         self.tool_registry.set_allowed_tools(tools);
+    }
+
+    pub fn apply_agent_manifest(
+        &mut self,
+        expected_agent_id: &str,
+        manifest_toml: &str,
+    ) -> Result<(), IrowclawError> {
+        if manifest_toml.trim().is_empty() {
+            return Ok(());
+        }
+        let manifest = AgentManifest::from_toml(manifest_toml)
+            .map_err(|err| IrowclawError::new(format!("agent manifest failed: {err}")))?;
+        if manifest.id != expected_agent_id {
+            return Err(IrowclawError::new(format!(
+                "agent manifest id {} does not match authenticated agent {}",
+                manifest.id, expected_agent_id
+            )));
+        }
+        let tools_root = self.brain.root.join(&manifest.wasm.tools_dir);
+        std::fs::create_dir_all(&tools_root)
+            .map_err(|err| IrowclawError::new(format!("Wasm tools directory failed: {err}")))?;
+        let executor = Arc::new(
+            WasmExecutor::new(tools_root)
+                .map_err(|err| IrowclawError::new(format!("Wasm runtime failed: {err}")))?,
+        );
+        for tool in &manifest.wasm_tools {
+            self.tool_registry.register(
+                &tool.id,
+                Box::new(WasmGuestTool {
+                    executor: executor.clone(),
+                    manifest: tool.clone(),
+                }),
+            );
+        }
+        self.agent_manifest = Some(manifest);
+        Ok(())
     }
 
     pub fn set_brave_api_key(&self, api_key: &str) -> Result<(), IrowclawError> {
@@ -355,6 +414,7 @@ pub async fn run_with_transport<T: Transport + 'static>(
         Ok(Some(message)) => match message.payload {
             Some(message_envelope::Payload::AuthChallenge(ch)) => {
                 let token = ch.cap_token.clone();
+                runtime.apply_agent_manifest(&message.user_id, &ch.agent_manifest_toml)?;
                 runtime.set_allowed_tools(&ch.allowed_tools);
                 if !ch.brave_api_key.trim().is_empty() {
                     runtime.set_brave_api_key(&ch.brave_api_key)?;
@@ -490,6 +550,78 @@ pub async fn run_with_transport<T: Transport + 'static>(
                     &mut runtime,
                 )
                 .await?
+            }
+            Some(message_envelope::Payload::AgentTaskRequest(task)) => {
+                if power_state.sleeping {
+                    power_state.sleeping = false;
+                    power_state.last_reason = "a2a_task".to_string();
+                    power_state.save(&power_state_path)?;
+                }
+                transport
+                    .send(MessageEnvelope {
+                        user_id: message.user_id.clone(),
+                        session_id: message.session_id.clone(),
+                        msg_id: message.msg_id,
+                        timestamp_ms: now_ms()?,
+                        cap_token: cap_token.clone(),
+                        payload: Some(message_envelope::Payload::AgentTaskUpdate(
+                            common::proto::ironclaw::AgentTaskUpdate {
+                                task_id: task.task_id.clone(),
+                                state: "working".to_string(),
+                                output_json: String::new(),
+                                artifact_ids: Vec::new(),
+                                error: String::new(),
+                            },
+                        )),
+                    })
+                    .await
+                    .map_err(|err| IrowclawError::new(err.to_string()))?;
+                let prompt = format!(
+                    "A2A delegated task.\nTask ID: {}\nRequester: {}\nSkill: {}\nInput JSON:\n{}\n\
+                     Complete the task using your authorized capabilities and return the result.",
+                    task.task_id, task.requester, task.skill, task.input_json
+                );
+                let result = run_user_request(
+                    &mut transport,
+                    &cap_token,
+                    &message,
+                    &prompt,
+                    &mode,
+                    &mut internal_call_id,
+                    &mut runtime,
+                )
+                .await;
+                let (state, output_json, artifact_ids, error) = match result {
+                    Ok(Some(envelope)) => task_result_from_envelope(envelope),
+                    Ok(None) => (
+                        "completed".to_string(),
+                        "null".to_string(),
+                        Vec::new(),
+                        String::new(),
+                    ),
+                    Err(err) => (
+                        "failed".to_string(),
+                        "null".to_string(),
+                        Vec::new(),
+                        err.to_string(),
+                    ),
+                };
+                Some(MessageEnvelope {
+                    user_id: message.user_id,
+                    session_id: message.session_id,
+                    msg_id: message.msg_id,
+                    timestamp_ms: now_ms()?,
+                    cap_token: cap_token.clone(),
+                    payload: Some(message_envelope::Payload::AgentTaskUpdate(
+                        common::proto::ironclaw::AgentTaskUpdate {
+                            task_id: task.task_id,
+                            state,
+                            output_json,
+                            artifact_ids,
+                            error,
+                        },
+                    )),
+                })
             }
             Some(message_envelope::Payload::UploadedFile(upload)) => {
                 if power_state.sleeping {
@@ -630,6 +762,38 @@ pub async fn run_with_transport<T: Transport + 'static>(
     }
     scheduler_task.abort();
     Ok(())
+}
+
+fn task_result_from_envelope(envelope: MessageEnvelope) -> (String, String, Vec<String>, String) {
+    match envelope.payload {
+        Some(message_envelope::Payload::StreamDelta(delta)) => (
+            "completed".to_string(),
+            serde_json::to_string(&serde_json::json!({"text": delta.delta}))
+                .unwrap_or_else(|_| "null".to_string()),
+            Vec::new(),
+            String::new(),
+        ),
+        Some(message_envelope::Payload::Artifact(artifact)) => {
+            let artifact_id = artifact.filename.clone();
+            (
+                "completed".to_string(),
+                serde_json::to_string(&serde_json::json!({
+                    "filename": artifact.filename,
+                    "mime_type": artifact.mime_type,
+                    "caption": artifact.caption
+                }))
+                .unwrap_or_else(|_| "null".to_string()),
+                vec![artifact_id],
+                String::new(),
+            )
+        }
+        other => (
+            "failed".to_string(),
+            "null".to_string(),
+            Vec::new(),
+            format!("agent task produced unsupported response: {other:?}"),
+        ),
+    }
 }
 
 const MAX_UPLOADED_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -1034,7 +1198,9 @@ async fn run_guest_tools_turn<T: Transport>(
                     }),
                 }
             }
-            GuestPlan::Tool { tool, input } if tool == "weather" => {
+            GuestPlan::Tool { tool, input }
+                if matches!(tool.as_str(), "weather" | "mcp_call" | "delegate_task") =>
+            {
                 let result = request_host_tool(
                     transport,
                     cap_token,
@@ -1094,7 +1260,9 @@ async fn execute_single_guest_plan<T: Transport>(
         GuestPlan::Tool { tool, input } if tool == "publish_artifact" => {
             build_artifact_reply(source, cap_token, runtime, &input)
         }
-        GuestPlan::Tool { tool, input } if tool == "weather" => {
+        GuestPlan::Tool { tool, input }
+            if matches!(tool.as_str(), "weather" | "mcp_call" | "delegate_task") =>
+        {
             let output = request_host_tool(
                 transport,
                 cap_token,
