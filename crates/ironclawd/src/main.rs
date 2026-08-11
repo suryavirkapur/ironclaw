@@ -428,6 +428,13 @@ impl AppState {
         } else {
             FarmRegistry::default()
         };
+        if let Some(entry_agent) = config.farm.entry_agent.as_deref() {
+            if farm_registry.get(entry_agent).is_none() {
+                return Err(IronclawError::new(format!(
+                    "farm entry agent is not registered: {entry_agent}"
+                )));
+            }
+        }
         let farm_registry = Arc::new(farm_registry);
         let mcp_gateway = Arc::new(
             mcp::McpGateway::new(farm_registry.clone(), config.farm.clone())
@@ -2331,6 +2338,17 @@ struct DelegateTaskInput {
     input: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+struct AwaitTaskInput {
+    task_id: String,
+    #[serde(default = "default_await_task_timeout_seconds")]
+    timeout_seconds: u64,
+}
+
+fn default_await_task_timeout_seconds() -> u64 {
+    120
+}
+
 async fn execute_requested_host_tool(
     state: &AppState,
     user_id: &str,
@@ -2374,6 +2392,13 @@ async fn execute_requested_host_tool(
             }
             None => Err("delegate_task is only available while executing an A2A task".to_string()),
         }
+    } else if request.tool == "await_task" {
+        match active_task_id {
+            Some(parent_task_id) => {
+                await_delegated_task(state, user_id, parent_task_id, &request.input).await
+            }
+            None => Err("await_task is only available while executing an A2A task".to_string()),
+        }
     } else {
         run_host_tool(
             host_allowed_tools,
@@ -2387,6 +2412,36 @@ async fn execute_requested_host_tool(
     match result {
         Ok(output) => (true, truncate_tool_output(&output)),
         Err(error) => (false, truncate_tool_output(&error)),
+    }
+}
+
+async fn await_delegated_task(
+    state: &AppState,
+    requester: &str,
+    parent_task_id: &str,
+    raw_input: &str,
+) -> Result<String, String> {
+    let input: AwaitTaskInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("await task input is invalid: {err}"))?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(input.timeout_seconds.clamp(1, 300));
+    loop {
+        let task = state
+            .farm_tasks
+            .get(&input.task_id)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("child task not found: {}", input.task_id))?;
+        if task.requester != requester || task.parent_task_id.as_deref() != Some(parent_task_id) {
+            return Err("agent may await only its own direct child task".to_string());
+        }
+        if task.state.terminal() {
+            return serde_json::to_string(&task)
+                .map_err(|err| format!("child task encode failed: {err}"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for child task {}", task.id));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
@@ -2963,13 +3018,20 @@ struct TelegramSession {
 }
 
 impl TelegramSession {
-    fn load(chat_id: i64, users_root: &StdPath) -> Result<Self, IronclawError> {
-        let session_id = format!("telegram-{chat_id}");
+    fn load(
+        chat_id: i64,
+        users_root: &StdPath,
+        entry_agent: Option<&str>,
+    ) -> Result<Self, IronclawError> {
+        let user_id = entry_agent
+            .map(str::to_string)
+            .unwrap_or_else(|| resolve_owner_user_id(ChannelSource::Telegram, None));
+        let session_id = telegram_agent_session_id(chat_id, &user_id);
         let transcript_path = telegram_transcript_path(users_root, &session_id);
         let transcript = load_telegram_transcript(&transcript_path)?;
         Ok(Self {
             chat_id,
-            user_id: resolve_owner_user_id(ChannelSource::Telegram, None),
+            user_id,
             session_id,
             msg_id: 1,
             transport: None,
@@ -2980,6 +3042,19 @@ impl TelegramSession {
             guest_sleeping: false,
             last_user_message_ms: 0,
         })
+    }
+
+    fn switch_agent(&mut self, agent_id: &str, users_root: &StdPath) -> Result<(), IronclawError> {
+        self.user_id = agent_id.to_string();
+        self.session_id = telegram_agent_session_id(self.chat_id, agent_id);
+        self.transcript_path = telegram_transcript_path(users_root, &self.session_id);
+        self.transcript = load_telegram_transcript(&self.transcript_path)?;
+        self.transport = None;
+        self.transport_failures = 0;
+        self.runtime_banner_sent = false;
+        self.guest_sleeping = false;
+        self.last_user_message_ms = 0;
+        Ok(())
     }
 
     fn append_user_message(&mut self, text: &str, timestamp_ms: u64) -> Result<(), IronclawError> {
@@ -3070,6 +3145,7 @@ async fn run_telegram_loop(
     let mut owner_session = TelegramSession::load(
         settings.owner_chat_id,
         &state.host_config.storage.users_root,
+        state.host_config.farm.entry_agent.as_deref(),
     )?;
     if state.execution_mode != RuntimeExecutionMode::HostOnly {
         match ensure_telegram_session_transport(&state, &mut owner_session).await {
@@ -3113,8 +3189,11 @@ async fn run_telegram_loop(
                         continue;
                     }
                     if !sessions.contains_key(&chat_id) {
-                        let session =
-                            TelegramSession::load(chat_id, &state.host_config.storage.users_root)?;
+                        let session = TelegramSession::load(
+                            chat_id,
+                            &state.host_config.storage.users_root,
+                            state.host_config.farm.entry_agent.as_deref(),
+                        )?;
                         sessions.insert(chat_id, session);
                     }
                     let upload = if let Some(document) = message.document.as_ref() {
@@ -3279,6 +3358,240 @@ async fn enforce_telegram_idle_timeouts(
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TelegramTeamCommand {
+    Help,
+    Team,
+    Agent(Option<String>),
+    Assign {
+        assignee: String,
+        skill: String,
+        request: String,
+    },
+    Tasks,
+    Invalid(String),
+}
+
+fn parse_telegram_team_command(text: &str) -> Option<TelegramTeamCommand> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    let mut parts = trimmed.split_whitespace();
+    let command = parts
+        .next()
+        .unwrap_or_default()
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Some(match command.as_str() {
+        "/start" | "/help" => TelegramTeamCommand::Help,
+        "/team" => TelegramTeamCommand::Team,
+        "/agent" => TelegramTeamCommand::Agent(parts.next().map(str::to_string)),
+        "/tasks" => TelegramTeamCommand::Tasks,
+        "/assign" | "/task" => {
+            let assignee = parts.next().unwrap_or_default().to_string();
+            let skill = parts.next().unwrap_or_default().to_string();
+            let request = parts.collect::<Vec<_>>().join(" ");
+            if assignee.is_empty() || skill.is_empty() || request.is_empty() {
+                TelegramTeamCommand::Invalid(
+                    "usage: /assign <agent-id> <skill-id> <request>".to_string(),
+                )
+            } else {
+                TelegramTeamCommand::Assign {
+                    assignee,
+                    skill,
+                    request,
+                }
+            }
+        }
+        _ => TelegramTeamCommand::Invalid(
+            "unknown command; use /help to see the engineering-team commands".to_string(),
+        ),
+    })
+}
+
+async fn execute_telegram_team_command(
+    state: &AppState,
+    session: &mut TelegramSession,
+    command: TelegramTeamCommand,
+) -> Result<String, IronclawError> {
+    match command {
+        TelegramTeamCommand::Help => Ok(format!(
+            "Engineering team commands\n\n\
+             /team — list the five agents and active work\n\
+             /agent <agent-id> — switch who you are talking to\n\
+             /assign <agent-id> <skill-id> <request> — assign A2A work as {}\n\
+             /tasks — show recent work involving the selected agent\n\n\
+             Plain messages go to the selected agent's private VM.",
+            session.user_id
+        )),
+        TelegramTeamCommand::Team => {
+            let tasks = state
+                .farm_tasks
+                .list()
+                .map_err(|err| IronclawError::new(err.to_string()))?;
+            let mut lines = vec!["Engineering team".to_string()];
+            for record in state.farm_registry.agents() {
+                let active = tasks
+                    .iter()
+                    .filter(|task| task.assignee == record.manifest.id && !task.state.terminal())
+                    .count();
+                let selected = if record.manifest.id == session.user_id {
+                    "→"
+                } else {
+                    "•"
+                };
+                lines.push(format!(
+                    "{selected} {} — {} ({active} active)",
+                    record.manifest.id, record.manifest.role
+                ));
+            }
+            if lines.len() == 1 {
+                lines.push("No farm agents are configured.".to_string());
+            }
+            Ok(lines.join("\n"))
+        }
+        TelegramTeamCommand::Agent(None) => Ok(format!(
+            "Selected agent: {}\nUse /team to list available agents.",
+            session.user_id
+        )),
+        TelegramTeamCommand::Agent(Some(agent_id)) => {
+            let Some(record) = state.farm_registry.get(&agent_id) else {
+                return Ok(format!(
+                    "Unknown agent: {agent_id}. Use /team to list agents."
+                ));
+            };
+            let agent_name = record.manifest.name.clone();
+            let agent_role = record.manifest.role.clone();
+            if session.user_id == agent_id {
+                return Ok(format!(
+                    "Already talking to {} — {}.",
+                    agent_name, agent_role
+                ));
+            }
+            if session.transport.take().is_some() {
+                let _ = state.vm_manager.stop_vm(&session.user_id).await;
+            }
+            session.switch_agent(&agent_id, &state.host_config.storage.users_root)?;
+            Ok(format!(
+                "Now talking to {} — {}. This agent has a separate VM, transcript, workspace, and memory.",
+                agent_name, agent_role
+            ))
+        }
+        TelegramTeamCommand::Assign {
+            assignee,
+            skill,
+            request,
+        } => {
+            let task = match create_channel_farm_task(
+                state,
+                &session.user_id,
+                &assignee,
+                &skill,
+                serde_json::json!({"request": request, "source": "telegram"}),
+            ) {
+                Ok(task) => task,
+                Err(err) => return Ok(format!("Task rejected: {err}")),
+            };
+            Ok(format!(
+                "Task submitted\nID: {}\n{} → {} / {}\nUse /tasks to follow it.",
+                task.id, task.requester, task.assignee, task.skill
+            ))
+        }
+        TelegramTeamCommand::Tasks => {
+            let mut tasks = state
+                .farm_tasks
+                .list()
+                .map_err(|err| IronclawError::new(err.to_string()))?
+                .into_iter()
+                .filter(|task| {
+                    task.requester == session.user_id || task.assignee == session.user_id
+                })
+                .collect::<Vec<_>>();
+            tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at_ms));
+            let mut lines = vec![format!("Recent tasks for {}", session.user_id)];
+            for task in tasks.into_iter().take(10) {
+                lines.push(format!(
+                    "• {} [{}] {} → {} / {}",
+                    task.id,
+                    format!("{:?}", task.state).to_ascii_lowercase(),
+                    task.requester,
+                    task.assignee,
+                    task.skill
+                ));
+            }
+            if lines.len() == 1 {
+                lines.push("No tasks yet.".to_string());
+            }
+            Ok(lines.join("\n"))
+        }
+        TelegramTeamCommand::Invalid(message) => Ok(message),
+    }
+}
+
+fn create_channel_farm_task(
+    state: &AppState,
+    requester: &str,
+    assignee: &str,
+    skill: &str,
+    input: serde_json::Value,
+) -> Result<FarmTask, IronclawError> {
+    let capability: farm::CapabilityUri = format!("agent://{assignee}/{skill}")
+        .parse()
+        .map_err(|err| IronclawError::new(format!("invalid task capability: {err}")))?;
+    let allowed = state
+        .farm_registry
+        .capabilities_for(requester)
+        .map_err(|err| IronclawError::new(err.to_string()))?
+        .into_iter()
+        .any(|candidate| candidate.uri == capability);
+    if !allowed {
+        return Err(IronclawError::new(format!(
+            "{requester} may not assign {skill} to {assignee}"
+        )));
+    }
+    let assignee_record = state
+        .farm_registry
+        .get(assignee)
+        .ok_or_else(|| IronclawError::new(format!("unknown assignee: {assignee}")))?;
+    let active_tasks = state
+        .farm_tasks
+        .list()
+        .map_err(|err| IronclawError::new(err.to_string()))?
+        .into_iter()
+        .filter(|task| task.assignee == assignee && !task.state.terminal())
+        .count();
+    if active_tasks >= usize::from(assignee_record.manifest.a2a.max_concurrent_tasks) {
+        return Err(IronclawError::new(format!(
+            "agent {assignee} has reached its concurrent task limit"
+        )));
+    }
+    let now = now_ms()?;
+    let task = FarmTask {
+        id: format!("task-{now}-{:08x}", rand::random::<u32>()),
+        context_id: format!("context-{now}-{:08x}", rand::random::<u32>()),
+        parent_task_id: None,
+        requester: requester.to_string(),
+        assignee: assignee.to_string(),
+        skill: skill.to_string(),
+        state: TaskState::Submitted,
+        input,
+        output: None,
+        artifact_ids: Vec::new(),
+        delegation_depth: 0,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    state
+        .farm_tasks
+        .insert(task.clone())
+        .map_err(|err| IronclawError::new(err.to_string()))?;
+    spawn_farm_task_dispatch(state.clone(), task.clone());
+    Ok(task)
+}
+
 async fn handle_telegram_text(
     state: &AppState,
     client: &TelegramClient,
@@ -3286,6 +3599,12 @@ async fn handle_telegram_text(
     text: &str,
     upload: Option<&UploadedFile>,
 ) -> Result<(), IronclawError> {
+    if let Some(command) = parse_telegram_team_command(text) {
+        let output = execute_telegram_team_command(state, session, command).await?;
+        send_stream_to_telegram(client, session.chat_id, &output).await?;
+        session.append_assistant_message(&output, now_ms().unwrap_or(0))?;
+        return Ok(());
+    }
     if !session.runtime_banner_sent {
         let banner = telegram_runtime_banner(state.local_guest);
         send_stream_to_telegram(client, session.chat_id, banner).await?;
@@ -3730,6 +4049,7 @@ fn allowed_tools_for_agent(state: &AppState, agent_id: &str) -> Vec<String> {
     }
     if !record.manifest.a2a.delegate_to.is_empty() {
         tools.push("delegate_task".to_string());
+        tools.push("await_task".to_string());
     }
     tools.sort();
     tools.dedup();
@@ -4090,6 +4410,10 @@ fn escape_telegram_html(input: &str) -> String {
 
 fn telegram_transcript_path(users_root: &StdPath, session_id: &str) -> PathBuf {
     users_root.join(session_id).join("telegram.transcript.json")
+}
+
+fn telegram_agent_session_id(chat_id: i64, agent_id: &str) -> String {
+    format!("telegram-{chat_id}-{agent_id}")
 }
 
 fn load_telegram_transcript(path: &StdPath) -> Result<TelegramTranscript, IronclawError> {
@@ -4592,13 +4916,14 @@ mod tests {
     use super::{
         allowed_tools_for_runtime, brain_ext4_path, decode_host_plan_request,
         decode_websocket_upload, deterministic_guest_tools_plan, handle_guest_job_trigger,
-        load_telegram_offset, load_telegram_transcript, render_telegram_html,
-        resolve_owner_user_id, save_telegram_offset, save_telegram_transcript,
-        should_enter_idle_sleep, split_telegram_chunks, telegram_firecracker_requirement_error,
+        load_telegram_offset, load_telegram_transcript, parse_telegram_team_command,
+        render_telegram_html, resolve_owner_user_id, save_telegram_offset,
+        save_telegram_transcript, should_enter_idle_sleep, split_telegram_chunks,
+        telegram_agent_session_id, telegram_firecracker_requirement_error,
         telegram_transcript_path, validate_inbound_upload, ws_text_to_guest_payload, ChannelSource,
-        RuntimeExecutionMode, TelegramApiResponse, TelegramSendMessageRequest, TelegramTranscript,
-        TelegramTranscriptMessage, TelegramUpdate, ToolPlan, MAX_INBOUND_FILE_BYTES,
-        TELEGRAM_TRANSCRIPT_MAX_TURNS,
+        RuntimeExecutionMode, TelegramApiResponse, TelegramSendMessageRequest, TelegramTeamCommand,
+        TelegramTranscript, TelegramTranscriptMessage, TelegramUpdate, ToolPlan,
+        MAX_INBOUND_FILE_BYTES, TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
     use common::proto::ironclaw::{message_envelope, MessageEnvelope, UploadedFile};
     use common::transport::{LocalTransport, Transport};
@@ -4627,6 +4952,37 @@ mod tests {
             Some(ToolPlan::Tool { tool, input })
             if tool == "file_read" && input == "notes/tool.txt"
         ));
+    }
+
+    #[test]
+    fn telegram_team_commands_parse_assignments_and_bot_suffixes() {
+        assert_eq!(
+            parse_telegram_team_command(
+                "/assign backend-engineer implement_backend Build the billing API"
+            ),
+            Some(TelegramTeamCommand::Assign {
+                assignee: "backend-engineer".to_string(),
+                skill: "implement_backend".to_string(),
+                request: "Build the billing API".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_telegram_team_command("/team@ironclaw_demo_bot"),
+            Some(TelegramTeamCommand::Team)
+        );
+        assert_eq!(parse_telegram_team_command("hello"), None);
+    }
+
+    #[test]
+    fn telegram_agents_get_separate_session_ids() {
+        assert_eq!(
+            telegram_agent_session_id(42, "engineering-lead"),
+            "telegram-42-engineering-lead"
+        );
+        assert_ne!(
+            telegram_agent_session_id(42, "backend-engineer"),
+            telegram_agent_session_id(42, "frontend-engineer")
+        );
     }
 
     #[test]

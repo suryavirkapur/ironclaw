@@ -585,7 +585,7 @@ fn tool_definition(name: &str) -> ToolDefinition {
             ),
         ),
         "delegate_task" => (
-            "Delegate a durable child task to an authorized specialist agent.",
+            "Delegate a durable child task to an authorized specialist agent. Use await_task afterward when the parent result depends on the specialist's output.",
             object_schema(
                 json!({
                     "assignee": {"type": "string"},
@@ -593,6 +593,16 @@ fn tool_definition(name: &str) -> ToolDefinition {
                     "input": {"type": "object", "additionalProperties": true}
                 }),
                 &["assignee", "skill", "input"],
+            ),
+        ),
+        "await_task" => (
+            "Wait for a child task created by this agent to finish and return its complete durable task record.",
+            object_schema(
+                json!({
+                    "task_id": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
+                }),
+                &["task_id"],
             ),
         ),
         _ => (

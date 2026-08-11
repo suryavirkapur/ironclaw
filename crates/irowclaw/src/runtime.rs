@@ -1199,7 +1199,10 @@ async fn run_guest_tools_turn<T: Transport>(
                 }
             }
             GuestPlan::Tool { tool, input }
-                if matches!(tool.as_str(), "weather" | "mcp_call" | "delegate_task") =>
+                if matches!(
+                    tool.as_str(),
+                    "weather" | "mcp_call" | "delegate_task" | "await_task"
+                ) =>
             {
                 let result = request_host_tool(
                     transport,
@@ -1261,7 +1264,10 @@ async fn execute_single_guest_plan<T: Transport>(
             build_artifact_reply(source, cap_token, runtime, &input)
         }
         GuestPlan::Tool { tool, input }
-            if matches!(tool.as_str(), "weather" | "mcp_call" | "delegate_task") =>
+            if matches!(
+                tool.as_str(),
+                "weather" | "mcp_call" | "delegate_task" | "await_task"
+            ) =>
         {
             let output = request_host_tool(
                 transport,

@@ -1,0 +1,27 @@
+id = "engineering-lead"
+name = "Ravi"
+role = "Engineering Lead"
+reports_to = "product-manager"
+
+[model]
+provider = "openrouter"
+model = "minimax/minimax-m2.5"
+
+[memory]
+private = true
+collections = ["architecture", "delivery", "decisions"]
+
+[a2a]
+accept_from = ["product-manager"]
+delegate_to = ["backend-engineer", "frontend-engineer", "qa-engineer"]
+max_delegation_depth = 3
+max_concurrent_tasks = 5
+
+[[skills]]
+id = "lead_delivery"
+description = "Design a technical plan, delegate implementation and verification, and synthesize the result."
+
+[[skills]]
+id = "review_design"
+description = "Review a technical design for correctness, operability, security, and delivery risk."
+

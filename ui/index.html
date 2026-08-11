@@ -3,46 +3,102 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ironclaw ui</title>
+    <title>Ironclaw Workspace</title>
     <link rel="stylesheet" href="/ui/app.css" />
   </head>
   <body>
-    <main class="page">
-      <header class="header">
-        <div>
-          <p class="eyebrow">ironclaw v0.1.0</p>
-          <h1>ui scaffold</h1>
-          <p class="subtitle">placeholder only. server provides websocket at /ws.</p>
+    <div class="workspace-shell">
+      <aside class="rail" aria-label="Workspace navigation">
+        <div class="workspace-mark">IC</div>
+        <button class="rail-button active" title="Engineering workspace">E</button>
+        <div class="rail-spacer"></div>
+        <span class="health-dot" id="health-dot" title="Daemon status"></span>
+      </aside>
+
+      <aside class="sidebar">
+        <header class="sidebar-header">
+          <div>
+            <p class="eyebrow">Ironclaw</p>
+            <h1>Engineering</h1>
+          </div>
+          <span class="live-label" id="connection-label">connecting</span>
+        </header>
+
+        <nav class="channels" aria-label="Channels">
+          <p class="section-label">Channels</p>
+          <button class="channel active" data-view="tasks"><span>#</span> delivery</button>
+          <button class="channel" data-view="agents"><span>#</span> team</button>
+          <button class="channel" data-view="architecture"><span>#</span> architecture</button>
+        </nav>
+
+        <section class="people-section">
+          <p class="section-label">Agents — <span id="agent-count">0</span></p>
+          <div id="agent-list" class="agent-list"></div>
+        </section>
+      </aside>
+
+      <main class="main-column">
+        <header class="channel-header">
+          <div>
+            <h2><span>#</span> <span id="view-title">delivery</span></h2>
+            <p id="view-description">Live A2A work across the engineering team</p>
+          </div>
+          <button class="primary-button" id="new-task-button">New task</button>
+        </header>
+
+        <section class="metrics" aria-label="Team metrics">
+          <article><strong id="metric-active">0</strong><span>active</span></article>
+          <article><strong id="metric-completed">0</strong><span>completed</span></article>
+          <article><strong id="metric-failed">0</strong><span>needs attention</span></article>
+          <article><strong id="metric-agents">0</strong><span>agents</span></article>
+        </section>
+
+        <section id="content" class="content" aria-live="polite">
+          <div class="empty-state">Loading workspace…</div>
+        </section>
+      </main>
+
+      <aside class="detail-panel">
+        <header>
+          <p class="eyebrow">Inspector</p>
+          <h2 id="detail-title">Select a task</h2>
+        </header>
+        <div id="detail-content" class="detail-content">
+          Task input, delegation lineage, output, and artifacts appear here.
         </div>
-        <div class="status" id="status">offline</div>
-      </header>
-      <section class="panel">
-        <div class="panel-header">
-          <h2>chat stream</h2>
-          <button id="connect">connect</button>
-        </div>
-        <div class="panel-body" id="log"></div>
-        <div class="panel-footer">
-          <input id="input" type="text" placeholder="type a message" />
-          <button id="send">send</button>
-        </div>
-      </section>
-      <section class="panel">
-        <div class="panel-header">
-          <h2>memory layout</h2>
-        </div>
-        <div class="panel-body">
-          <p>/mnt/brain/soul.md</p>
-          <p>/mnt/brain/identity.md</p>
-          <p>/mnt/brain/instructions/*.md</p>
-          <p>/mnt/brain/memory.md</p>
-          <p>/mnt/brain/logs/yyyy-mm-dd.md</p>
-          <p>/mnt/brain/cron/jobs.toml</p>
-          <p>/mnt/brain/config/irowclaw.toml</p>
-          <p>/mnt/brain/db/ironclaw.db</p>
-        </div>
-      </section>
-    </main>
+      </aside>
+    </div>
+
+    <dialog id="task-dialog">
+      <form id="task-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">A2A assignment</p>
+            <h2>Create engineering task</h2>
+          </div>
+          <button type="button" class="icon-button" id="close-dialog" aria-label="Close">×</button>
+        </header>
+
+        <label>
+          Requesting agent
+          <select id="requester" required></select>
+        </label>
+        <label>
+          Assignment
+          <select id="capability" required></select>
+        </label>
+        <label>
+          Request
+          <textarea id="task-request" rows="6" required placeholder="Describe the outcome, constraints, and evidence required."></textarea>
+        </label>
+        <p class="form-error" id="form-error"></p>
+        <footer>
+          <button type="button" class="secondary-button" id="cancel-task">Cancel</button>
+          <button type="submit" class="primary-button">Assign task</button>
+        </footer>
+      </form>
+    </dialog>
+
     <script src="/ui/app.js"></script>
   </body>
 </html>

@@ -1,0 +1,21 @@
+id = "product-manager"
+name = "Maya"
+role = "Product Manager"
+
+[model]
+provider = "openrouter"
+model = "minimax/minimax-m2.5"
+
+[memory]
+private = true
+collections = ["product", "customers", "roadmap"]
+
+[a2a]
+delegate_to = ["engineering-lead"]
+max_delegation_depth = 4
+max_concurrent_tasks = 3
+
+[[skills]]
+id = "shape_feature"
+description = "Turn a customer problem into a scoped feature brief with acceptance criteria."
+

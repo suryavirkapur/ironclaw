@@ -1,0 +1,32 @@
+id = "backend-engineer"
+name = "Nora"
+role = "Backend Engineer"
+reports_to = "engineering-lead"
+
+[model]
+provider = "openrouter"
+model = "minimax/minimax-m2.5"
+
+[memory]
+private = true
+collections = ["backend", "apis", "incidents"]
+
+[wasm]
+tools_dir = "tools"
+may_create = true
+may_publish = false
+
+[a2a]
+accept_from = ["engineering-lead"]
+delegate_to = ["qa-engineer"]
+max_delegation_depth = 2
+max_concurrent_tasks = 3
+
+[[skills]]
+id = "implement_backend"
+description = "Implement and test a backend change, returning code, evidence, and operational notes."
+
+[[skills]]
+id = "investigate_incident"
+description = "Investigate a backend incident and return evidence, likely cause, and remediation."
+

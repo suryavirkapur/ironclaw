@@ -422,4 +422,22 @@ description = "Do work"
             .iter()
             .any(|capability| capability.uri.as_str() == "mcp://observability/logs.search"));
     }
+
+    #[test]
+    fn engineering_team_demo_is_valid() {
+        let manifests =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/engineering-team/agents");
+        let registry = FarmRegistry::load_dir(&manifests).unwrap();
+        assert_eq!(registry.agents().count(), 5);
+        let lead_capabilities = registry.capabilities_for("engineering-lead").unwrap();
+        assert!(lead_capabilities.iter().any(|capability| {
+            capability.uri.as_str() == "agent://backend-engineer/implement_backend"
+        }));
+        assert!(lead_capabilities.iter().any(|capability| {
+            capability.uri.as_str() == "agent://frontend-engineer/implement_frontend"
+        }));
+        assert!(lead_capabilities
+            .iter()
+            .any(|capability| { capability.uri.as_str() == "agent://qa-engineer/verify_release" }));
+    }
 }

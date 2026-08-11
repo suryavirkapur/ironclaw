@@ -18,6 +18,13 @@ Firecracker is unavailable or when `host_only` execution is configured.
 For an end-to-end Telegram test with all agent execution isolated in Firecracker, follow
 [the Telegram setup guide](docs/telegram_setup.md).
 
+To run the five-person Product Manager, Engineering Lead, Backend, Frontend, and QA demo through
+Telegram and the web workspace, use the [engineering-team walkthrough](demos/engineering-team/README.md):
+
+```bash
+./scripts/run-engineering-team-demo.sh
+```
+
 For the faster local development loop, use the [Firecracker CLI](docs/cli.md):
 
 ```bash
@@ -68,5 +75,5 @@ The local PostgreSQL analyst and chart test is documented in
 
 ## Tests
 ```bash
-cargo +nightly-2025-12-26 test  # 91 tests
+cargo +nightly-2025-12-26 test --workspace
 ```

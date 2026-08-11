@@ -293,6 +293,10 @@ pub struct HostFarmConfig {
     pub manifests_dir: PathBuf,
     #[serde(default)]
     pub public_base_url: Option<String>,
+    /// Agent selected when an interactive channel first opens. Channels may
+    /// subsequently switch to another registered agent.
+    #[serde(default)]
+    pub entry_agent: Option<String>,
     /// Maps logical MCP credential names to environment-variable names. The
     /// environment value is read only at invocation time and is never sent to
     /// an agent guest.
@@ -310,6 +314,7 @@ impl Default for HostFarmConfig {
             enabled: false,
             manifests_dir: default_agent_manifests_dir(),
             public_base_url: None,
+            entry_agent: None,
             mcp_credential_env: std::collections::BTreeMap::new(),
         }
     }
@@ -618,4 +623,21 @@ pub struct JobDefinition {
     pub schedule: String,
     pub description: Option<String>,
     pub task: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engineering_team_telegram_config_is_valid() {
+        let config: HostConfig = toml::from_str(include_str!(
+            "../../../configs/ironclawd.engineering-team.telegram.toml"
+        ))
+        .expect("engineering team config");
+        assert!(config.farm.enabled);
+        assert_eq!(config.farm.entry_agent.as_deref(), Some("product-manager"));
+        assert!(config.telegram.enabled);
+        assert_eq!(config.execution_mode, HostExecutionMode::GuestTools);
+    }
 }

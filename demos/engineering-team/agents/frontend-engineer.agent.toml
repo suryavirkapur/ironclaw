@@ -1,0 +1,28 @@
+id = "frontend-engineer"
+name = "Leo"
+role = "Frontend Engineer"
+reports_to = "engineering-lead"
+
+[model]
+provider = "openrouter"
+model = "minimax/minimax-m2.5"
+
+[memory]
+private = true
+collections = ["frontend", "design-system", "accessibility"]
+
+[wasm]
+tools_dir = "tools"
+may_create = true
+may_publish = false
+
+[a2a]
+accept_from = ["engineering-lead"]
+delegate_to = ["qa-engineer"]
+max_delegation_depth = 2
+max_concurrent_tasks = 3
+
+[[skills]]
+id = "implement_frontend"
+description = "Implement and test a user-facing change with accessibility and interaction evidence."
+
