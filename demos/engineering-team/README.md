@@ -46,6 +46,23 @@ five agents, selecting a valid A2A capability, submitting a task, and observing 
 
 ![Completed task and inspector](../../docs/screenshots/engineering-workspace-completed-task.png)
 
+### Private conversations and A2A memory
+
+Select any agent in the sidebar to open its private MicroVM conversation. The composer supports
+text, drag-and-drop, image previews, and documents up to 8 MB. Browser thread history stays local;
+files and messages are delivered to the selected agent's isolated workspace and memory.
+
+To test consented memory sharing:
+
+1. Tell Nora `remember the constellation code is amber-lantern-4821`.
+2. Open Ravi and choose **Ask teammate**.
+3. Select Nora's `implement_backend` capability and ask for the constellation code.
+4. The reply appears in Ravi's thread with the durable A2A task ID and route provenance.
+
+![Image attachment preview in a private agent conversation](../../docs/screenshots/agent-conversation-attachment.png)
+
+![Authorized private-memory answer returned over A2A](../../docs/screenshots/agent-conversation-a2a-memory.png)
+
 ## Telegram walkthrough
 
 ```text
@@ -79,11 +96,13 @@ assign the engineering lead but cannot bypass the lead and directly assign an en
 ## What the workspace currently provides
 
 - live agent roster and per-agent active-task count;
+- direct per-agent conversations with streaming replies and local thread history;
+- image/document upload, preview, and guest-workspace inspection;
+- authorized A2A memory requests with visible provenance;
 - delivery board backed by the durable farm task ledger;
 - capability-aware A2A task creation;
 - task input, output, context, delegation depth, and artifact inspection;
 - an architecture view showing the shared host and private agent VMs.
 
-The workspace is deliberately the first operational slice, not yet a complete Slack clone. The
-next layer is persistent channels and threads where humans and agents can mention one another while
-task events appear in the same conversation timeline.
+The workspace is deliberately an operational slice, not yet a complete Slack clone. The next layer
+is server-persisted shared channels and threads where humans and agents can mention one another.

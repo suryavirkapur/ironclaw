@@ -576,10 +576,16 @@ pub async fn run_with_transport<T: Transport + 'static>(
                     })
                     .await
                     .map_err(|err| IrowclawError::new(err.to_string()))?;
+                let memory_context = authorized_a2a_memory_context(
+                    &runtime,
+                    &message.user_id,
+                    &task.input_json,
+                )?;
                 let prompt = format!(
-                    "A2A delegated task.\nTask ID: {}\nRequester: {}\nSkill: {}\nInput JSON:\n{}\n\
-                     Complete the task using your authorized capabilities and return the result.",
-                    task.task_id, task.requester, task.skill, task.input_json
+                    "A2A delegated task.\nTask ID: {}\nRequester: {}\nSkill: {}\nInput JSON:\n{}\n{}\n\
+                     Complete the task using your authorized capabilities and return the result. \
+                     Disclose only information needed to answer the stated request.",
+                    task.task_id, task.requester, task.skill, task.input_json, memory_context
                 );
                 let result = run_user_request(
                     &mut transport,
@@ -762,6 +768,33 @@ pub async fn run_with_transport<T: Transport + 'static>(
     }
     scheduler_task.abort();
     Ok(())
+}
+
+fn authorized_a2a_memory_context(
+    runtime: &Runtime,
+    agent_id: &str,
+    input_json: &str,
+) -> Result<String, IrowclawError> {
+    let input: serde_json::Value = serde_json::from_str(input_json)
+        .map_err(|err| IrowclawError::new(format!("A2A input JSON failed: {err}")))?;
+    if input.get("purpose").and_then(|value| value.as_str()) != Some("authorized_memory_request") {
+        return Ok(String::new());
+    }
+    let pinned = list_pinned_memories(&runtime.db, agent_id, 25)
+        .map_err(|err| IrowclawError::new(format!("A2A memory lookup failed: {err}")))?;
+    if pinned.is_empty() {
+        return Ok(
+            "Authorized private-memory context: this agent has no pinned memories.".to_string(),
+        );
+    }
+    let facts = pinned
+        .into_iter()
+        .map(|memory| format!("- [memory:{}] {}", memory.id, memory.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(format!(
+        "Authorized private-memory context from this assignee only:\n{facts}"
+    ))
 }
 
 fn task_result_from_envelope(envelope: MessageEnvelope) -> (String, String, Vec<String>, String) {

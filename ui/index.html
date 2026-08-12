@@ -26,6 +26,7 @@
 
         <nav class="channels" aria-label="Channels">
           <p class="section-label">Channels</p>
+          <button class="channel" data-view="chat"><span>●</span> conversations</button>
           <button class="channel active" data-view="tasks"><span>#</span> delivery</button>
           <button class="channel" data-view="agents"><span>#</span> team</button>
           <button class="channel" data-view="architecture"><span>#</span> architecture</button>
@@ -40,10 +41,13 @@
       <main class="main-column">
         <header class="channel-header">
           <div>
-            <h2><span>#</span> <span id="view-title">delivery</span></h2>
+            <h2><span id="view-prefix">#</span> <span id="view-title">delivery</span></h2>
             <p id="view-description">Live A2A work across the engineering team</p>
           </div>
-          <button class="primary-button" id="new-task-button">New task</button>
+          <div class="header-actions">
+            <button class="secondary-button hidden" id="ask-agent-button">Ask teammate</button>
+            <button class="primary-button" id="new-task-button">New task</button>
+          </div>
         </header>
 
         <section class="metrics" aria-label="Team metrics">
@@ -95,6 +99,32 @@
         <footer>
           <button type="button" class="secondary-button" id="cancel-task">Cancel</button>
           <button type="submit" class="primary-button">Assign task</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="a2a-dialog">
+      <form id="a2a-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">Authorized A2A request</p>
+            <h2>Ask a teammate</h2>
+          </div>
+          <button type="button" class="icon-button" id="close-a2a-dialog" aria-label="Close">×</button>
+        </header>
+        <p class="privacy-note" id="a2a-route-note"></p>
+        <label>
+          Teammate and capability
+          <select id="a2a-capability" required></select>
+        </label>
+        <label>
+          Question
+          <textarea id="a2a-question" rows="5" required placeholder="Ask for a fact, decision, analysis, or deliverable from this teammate."></textarea>
+        </label>
+        <p class="form-error" id="a2a-error"></p>
+        <footer>
+          <button type="button" class="secondary-button" id="cancel-a2a">Cancel</button>
+          <button type="submit" class="primary-button">Send A2A request</button>
         </footer>
       </form>
     </dialog>
