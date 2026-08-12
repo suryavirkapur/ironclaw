@@ -320,9 +320,12 @@ impl VmManager for FirecrackerManager {
         std::fs::create_dir_all(&self.config.vsock_uds_dir)
             .map_err(|e| VmError::new(format!("create vsock uds dir failed: {e}")))?;
 
-        if let Err(e) = crate::network_firewall::setup_vm_network(&user_id, &config.allowed_domains)
-        {
-            tracing::warn!("failed to setup network firewall for {}: {}", user_id, e);
+        if self.config.enable_network {
+            if let Err(e) =
+                crate::network_firewall::setup_vm_network(&user_id, &config.allowed_domains)
+            {
+                tracing::warn!("failed to setup network firewall for {}: {}", user_id, e);
+            }
         }
 
         // If one already exists, stop it first.

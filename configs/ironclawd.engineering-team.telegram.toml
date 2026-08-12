@@ -21,6 +21,9 @@ api = "chat_completions"
 
 [firecracker]
 enabled = true
+# The team communicates with the host over vsock. Enable TAP networking on a host with
+# CAP_NET_ADMIN when guest tools need direct internet access.
+enable_network = false
 kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
 rootfs_path = "rootfs/build/ubuntu-24.04.ext4"
 api_socket_dir = "/tmp/ironclaw-engineering-team/fc"

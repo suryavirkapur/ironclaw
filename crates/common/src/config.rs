@@ -97,6 +97,9 @@ pub struct HostUiConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostFirecrackerConfig {
     pub enabled: bool,
+    /// Attach a TAP network device to each guest. Disable this for vsock-only deployments.
+    #[serde(default = "default_firecracker_network")]
+    pub enable_network: bool,
     pub kernel_path: PathBuf,
     pub rootfs_path: PathBuf,
     pub api_socket_dir: PathBuf,
@@ -119,6 +122,10 @@ pub struct HostFirecrackerConfig {
 
 fn default_vcpus() -> u8 {
     2
+}
+
+fn default_firecracker_network() -> bool {
+    true
 }
 
 fn default_memory_mib() -> u32 {
@@ -257,6 +264,7 @@ impl HostConfig {
             },
             firecracker: HostFirecrackerConfig {
                 enabled: false,
+                enable_network: default_firecracker_network(),
                 kernel_path: PathBuf::from("kernels/vmlinux"),
                 rootfs_path: PathBuf::from("rootfs/ironclaw.ext4"),
                 api_socket_dir: PathBuf::from("/tmp/ironclaw-fc"),

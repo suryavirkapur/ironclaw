@@ -21,6 +21,7 @@
 # Local kernel artifacts (do not commit)
 /kernels/linux-src-*
 /kernels/fc-*
+/kernels/firecracker/
 
 # Generated thesis build artifacts
 /Report Thesis Suryavir Kapur/**/*.aux

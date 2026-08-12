@@ -474,7 +474,7 @@ impl AppState {
                         .unwrap_or_else(common::firecracker::default_vsock_port),
                     vcpus: config.firecracker.vcpus,
                     memory_mib: config.firecracker.memory_mib,
-                    enable_network: true,
+                    enable_network: config.firecracker.enable_network,
                 });
                 (Arc::new(manager) as Arc<dyn VmManager>, None)
             }
