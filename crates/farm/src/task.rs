@@ -122,6 +122,34 @@ impl TaskLedger {
             .collect())
     }
 
+    /// Mark tasks whose execution was interrupted by a daemon restart as failed.
+    /// The current runtime does not checkpoint guest execution, so these tasks
+    /// cannot truthfully remain submitted/working after the process restarts.
+    pub fn fail_incomplete_on_startup(
+        &self,
+        reason: &str,
+        updated_at_ms: u64,
+    ) -> Result<usize, TaskError> {
+        let mut tasks = self.tasks.lock().map_err(|_| TaskError::Poisoned)?;
+        let previous = tasks.clone();
+        let mut changed = 0usize;
+        for task in tasks.values_mut() {
+            if !task.state.terminal() {
+                task.state = TaskState::Failed;
+                task.output = Some(serde_json::json!({"error": reason}));
+                task.updated_at_ms = updated_at_ms;
+                changed = changed.saturating_add(1);
+            }
+        }
+        if changed > 0 {
+            if let Err(err) = self.persist(&tasks) {
+                *tasks = previous;
+                return Err(err);
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn transition(
         &self,
         id: &str,
@@ -284,5 +312,46 @@ mod tests {
         ledger.insert(task("persisted")).unwrap();
         let reopened = TaskLedger::open(path).unwrap();
         assert!(reopened.get("persisted").unwrap().is_some());
+    }
+
+    #[test]
+    fn startup_recovery_fails_only_incomplete_tasks_and_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tasks.json");
+        let ledger = TaskLedger::open(&path).unwrap();
+        ledger.insert(task("interrupted")).unwrap();
+        ledger.insert(task("finished")).unwrap();
+        ledger
+            .transition("finished", TaskState::Working, None, 2)
+            .unwrap();
+        ledger
+            .transition(
+                "finished",
+                TaskState::Completed,
+                Some(json!({"ok": true})),
+                3,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ledger
+                .fail_incomplete_on_startup("daemon restarted", 10)
+                .unwrap(),
+            1
+        );
+        let interrupted = TaskLedger::open(path)
+            .unwrap()
+            .get("interrupted")
+            .unwrap()
+            .unwrap();
+        assert_eq!(interrupted.state, TaskState::Failed);
+        assert_eq!(
+            interrupted.output,
+            Some(json!({"error": "daemon restarted"}))
+        );
+        assert_eq!(
+            ledger.get("finished").unwrap().unwrap().state,
+            TaskState::Completed
+        );
     }
 }

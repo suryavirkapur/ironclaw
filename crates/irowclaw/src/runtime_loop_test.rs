@@ -1,6 +1,6 @@
 use super::{
-    artifact_mime_type, artifact_path_requiring_validation, run_with_transport,
-    safe_uploaded_filename,
+    artifact_mime_type, artifact_path_requiring_validation, is_progress_only_answer,
+    run_with_transport, safe_uploaded_filename, task_result_from_envelope,
 };
 use chrono::Timelike;
 use common::proto::ironclaw::{
@@ -13,6 +13,17 @@ use common::transport::{LocalTransport, Transport};
 // variable. Serialize tests that override it so parallel test execution cannot
 // redirect one guest into another test's sandbox.
 static BRAIN_ROOT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[test]
+fn future_intent_is_not_a_terminal_delegated_task_answer() {
+    assert!(is_progress_only_answer(
+        "I'll coordinate the team and start with the backend."
+    ));
+    assert!(is_progress_only_answer("Let me run the tests now."));
+    assert!(!is_progress_only_answer(
+        "Implemented the backend and all 13 tests pass."
+    ));
+}
 
 fn envelope(payload: message_envelope::Payload, cap_token: &str, msg_id: u64) -> MessageEnvelope {
     MessageEnvelope {
@@ -38,6 +49,21 @@ fn publish_artifact_supports_cpp_source_documents() {
 }
 
 #[test]
+fn a2a_planning_failure_is_a_failed_task_not_a_completed_answer() {
+    let result = task_result_from_envelope(envelope(
+        message_envelope::Payload::StreamDelta(common::proto::ironclaw::StreamDelta {
+            delta: "planning failed after 2 tool step(s): host plan timed out".to_string(),
+            done: true,
+        }),
+        "token",
+        1,
+    ));
+    assert_eq!(result.0, "failed");
+    assert!(result.1.contains("null"));
+    assert!(result.3.contains("host plan timed out"));
+}
+
+#[test]
 fn runnable_artifacts_require_validation_but_documents_do_not() {
     assert_eq!(
         artifact_path_requiring_validation(
@@ -49,6 +75,10 @@ fn runnable_artifacts_require_validation_but_documents_do_not() {
     assert_eq!(
         artifact_path_requiring_validation(r#"{"path":"report.md"}"#),
         None
+    );
+    assert_eq!(
+        artifact_path_requiring_validation(r#"{"path":"release.zip"}"#).as_deref(),
+        Some("release.zip")
     );
 }
 

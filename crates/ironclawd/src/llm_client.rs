@@ -64,10 +64,13 @@ impl<M: CompletionModel + 'static> ProviderComplete for CompleteFn<M> {
             });
             if let Some(call) = tool_calls.next() {
                 if tool_calls.next().is_some() {
-                    return Err(CompletionError::ResponseError(
-                        "model returned parallel tool calls, but the Firecracker loop executes one tool at a time"
-                            .into(),
-                    ));
+                    // The guest deliberately executes one capability at a time. Select
+                    // the model's first call; the next planning round receives that
+                    // observation and can schedule the remaining independent calls.
+                    tracing::debug!(
+                        selected_tool = %call.function.name,
+                        "serialized parallel model tool calls for Firecracker guest"
+                    );
                 }
                 return Ok(NativeCompletion::ToolCall(call));
             }

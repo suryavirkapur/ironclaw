@@ -496,6 +496,18 @@ impl AppState {
             config.storage.users_root.join("_farm").join("tasks.json"),
         )
         .map_err(|err| IronclawError::new(format!("farm task ledger init failed: {err}")))?;
+        let recovered_tasks = farm_tasks
+            .fail_incomplete_on_startup(
+                "task execution was interrupted by a daemon restart",
+                now_ms()?,
+            )
+            .map_err(|err| IronclawError::new(format!("farm task recovery failed: {err}")))?;
+        if recovered_tasks > 0 {
+            tracing::warn!(
+                recovered_tasks,
+                "marked interrupted farm tasks failed during startup"
+            );
+        }
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -1579,7 +1591,10 @@ async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), Iro
             }
         }
     };
-    let result = tokio::time::timeout(std::time::Duration::from_secs(600), run)
+    // Engineering workflows can contain several sequential child tasks plus local
+    // implementation and verification. Keep the watchdog finite, but large enough
+    // for a real team delivery rather than a single chat turn.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1_800), run)
         .await
         .map_err(|_| IronclawError::new("A2A task timed out"))?;
     vm_guard.stop().await;
@@ -2272,16 +2287,19 @@ async fn host_plan_tool_response(
     raw_request: &str,
     allowed_tools: &[String],
     history: Option<&[ConversationMessage]>,
+    allow_direct_a2a_shortcut: bool,
 ) -> Result<String, String> {
     let request = decode_host_plan_request(raw_request);
     if request.observations.is_empty() {
-        if let Some(plan) = deterministic_a2a_plan(
-            &state.farm_registry,
-            user_id,
-            &request.user_text,
-            allowed_tools,
-        ) {
-            return tool_plan_to_json(&plan);
+        if allow_direct_a2a_shortcut {
+            if let Some(plan) = deterministic_a2a_plan(
+                &state.farm_registry,
+                user_id,
+                &request.user_text,
+                allowed_tools,
+            ) {
+                return tool_plan_to_json(&plan);
+            }
         }
         if let Some(plan) = deterministic_guest_tools_plan(&request.user_text, allowed_tools) {
             return tool_plan_to_json(&plan);
@@ -2302,7 +2320,7 @@ async fn host_plan_tool_response(
         memory_block.push_str("\n\n");
         memory_block.push_str(&organization);
     }
-    const HOST_PLANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+    const HOST_PLANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     let planning = state.llm_client.plan_tool_or_answer(
         &request.user_text,
         allowed_tools,
@@ -2361,7 +2379,7 @@ struct AwaitTaskInput {
 }
 
 fn default_await_task_timeout_seconds() -> u64 {
-    120
+    300
 }
 
 async fn execute_requested_host_tool(
@@ -2374,7 +2392,15 @@ async fn execute_requested_host_tool(
     active_task_id: Option<&str>,
 ) -> (bool, String) {
     let result = if request.tool == "host_plan" {
-        host_plan_tool_response(state, user_id, &request.input, host_allowed_tools, history).await
+        host_plan_tool_response(
+            state,
+            user_id,
+            &request.input,
+            host_allowed_tools,
+            history,
+            active_task_id.is_none(),
+        )
+        .await
     } else if request.tool == "mcp_call" {
         let input = serde_json::from_str::<McpCallInput>(&request.input)
             .map_err(|err| format!("MCP call input is invalid: {err}"));
@@ -2427,7 +2453,17 @@ async fn execute_requested_host_tool(
         )
         .await
     };
+    finalize_requested_host_tool_response(&request.tool, result)
+}
+
+fn finalize_requested_host_tool_response(
+    tool: &str,
+    result: Result<String, String>,
+) -> (bool, String) {
     match result {
+        // `host_plan` is already a bounded model response and must remain valid JSON.
+        // Truncating it mid-string makes the guest reject otherwise valid plans.
+        Ok(output) if tool == "host_plan" => (true, output),
         Ok(output) => (true, truncate_tool_output(&output)),
         Err(error) => (false, truncate_tool_output(&error)),
     }
@@ -2716,7 +2752,7 @@ fn deterministic_await_a2a_plan(
     let task: FarmTask = serde_json::from_str(&observation.output).ok()?;
     Some(ToolPlan::Tool {
         tool: "await_task".to_string(),
-        input: serde_json::json!({"task_id": task.id, "timeout_seconds": 120}).to_string(),
+        input: serde_json::json!({"task_id": task.id, "timeout_seconds": 300}).to_string(),
     })
 }
 
@@ -5092,19 +5128,34 @@ mod tests {
     use super::{
         agent_organization_context, allowed_tools_for_runtime, brain_ext4_path,
         decode_host_plan_request, decode_websocket_upload, deterministic_a2a_plan,
-        deterministic_await_a2a_plan, deterministic_guest_tools_plan, handle_guest_job_trigger,
-        load_telegram_offset, load_telegram_transcript, parse_telegram_team_command,
-        render_telegram_html, resolve_owner_user_id, save_telegram_offset,
-        save_telegram_transcript, should_enter_idle_sleep, split_telegram_chunks,
-        telegram_agent_session_id, telegram_firecracker_requirement_error,
-        telegram_transcript_path, validate_inbound_upload, ws_text_to_guest_payload, ChannelSource,
-        RuntimeExecutionMode, TelegramApiResponse, TelegramSendMessageRequest, TelegramTeamCommand,
-        TelegramTranscript, TelegramTranscriptMessage, TelegramUpdate, ToolPlan,
-        MAX_INBOUND_FILE_BYTES, TELEGRAM_TRANSCRIPT_MAX_TURNS,
+        deterministic_await_a2a_plan, deterministic_guest_tools_plan,
+        finalize_requested_host_tool_response, handle_guest_job_trigger, load_telegram_offset,
+        load_telegram_transcript, parse_telegram_team_command, render_telegram_html,
+        resolve_owner_user_id, save_telegram_offset, save_telegram_transcript,
+        should_enter_idle_sleep, split_telegram_chunks, telegram_agent_session_id,
+        telegram_firecracker_requirement_error, telegram_transcript_path, validate_inbound_upload,
+        ws_text_to_guest_payload, ChannelSource, RuntimeExecutionMode, TelegramApiResponse,
+        TelegramSendMessageRequest, TelegramTeamCommand, TelegramTranscript,
+        TelegramTranscriptMessage, TelegramUpdate, ToolPlan, MAX_INBOUND_FILE_BYTES,
+        TELEGRAM_TRANSCRIPT_MAX_TURNS,
     };
     use common::proto::ironclaw::{message_envelope, MessageEnvelope, UploadedFile};
     use common::transport::{LocalTransport, Transport};
     use prost::Message;
+
+    #[test]
+    fn host_plan_response_is_not_truncated_mid_json() {
+        let text = "x".repeat(12_000);
+        let plan = serde_json::json!({"action": "answer", "text": text}).to_string();
+        let (ok, output) = finalize_requested_host_tool_response("host_plan", Ok(plan.clone()));
+        assert!(ok);
+        assert_eq!(output, plan);
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+
+        let (_, shell_output) =
+            finalize_requested_host_tool_response("shell", Ok("x".repeat(12_000)));
+        assert!(shell_output.chars().count() < 12_000);
+    }
 
     #[test]
     fn tooltest_write_plans_file_write() {
@@ -5671,7 +5722,9 @@ __________
             panic!("expected await tool plan");
         };
         assert_eq!(tool, "await_task");
-        assert!(input.contains("task-direct-a2a"));
+        let input: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(input["task_id"], "task-direct-a2a");
+        assert_eq!(input["timeout_seconds"], 300);
     }
 
     #[test]

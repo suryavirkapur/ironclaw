@@ -799,6 +799,16 @@ fn authorized_a2a_memory_context(
 
 fn task_result_from_envelope(envelope: MessageEnvelope) -> (String, String, Vec<String>, String) {
     match envelope.payload {
+        Some(message_envelope::Payload::StreamDelta(delta))
+            if delta.delta.starts_with("planning failed after ") =>
+        {
+            (
+                "failed".to_string(),
+                "null".to_string(),
+                Vec::new(),
+                delta.delta,
+            )
+        }
         Some(message_envelope::Payload::StreamDelta(delta)) => (
             "completed".to_string(),
             serde_json::to_string(&serde_json::json!({"text": delta.delta}))
@@ -1036,6 +1046,9 @@ fn build_artifact_reply(
     if !metadata.is_file() {
         return Err(IrowclawError::new("artifact path is not a file"));
     }
+    if metadata.len() == 0 {
+        return Err(IrowclawError::new("artifact file is empty"));
+    }
     if metadata.len() > MAX_ARTIFACT_BYTES {
         return Err(IrowclawError::new(format!(
             "artifact exceeds {} byte limit",
@@ -1167,6 +1180,8 @@ async fn run_guest_tools_turn<T: Transport>(
 ) -> Result<Option<MessageEnvelope>, IrowclawError> {
     let mut observations = Vec::new();
     let mut iteration = 0usize;
+    let delegated_task = user_text.starts_with("A2A delegated task.");
+    let mut progress_reprompts = 0usize;
 
     loop {
         iteration = iteration.saturating_add(1);
@@ -1195,6 +1210,18 @@ async fn run_guest_tools_turn<T: Transport>(
         };
 
         match plan {
+            GuestPlan::Answer { text }
+                if delegated_task && progress_reprompts < 2 && is_progress_only_answer(&text) =>
+            {
+                progress_reprompts = progress_reprompts.saturating_add(1);
+                observations.push(ToolObservation {
+                    iteration,
+                    tool: "task_completion_guard".to_string(),
+                    input: text,
+                    ok: false,
+                    output: "This is only a statement of future intent. Continue the delegated task now using tools and teammates; return an answer only after the requested work and verification are complete.".to_string(),
+                });
+            }
             GuestPlan::Answer { text } => {
                 return build_user_reply(source, cap_token, &text, runtime);
             }
@@ -1272,11 +1299,25 @@ async fn run_guest_tools_turn<T: Transport>(
     }
 }
 
+fn is_progress_only_answer(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    [
+        "i'll ",
+        "i will ",
+        "let me ",
+        "i'm going to ",
+        "i am going to ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+}
+
 fn artifact_path_requiring_validation(input: &str) -> Option<String> {
     let request: PublishArtifactInput = serde_json::from_str(input).ok()?;
     let lower = request.path.to_ascii_lowercase();
     let requires_validation = [
-        ".c", ".cc", ".cpp", ".cxx", ".rs", ".py", ".js", ".ts", ".java", ".go", ".sh",
+        ".c", ".cc", ".cpp", ".cxx", ".rs", ".py", ".js", ".ts", ".java", ".go", ".sh", ".zip",
+        ".tar", ".gz", ".tgz",
     ]
     .iter()
     .any(|extension| lower.ends_with(extension));
@@ -1373,7 +1414,7 @@ async fn request_host_plan<T: Transport>(
         .await
         .map_err(|err| IrowclawError::new(format!("host plan send failed: {err}")))?;
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), transport.recv())
+    let response = tokio::time::timeout(std::time::Duration::from_secs(135), transport.recv())
         .await
         .map_err(|_| IrowclawError::new("host plan timed out"))?
         .map_err(|err| IrowclawError::new(format!("host plan recv failed: {err}")))?;
@@ -1427,7 +1468,8 @@ async fn request_host_tool<T: Transport>(
         .await
         .map_err(|err| IrowclawError::new(format!("host tool send failed: {err}")))?;
 
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), transport.recv())
+    let timeout = if tool == "await_task" { 310 } else { 135 };
+    let response = tokio::time::timeout(std::time::Duration::from_secs(timeout), transport.recv())
         .await
         .map_err(|_| IrowclawError::new("host tool timed out"))?
         .map_err(|err| IrowclawError::new(format!("host tool recv failed: {err}")))?;
