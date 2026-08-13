@@ -1,18 +1,58 @@
 use super::{
-    artifact_mime_type, artifact_path_requiring_validation, is_progress_only_answer,
-    run_with_transport, safe_uploaded_filename, task_result_from_envelope,
+    artifact_mime_type, artifact_path_requiring_validation, import_host_artifact,
+    is_progress_only_answer, run_with_transport, safe_uploaded_filename, task_result_from_envelope,
+    Runtime,
 };
+use base64::Engine as _;
 use chrono::Timelike;
 use common::proto::ironclaw::{
     agent_control, message_envelope, AgentControl, AgentTaskRequest, AuthChallenge,
     MessageEnvelope, UploadedFile, UserMessage,
 };
 use common::transport::{LocalTransport, Transport};
+use sha2::{Digest, Sha256};
 
 // Guest startup currently reads its brain root from a process-global environment
 // variable. Serialize tests that override it so parallel test execution cannot
 // redirect one guest into another test's sandbox.
 static BRAIN_ROOT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn imported_artifact_is_hash_verified_and_written_to_private_workspace() {
+    let _guard = BRAIN_ROOT_ENV_LOCK.lock().await;
+    let root = std::env::temp_dir().join(format!(
+        "irowclaw-artifact-import-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::env::set_var("IRONCLAW_BRAIN_ROOT", &root);
+    let runtime = Runtime::load(&root.join("missing.toml")).unwrap();
+    let data = b"artifact from a different agent VM";
+    let sha = hex::encode(Sha256::digest(data));
+    let transfer = serde_json::json!({
+        "artifact_id": sha,
+        "filename": "handoff.txt",
+        "mime_type": "text/plain",
+        "size_bytes": data.len(),
+        "sha256": sha,
+        "destination": "handoffs/handoff.txt",
+        "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
+    });
+    let result = import_host_artifact(&runtime, &transfer.to_string()).unwrap();
+    assert!(result.contains("handoffs/handoff.txt"));
+    assert_eq!(
+        std::fs::read(root.join("workspace/handoffs/handoff.txt")).unwrap(),
+        data
+    );
+
+    let mut tampered = transfer;
+    tampered["data_base64"] =
+        serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b"tampered"));
+    assert!(import_host_artifact(&runtime, &tampered.to_string()).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[test]
 fn future_intent_is_not_a_terminal_delegated_task_answer() {

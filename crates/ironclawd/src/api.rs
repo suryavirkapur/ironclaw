@@ -1,5 +1,6 @@
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,14 @@ pub fn build_router(state: AppState) -> Router {
             get(farm_tasks_list).post(farm_task_create),
         )
         .route("/api/farm/tasks/{task_id}", get(farm_task_detail))
+        .route(
+            "/api/farm/artifacts/{artifact_id}",
+            get(farm_artifact_download),
+        )
+        .route(
+            "/api/farm/artifacts/{artifact_id}/metadata",
+            get(farm_artifact_metadata),
+        )
         .route(
             "/a2a/{agent_id}/.well-known/agent-card.json",
             get(farm_agent_card),
@@ -299,6 +308,65 @@ async fn farm_task_detail(
             Json(ApiError::new(format!("task not found: {task_id}"))),
         )),
     }
+}
+
+async fn farm_artifact_metadata(
+    State(state): State<AppState>,
+    Path(artifact_id): Path<String>,
+) -> Result<Json<farm::ArtifactRecord>, (StatusCode, Json<ApiError>)> {
+    state
+        .farm_artifacts
+        .get(&artifact_id)
+        .map(|(record, _)| Json(record))
+        .map_err(artifact_api_error)
+}
+
+async fn farm_artifact_download(
+    State(state): State<AppState>,
+    Path(artifact_id): Path<String>,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    let (record, data) = state
+        .farm_artifacts
+        .get(&artifact_id)
+        .map_err(artifact_api_error)?;
+    let mut response = Response::new(Body::from(data));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&record.mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", record.filename)).map_err(
+            |_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError::new(
+                        "artifact filename is not a valid HTTP header",
+                    )),
+                )
+            },
+        )?,
+    );
+    response.headers_mut().insert(
+        "x-artifact-sha256",
+        HeaderValue::from_str(&record.sha256).expect("validated SHA-256 is an HTTP header"),
+    );
+    Ok(response)
+}
+
+fn artifact_api_error(error: farm::ArtifactError) -> (StatusCode, Json<ApiError>) {
+    let status = match &error {
+        farm::ArtifactError::Io { message, .. }
+            if message.contains("No such file") || message.contains("not found") =>
+        {
+            StatusCode::NOT_FOUND
+        }
+        farm::ArtifactError::Invalid(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(ApiError::new(error.to_string())))
 }
 
 async fn farm_task_create(

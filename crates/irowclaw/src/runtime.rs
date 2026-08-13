@@ -1,4 +1,5 @@
 use crate::scheduler::{self, SchedulerPaths};
+use base64::Engine as _;
 use common::config::{GuestConfig, JobsConfig};
 use common::proto::ironclaw::{
     agent_control, message_envelope, AgentState, Artifact, MessageEnvelope, UploadedFile,
@@ -13,6 +14,7 @@ use memory::{
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -598,7 +600,19 @@ pub async fn run_with_transport<T: Transport + 'static>(
                 )
                 .await;
                 let (state, output_json, artifact_ids, error) = match result {
-                    Ok(Some(envelope)) => task_result_from_envelope(envelope),
+                    Ok(Some(envelope)) => {
+                        if matches!(envelope.payload, Some(message_envelope::Payload::Artifact(_))) {
+                            transport
+                                .send(envelope.clone())
+                                .await
+                                .map_err(|err| {
+                                    IrowclawError::new(format!(
+                                        "A2A artifact transfer failed: {err}"
+                                    ))
+                                })?;
+                        }
+                        task_result_from_envelope(envelope)
+                    }
                     Ok(None) => (
                         "completed".to_string(),
                         "null".to_string(),
@@ -1083,6 +1097,27 @@ fn build_artifact_reply(
     }))
 }
 
+fn build_shared_artifact_input(
+    source: &MessageEnvelope,
+    cap_token: &str,
+    runtime: &Runtime,
+    input: &str,
+) -> Result<String, IrowclawError> {
+    let envelope = build_artifact_reply(source, cap_token, runtime, input)?
+        .ok_or_else(|| IrowclawError::new("shared artifact envelope is missing"))?;
+    let artifact = match envelope.payload {
+        Some(message_envelope::Payload::Artifact(artifact)) => artifact,
+        _ => return Err(IrowclawError::new("shared artifact payload is invalid")),
+    };
+    serde_json::to_string(&serde_json::json!({
+        "filename": artifact.filename,
+        "mime_type": artifact.mime_type,
+        "caption": artifact.caption,
+        "data_base64": base64::engine::general_purpose::STANDARD.encode(artifact.data),
+    }))
+    .map_err(|err| IrowclawError::new(format!("shared artifact encode failed: {err}")))
+}
+
 fn safe_artifact_path(raw: &str) -> Result<PathBuf, IrowclawError> {
     let path = Path::new(raw);
     let mut safe = PathBuf::new();
@@ -1225,7 +1260,9 @@ async fn run_guest_tools_turn<T: Transport>(
             GuestPlan::Answer { text } => {
                 return build_user_reply(source, cap_token, &text, runtime);
             }
-            GuestPlan::Tool { tool, input } if tool == "publish_artifact" => {
+            GuestPlan::Tool { tool, input }
+                if matches!(tool.as_str(), "publish_artifact" | "share_artifact") =>
+            {
                 if let Some(path) = artifact_path_requiring_validation(&input) {
                     let validated = observations.iter().any(|observation| {
                         observation.ok
@@ -1247,16 +1284,73 @@ async fn run_guest_tools_turn<T: Transport>(
                         continue;
                     }
                 }
-                match build_artifact_reply(source, cap_token, runtime, &input) {
-                    Ok(envelope) => return Ok(envelope),
-                    Err(err) => observations.push(ToolObservation {
-                        iteration,
-                        tool,
-                        input,
-                        ok: false,
-                        output: truncate_observation(&err.to_string()),
-                    }),
+                if tool == "share_artifact" {
+                    let result =
+                        match build_shared_artifact_input(source, cap_token, runtime, &input) {
+                            Ok(host_input) => {
+                                request_host_tool(
+                                    transport,
+                                    cap_token,
+                                    source,
+                                    "share_artifact",
+                                    &host_input,
+                                    internal_call_id,
+                                )
+                                .await
+                            }
+                            Err(err) => Err(err),
+                        };
+                    match result {
+                        Ok(output) => observations.push(ToolObservation {
+                            iteration,
+                            tool,
+                            input,
+                            ok: true,
+                            output: truncate_observation(&output),
+                        }),
+                        Err(err) => observations.push(ToolObservation {
+                            iteration,
+                            tool,
+                            input,
+                            ok: false,
+                            output: truncate_observation(&err.to_string()),
+                        }),
+                    }
+                } else {
+                    match build_artifact_reply(source, cap_token, runtime, &input) {
+                        Ok(envelope) => return Ok(envelope),
+                        Err(err) => observations.push(ToolObservation {
+                            iteration,
+                            tool,
+                            input,
+                            ok: false,
+                            output: truncate_observation(&err.to_string()),
+                        }),
+                    }
                 }
+            }
+            GuestPlan::Tool { tool, input } if tool == "import_artifact" => {
+                let result = request_host_tool(
+                    transport,
+                    cap_token,
+                    source,
+                    &tool,
+                    &input,
+                    internal_call_id,
+                )
+                .await
+                .and_then(|output| import_host_artifact(runtime, &output));
+                let (ok, output) = match result {
+                    Ok(output) => (true, output),
+                    Err(err) => (false, err.to_string()),
+                };
+                observations.push(ToolObservation {
+                    iteration,
+                    tool,
+                    input,
+                    ok,
+                    output: truncate_observation(&output),
+                });
             }
             GuestPlan::Tool { tool, input }
                 if matches!(
@@ -1312,6 +1406,67 @@ fn is_progress_only_answer(text: &str) -> bool {
     .any(|prefix| normalized.starts_with(prefix))
 }
 
+#[derive(Deserialize)]
+struct HostArtifactTransfer {
+    artifact_id: String,
+    filename: String,
+    mime_type: String,
+    size_bytes: u64,
+    sha256: String,
+    destination: Option<String>,
+    data_base64: String,
+}
+
+fn import_host_artifact(runtime: &Runtime, raw_transfer: &str) -> Result<String, IrowclawError> {
+    let transfer: HostArtifactTransfer = serde_json::from_str(raw_transfer)
+        .map_err(|err| IrowclawError::new(format!("artifact transfer parse failed: {err}")))?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&transfer.data_base64)
+        .map_err(|err| IrowclawError::new(format!("artifact base64 decode failed: {err}")))?;
+    if data.len() as u64 != transfer.size_bytes {
+        return Err(IrowclawError::new("artifact transfer size mismatch"));
+    }
+    let digest = hex::encode(Sha256::digest(&data));
+    if digest != transfer.sha256 || digest != transfer.artifact_id {
+        return Err(IrowclawError::new("artifact transfer SHA-256 mismatch"));
+    }
+    let destination = transfer
+        .destination
+        .unwrap_or_else(|| format!("imports/{}/{}", transfer.artifact_id, transfer.filename));
+    let relative = safe_artifact_path(&destination)?;
+    let workspace = runtime
+        .brain
+        .root
+        .join("workspace")
+        .canonicalize()
+        .map_err(|err| IrowclawError::new(format!("artifact workspace failed: {err}")))?;
+    let path = workspace.join(relative);
+    let parent = path
+        .parent()
+        .ok_or_else(|| IrowclawError::new("artifact destination has no parent"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| IrowclawError::new(format!("artifact destination create failed: {err}")))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|err| IrowclawError::new(format!("artifact destination failed: {err}")))?;
+    if !canonical_parent.starts_with(&workspace) {
+        return Err(IrowclawError::new(
+            "artifact destination escapes guest workspace",
+        ));
+    }
+    std::fs::write(&path, &data)
+        .map_err(|err| IrowclawError::new(format!("artifact import write failed: {err}")))?;
+    serde_json::to_string(&serde_json::json!({
+        "artifact_id": transfer.artifact_id,
+        "path": destination,
+        "filename": transfer.filename,
+        "mime_type": transfer.mime_type,
+        "size_bytes": transfer.size_bytes,
+        "sha256": transfer.sha256,
+    }))
+    .map_err(|err| IrowclawError::new(format!("artifact import result failed: {err}")))
+}
+
 fn artifact_path_requiring_validation(input: &str) -> Option<String> {
     let request: PublishArtifactInput = serde_json::from_str(input).ok()?;
     let lower = request.path.to_ascii_lowercase();
@@ -1336,6 +1491,36 @@ async fn execute_single_guest_plan<T: Transport>(
         GuestPlan::Answer { text } => build_user_reply(source, cap_token, &text, runtime),
         GuestPlan::Tool { tool, input } if tool == "publish_artifact" => {
             build_artifact_reply(source, cap_token, runtime, &input)
+        }
+        GuestPlan::Tool { tool, input } if tool == "share_artifact" => {
+            let output = match build_shared_artifact_input(source, cap_token, runtime, &input) {
+                Ok(host_input) => request_host_tool(
+                    transport,
+                    cap_token,
+                    source,
+                    "share_artifact",
+                    &host_input,
+                    internal_call_id,
+                )
+                .await
+                .unwrap_or_else(|err| format!("{tool} failed: {err}")),
+                Err(err) => format!("{tool} failed: {err}"),
+            };
+            build_user_reply(source, cap_token, &output, runtime)
+        }
+        GuestPlan::Tool { tool, input } if tool == "import_artifact" => {
+            let output = request_host_tool(
+                transport,
+                cap_token,
+                source,
+                &tool,
+                &input,
+                internal_call_id,
+            )
+            .await
+            .and_then(|output| import_host_artifact(runtime, &output))
+            .unwrap_or_else(|err| format!("{tool} failed: {err}"));
+            build_user_reply(source, cap_token, &output, runtime)
         }
         GuestPlan::Tool { tool, input }
             if matches!(

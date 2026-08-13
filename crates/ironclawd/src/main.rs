@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use base64::Engine as _;
 use common::config::{GuestConfig, HostConfig, HostExecutionMode};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
@@ -415,6 +416,7 @@ struct AppState {
     security_db_path: Arc<PathBuf>,
     farm_registry: Arc<FarmRegistry>,
     farm_tasks: TaskLedger,
+    farm_artifacts: farm::ArtifactStore,
     mcp_gateway: Arc<mcp::McpGateway>,
     farm_agent_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
@@ -508,6 +510,11 @@ impl AppState {
                 "marked interrupted farm tasks failed during startup"
             );
         }
+        let farm_artifacts =
+            farm::ArtifactStore::open(config.storage.users_root.join("_farm").join("artifacts"))
+                .map_err(|err| {
+                    IronclawError::new(format!("farm artifact store init failed: {err}"))
+                })?;
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -522,6 +529,7 @@ impl AppState {
             security_db_path: Arc::new(security_db),
             farm_registry,
             farm_tasks,
+            farm_artifacts,
             mcp_gateway,
             farm_agent_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -1510,6 +1518,7 @@ async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), Iro
         .map_err(|err| IronclawError::new(format!("A2A task send failed: {err}")))?;
 
     let run = async {
+        let mut persisted_artifact_ids = Vec::new();
         loop {
             let envelope = transport
                 .recv()
@@ -1546,6 +1555,25 @@ async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), Iro
                         .await
                         .map_err(|err| IronclawError::new(err.to_string()))?;
                 }
+                Some(message_envelope::Payload::Artifact(artifact)) => {
+                    let record = state
+                        .farm_artifacts
+                        .put(
+                            &task.id,
+                            &task.assignee,
+                            &artifact.filename,
+                            &artifact.mime_type,
+                            &artifact.caption,
+                            &artifact.data,
+                            now_ms().unwrap_or(task.updated_at_ms),
+                        )
+                        .map_err(|err| {
+                            IronclawError::new(format!("persist A2A artifact failed: {err}"))
+                        })?;
+                    if !persisted_artifact_ids.contains(&record.id) {
+                        persisted_artifact_ids.push(record.id);
+                    }
+                }
                 Some(message_envelope::Payload::AgentTaskUpdate(update)) => {
                     let next = match update.state.as_str() {
                         "working" => TaskState::Working,
@@ -1570,13 +1598,18 @@ async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), Iro
                     if next == TaskState::Failed && !update.error.trim().is_empty() {
                         output = Some(serde_json::json!({"error": update.error}));
                     }
+                    let artifact_ids = if persisted_artifact_ids.is_empty() {
+                        update.artifact_ids
+                    } else {
+                        persisted_artifact_ids.clone()
+                    };
                     state
                         .farm_tasks
                         .transition_with_artifacts(
                             &task.id,
                             next,
                             output,
-                            Some(update.artifact_ids),
+                            Some(artifact_ids),
                             now_ms().unwrap_or(task.updated_at_ms),
                         )
                         .map_err(|err| IronclawError::new(err.to_string()))?;
@@ -2378,6 +2411,22 @@ struct AwaitTaskInput {
     timeout_seconds: u64,
 }
 
+#[derive(Deserialize)]
+struct ImportArtifactInput {
+    artifact_id: String,
+    #[serde(default)]
+    destination: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ShareArtifactInput {
+    filename: String,
+    mime_type: String,
+    #[serde(default)]
+    caption: String,
+    data_base64: String,
+}
+
 fn default_await_task_timeout_seconds() -> u64 {
     300
 }
@@ -2443,6 +2492,10 @@ async fn execute_requested_host_tool(
             }
             None => await_direct_delegated_task(state, user_id, &request.input).await,
         }
+    } else if request.tool == "import_artifact" {
+        import_a2a_artifact(state, user_id, active_task_id, &request.input)
+    } else if request.tool == "share_artifact" {
+        share_a2a_artifact(state, user_id, active_task_id, &request.input)
     } else {
         run_host_tool(
             host_allowed_tools,
@@ -2463,10 +2516,109 @@ fn finalize_requested_host_tool_response(
     match result {
         // `host_plan` is already a bounded model response and must remain valid JSON.
         // Truncating it mid-string makes the guest reject otherwise valid plans.
-        Ok(output) if tool == "host_plan" => (true, output),
+        Ok(output) if matches!(tool, "host_plan" | "import_artifact" | "share_artifact") => {
+            (true, output)
+        }
         Ok(output) => (true, truncate_tool_output(&output)),
         Err(error) => (false, truncate_tool_output(&error)),
     }
+}
+
+fn import_a2a_artifact(
+    state: &AppState,
+    requester: &str,
+    active_task_id: Option<&str>,
+    raw_input: &str,
+) -> Result<String, String> {
+    let input: ImportArtifactInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("import artifact input is invalid: {err}"))?;
+    let (records, data) = state
+        .farm_artifacts
+        .get_records(&input.artifact_id)
+        .map_err(|err| err.to_string())?;
+    let current_task = active_task_id
+        .map(|task_id| {
+            state
+                .farm_tasks
+                .get(task_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("active task not found: {task_id}"))
+        })
+        .transpose()?;
+    let record = records
+        .into_iter()
+        .rev()
+        .find(|record| {
+            let Ok(Some(producing_task)) = state.farm_tasks.get(&record.task_id) else {
+                return false;
+            };
+            let completed_child_artifact = producing_task.requester == requester
+                && producing_task.artifact_ids.contains(&record.id)
+                && match active_task_id {
+                    Some(parent_task_id) => {
+                        producing_task.parent_task_id.as_deref() == Some(parent_task_id)
+                    }
+                    None => producing_task.parent_task_id.is_none(),
+                };
+            let parent_shared_artifact = current_task.as_ref().is_some_and(|current| {
+                current.assignee == requester
+                    && current.requester == producing_task.assignee
+                    && current.parent_task_id.as_deref() == Some(&producing_task.id)
+                    && !producing_task.state.terminal()
+            });
+            completed_child_artifact || parent_shared_artifact
+        })
+        .ok_or_else(|| {
+            "artifact is not an output of this agent's child or a share from its direct parent"
+                .to_string()
+        })?;
+    serde_json::to_string(&serde_json::json!({
+        "artifact_id": record.id,
+        "filename": record.filename,
+        "mime_type": record.mime_type,
+        "caption": record.caption,
+        "size_bytes": record.size_bytes,
+        "sha256": record.sha256,
+        "destination": input.destination,
+        "data_base64": base64::engine::general_purpose::STANDARD.encode(data),
+    }))
+    .map_err(|err| format!("artifact transfer encode failed: {err}"))
+}
+
+fn share_a2a_artifact(
+    state: &AppState,
+    requester: &str,
+    active_task_id: Option<&str>,
+    raw_input: &str,
+) -> Result<String, String> {
+    let task_id = active_task_id
+        .ok_or_else(|| "share_artifact is available only while running an A2A task".to_string())?;
+    let task = state
+        .farm_tasks
+        .get(task_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("active task not found: {task_id}"))?;
+    if task.assignee != requester || task.state.terminal() {
+        return Err("requester does not own an active A2A task".to_string());
+    }
+    let input: ShareArtifactInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("share artifact input is invalid: {err}"))?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&input.data_base64)
+        .map_err(|err| format!("share artifact base64 decode failed: {err}"))?;
+    let record = state
+        .farm_artifacts
+        .put(
+            task_id,
+            requester,
+            &input.filename,
+            &input.mime_type,
+            &input.caption,
+            &data,
+            now_ms().unwrap_or(task.updated_at_ms),
+        )
+        .map_err(|err| err.to_string())?;
+    serde_json::to_string(&record).map_err(|err| format!("shared artifact encode failed: {err}"))
 }
 
 fn create_direct_delegated_task(
@@ -4259,6 +4411,8 @@ fn allowed_tools_for_agent(state: &AppState, agent_id: &str) -> Vec<String> {
     if !record.manifest.mcp.is_empty() {
         tools.push("mcp_call".to_string());
     }
+    tools.push("share_artifact".to_string());
+    tools.push("import_artifact".to_string());
     if !record.manifest.a2a.delegate_to.is_empty() {
         tools.push("delegate_task".to_string());
         tools.push("await_task".to_string());

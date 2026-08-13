@@ -545,6 +545,16 @@ fn tool_definition(name: &str) -> ToolDefinition {
                 &["path"],
             ),
         ),
+        "share_artifact" => (
+            "Upload an immutable content-addressed copy of a workspace file without completing the current A2A task. Pass the returned artifact_id in a delegated task's input so that the child can import and verify the exact bytes.",
+            object_schema(
+                json!({
+                    "path": {"type": "string", "description": "Workspace-relative artifact path"},
+                    "caption": {"type": "string"}
+                }),
+                &["path"],
+            ),
+        ),
         "browser" => (
             "Search the live web or fetch an HTTP(S) page from inside the Firecracker guest. Use search first for current facts, then fetch an authoritative result URL. Never answer a current-fact question from model memory when this tool is available.",
             object_schema(
@@ -599,13 +609,23 @@ fn tool_definition(name: &str) -> ToolDefinition {
             ),
         ),
         "await_task" => (
-            "Wait for a child task created by this agent to finish and return its complete durable task record.",
+            "Wait for a child task created by this agent to finish and return its complete durable task record. If artifact_ids is non-empty and you need the files, call import_artifact for each id.",
             object_schema(
                 json!({
                     "task_id": {"type": "string"},
                     "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300}
                 }),
                 &["task_id"],
+            ),
+        ),
+        "import_artifact" => (
+            "Import a content-addressed artifact from this agent's completed direct child task or direct parent's active task into the current private Firecracker workspace. The host verifies lineage and the guest verifies SHA-256.",
+            object_schema(
+                json!({
+                    "artifact_id": {"type": "string", "description": "64-character artifact id returned by await_task"},
+                    "destination": {"type": "string", "description": "Optional workspace-relative destination path"}
+                }),
+                &["artifact_id"],
             ),
         ),
         _ => (

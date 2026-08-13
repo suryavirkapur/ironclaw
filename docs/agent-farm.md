@@ -65,11 +65,30 @@ GET  /a2a/{agent_id}/.well-known/agent-card.json
 GET  /api/farm/tasks
 POST /api/farm/tasks
 GET  /api/farm/tasks/{task_id}
+GET  /api/farm/artifacts/{sha256}
+GET  /api/farm/artifacts/{sha256}/metadata
 ```
 
 Task creation is checked against both sides of the A2A ACL. Tasks are stored atomically under
 `<users_root>/_farm/tasks.json` and carry context, parent, requester, assignee, skill, and
 delegation-depth fields.
+
+## Immutable cross-VM artifacts
+
+Agent workspaces remain private. Files cross that boundary only through the host's
+content-addressed artifact store at `<users_root>/_farm/artifacts`. The artifact ID is the
+SHA-256 of the bytes; metadata records the producing task and agent. The store verifies the hash
+again when reading an artifact.
+
+- `publish_artifact` completes an agent task with a downloadable artifact.
+- `share_artifact` snapshots a file without completing the current task, allowing a lead to pass
+  the returned ID to a QA child task.
+- `import_artifact` transfers authorized bytes into the requesting guest. The host permits only a
+  completed direct-child output or an active direct-parent share, and the guest independently
+  checks byte length and SHA-256 before writing into its workspace.
+
+This prevents QA from accidentally reading a same-named stale file in its own VM. A task should
+include the artifact ID in its input, import that ID, and report the verified hash.
 
 ## Organization-aware conversations
 
