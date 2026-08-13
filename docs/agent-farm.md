@@ -58,6 +58,40 @@ enable the default embeddings feature for local 384-dimensional vector search.
 
 ## Control-plane API
 
+Production-facing control-plane routes require a bearer identity. Tokens are supplied through host
+environment variables and are hashed in memory; they are never written to configuration or sent to
+agent guests. Health/readiness, signed channel webhooks, and public Agent Cards remain public.
+
+```toml
+[security.control_plane]
+enabled = true
+
+[[security.control_plane.principals]]
+id = "engineering-owner"
+organization_id = "acme"
+role = "admin" # admin, operator, or viewer
+token_env = "IRONCLAW_CONTROL_PLANE_TOKEN"
+default_agent = "product-manager"
+allowed_agents = [] # empty means all only for an admin
+```
+
+Use a random token of at least 32 characters and send it as
+`Authorization: Bearer <token>`. Task requesters are derived from `default_agent`; a JSON
+`requester` field is ignored. Operators can read and create farm work, viewers are read-only, and
+only administrators may access `/api/admin/*`. Agent, task, and artifact reads are filtered through
+the principal's agent scope and return 404 across an isolation boundary. Every protected request,
+including denials, is written to `control_plane_audit` with a request ID and authorization decision.
+
+Browser WebSockets use a one-time, agent-bound ticket obtained from `POST /api/auth/ws-ticket`, so
+the bearer token is not placed in the WebSocket URL. The workspace accepts a token through a
+prompt and retains it only in the browser tab's session storage.
+
+The daemon refuses a non-loopback bind when control-plane authentication is disabled.
+Terminate TLS in a trusted reverse proxy and forward only to Ironclaw's loopback listener. The
+daemon emits a restrictive Content Security Policy, denies framing and MIME sniffing, sends HSTS,
+and does not enable cross-origin access. Because authorization uses an explicit bearer header
+rather than cookies, cross-site form requests cannot authenticate as the operator.
+
 ```text
 GET  /api/farm/agents
 GET  /api/farm/agents/{agent_id}/capabilities

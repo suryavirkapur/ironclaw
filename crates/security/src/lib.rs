@@ -1,10 +1,14 @@
 pub mod auth;
+pub mod control_plane;
 pub mod pairing;
 pub mod rate_limiter;
 
 use rusqlite::Connection;
 
 pub use auth::{channel_allowed, validate_webhook_secret};
+pub use control_plane::{
+    append_audit_event, AuditEvent, ControlPlaneAuthorizer, ControlPlanePrincipal, ControlPlaneRole,
+};
 pub use pairing::{PairingManager, PairingStatus};
 pub use rate_limiter::{RateLimitConfig, RateLimitDecision, RateLimiter};
 
@@ -38,6 +42,23 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), String> {
             total_cost integer not null,
             primary key (user_id, channel, day_start)
         );
+
+        create table if not exists control_plane_audit (
+            id integer primary key autoincrement,
+            request_id text not null,
+            occurred_at_ms integer not null,
+            principal_id text,
+            organization_id text,
+            role text,
+            method text not null,
+            path text not null,
+            action text not null,
+            resource text not null,
+            decision text not null,
+            status_code integer not null
+        );
+        create index if not exists idx_control_plane_audit_time
+            on control_plane_audit(occurred_at_ms desc);
         ",
     )
     .map_err(|err| format!("security schema failed: {err}"))?;
@@ -60,7 +81,7 @@ mod tests {
 
         let count: i64 = match conn.query_row(
             "select count(1) from sqlite_master where type='table' and name in (
-                'pairing', 'rate_limits', 'rate_limit_costs'
+                'pairing', 'rate_limits', 'rate_limit_costs', 'control_plane_audit'
             )",
             [],
             |row| row.get(0),
@@ -68,6 +89,6 @@ mod tests {
             Ok(value) => value,
             Err(err) => panic!("schema query failed: {err}"),
         };
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
     }
 }

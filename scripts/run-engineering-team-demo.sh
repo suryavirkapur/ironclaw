@@ -14,6 +14,7 @@ fi
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY to an OpenRouter-compatible API key}"
 : "${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN from BotFather}"
 : "${OWNER_TELEGRAM_CHAT_ID:?Set OWNER_TELEGRAM_CHAT_ID to your numeric Telegram chat ID}"
+: "${IRONCLAW_CONTROL_PLANE_TOKEN:?Set IRONCLAW_CONTROL_PLANE_TOKEN to at least 32 random characters}"
 
 kernel="kernels/firecracker/vmlinux-6.1.155.bin"
 rootfs="rootfs/build/ubuntu-24.04.ext4"

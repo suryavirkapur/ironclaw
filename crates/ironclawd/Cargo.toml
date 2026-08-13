@@ -55,5 +55,9 @@ askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 chrono = "*"
 
+[dev-dependencies]
+tempfile = "*"
+tower = { version = "*", features = ["util"] }
+
 [features]
 firecracker = ["common/firecracker"]

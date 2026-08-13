@@ -1,6 +1,7 @@
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderValue, Response, StatusCode};
+use axum::extract::{Extension, Path, Query, State};
+use axum::http::{header, HeaderValue, Request, Response, StatusCode};
+use axum::middleware::{self, Next};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -75,7 +76,7 @@ pub struct ApiDoc;
 
 /// build the complete router with openapi + scalar ui
 pub fn build_router(state: AppState) -> Router {
-    let api_routes = Router::new()
+    let public_routes = Router::new()
         // health
         .route("/api/health", get(health_handler))
         .route("/api/ready", get(readiness_handler))
@@ -88,6 +89,12 @@ pub fn build_router(state: AppState) -> Router {
             "/api/channels/whatsapp/webhook",
             get(channel_whatsapp_verify).post(channel_whatsapp_webhook),
         )
+        .route(
+            "/a2a/{agent_id}/.well-known/agent-card.json",
+            get(farm_agent_card),
+        );
+    let protected_routes = Router::new()
+        .route("/api/auth/ws-ticket", post(create_ws_ticket))
         // admin: vms
         .route("/api/admin/vms", get(admin_vms_list))
         .route("/api/admin/vms/{vm_id}", get(admin_vm_detail))
@@ -122,13 +129,204 @@ pub fn build_router(state: AppState) -> Router {
             "/api/farm/artifacts/{artifact_id}/metadata",
             get(farm_artifact_metadata),
         )
-        .route(
-            "/a2a/{agent_id}/.well-known/agent-card.json",
-            get(farm_agent_card),
-        )
-        .with_state(state);
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            control_plane_auth,
+        ));
+    public_routes
+        .merge(protected_routes)
+        .with_state(state)
+        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
+}
 
-    api_routes.merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
+#[derive(Deserialize)]
+struct CreateWsTicketRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct CreateWsTicketResponse {
+    ticket: String,
+    expires_at_ms: u64,
+}
+
+async fn create_ws_ticket(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Json(request): Json<CreateWsTicketRequest>,
+) -> Result<Json<CreateWsTicketResponse>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &request.agent_id)?;
+    let (ticket, expires_at_ms) = state
+        .issue_ws_ticket(principal, &request.agent_id)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new(error.to_string())),
+            )
+        })?;
+    Ok(Json(CreateWsTicketResponse {
+        ticket,
+        expires_at_ms,
+    }))
+}
+
+pub(crate) async fn control_plane_auth(
+    State(state): State<AppState>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let request_id = format!("req-{:016x}", rand::random::<u64>());
+    let method = request.method().as_str().to_string();
+    let path = request.uri().path().to_string();
+    let token = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().strip_prefix("Bearer "));
+    let principal = if state.host_config.security.control_plane.enabled {
+        token.and_then(|value| state.control_plane_authorizer.authenticate(value))
+    } else {
+        Some(security::ControlPlanePrincipal::new(
+            "local-development",
+            "local-development",
+            security::ControlPlaneRole::Admin,
+            state
+                .host_config
+                .farm
+                .entry_agent
+                .clone()
+                .unwrap_or_else(|| "cli".to_string()),
+            Vec::new(),
+        ))
+    };
+    let Some(principal) = principal else {
+        let response = api_auth_error(StatusCode::UNAUTHORIZED, "valid bearer token required");
+        audit_control_plane(
+            &state,
+            &request_id,
+            None,
+            &method,
+            &path,
+            "authenticate",
+            "control-plane",
+            "deny",
+            response.status().as_u16(),
+        );
+        return response;
+    };
+    let write = !matches!(
+        request.method(),
+        &axum::http::Method::GET | &axum::http::Method::HEAD
+    );
+    let admin_route = path.starts_with("/api/admin/") || path.starts_with("/api/soul-guard/");
+    let authorized = if admin_route {
+        principal.role == security::ControlPlaneRole::Admin
+    } else if write {
+        principal.role.can_write()
+    } else {
+        true
+    };
+    if !authorized {
+        let response = api_auth_error(
+            StatusCode::FORBIDDEN,
+            "principal role does not permit this action",
+        );
+        audit_control_plane(
+            &state,
+            &request_id,
+            Some(&principal),
+            &method,
+            &path,
+            if write { "write" } else { "read" },
+            &path,
+            "deny",
+            response.status().as_u16(),
+        );
+        return response;
+    }
+    let rate_limit_identity = format!("organization:{}", principal.organization_id);
+    if let Err(error) = crate::enforce_rate_limit(&state, &rate_limit_identity, "control-plane", 0)
+    {
+        let response = api_auth_error(StatusCode::TOO_MANY_REQUESTS, &error.to_string());
+        audit_control_plane(
+            &state,
+            &request_id,
+            Some(&principal),
+            &method,
+            &path,
+            "rate_limit",
+            &path,
+            "deny",
+            response.status().as_u16(),
+        );
+        return response;
+    }
+    request.extensions_mut().insert(principal.clone());
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        "x-request-id",
+        HeaderValue::from_str(&request_id).expect("request id is a valid header"),
+    );
+    audit_control_plane(
+        &state,
+        &request_id,
+        Some(&principal),
+        &method,
+        &path,
+        if write { "write" } else { "read" },
+        &path,
+        if response.status().is_success() {
+            "allow"
+        } else {
+            "error"
+        },
+        response.status().as_u16(),
+    );
+    response
+}
+
+fn api_auth_error(status: StatusCode, message: &str) -> Response<Body> {
+    let body = serde_json::to_vec(&ApiError::new(message)).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::WWW_AUTHENTICATE, "Bearer")
+        .body(Body::from(body))
+        .expect("static authentication response is valid")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_control_plane(
+    state: &AppState,
+    request_id: &str,
+    principal: Option<&security::ControlPlanePrincipal>,
+    method: &str,
+    path: &str,
+    action: &str,
+    resource: &str,
+    decision: &str,
+    status_code: u16,
+) {
+    let result = crate::open_security_db(state).and_then(|connection| {
+        security::append_audit_event(
+            &connection,
+            &security::AuditEvent {
+                request_id,
+                occurred_at_ms: now_ms().unwrap_or_default() as i64,
+                principal,
+                method,
+                path,
+                action,
+                resource,
+                decision,
+                status_code,
+            },
+        )
+        .map_err(crate::IronclawError::new)
+    });
+    if let Err(error) = result {
+        tracing::error!(request_id, "control-plane audit failed: {error}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +376,6 @@ pub struct FarmAgentSummary {
 
 #[derive(Debug, Deserialize)]
 struct CreateFarmTaskRequest {
-    requester: String,
     assignee: String,
     skill: String,
     #[serde(default)]
@@ -229,11 +426,15 @@ async fn readiness_handler(State(state): State<AppState>) -> Json<ReadinessRespo
 // agent farm control plane
 // ---------------------------------------------------------------------------
 
-async fn farm_agents_list(State(state): State<AppState>) -> Json<Vec<FarmAgentSummary>> {
+async fn farm_agents_list(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+) -> Json<Vec<FarmAgentSummary>> {
     Json(
         state
             .farm_registry
             .agents()
+            .filter(|record| principal.allows_agent(&record.manifest.id))
             .map(|record| FarmAgentSummary {
                 id: record.manifest.id.clone(),
                 name: record.manifest.name.clone(),
@@ -252,8 +453,10 @@ async fn farm_agents_list(State(state): State<AppState>) -> Json<Vec<FarmAgentSu
 
 async fn farm_agent_capabilities(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Vec<farm::Capability>>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &agent_id)?;
     state
         .farm_registry
         .capabilities_for(&agent_id)
@@ -285,16 +488,25 @@ async fn farm_agent_card(
 
 async fn farm_tasks_list(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
 ) -> Result<Json<Vec<farm::FarmTask>>, (StatusCode, Json<ApiError>)> {
     state
         .farm_tasks
         .list()
-        .map(Json)
+        .map(|tasks| {
+            Json(
+                tasks
+                    .into_iter()
+                    .filter(|task| task_visible(&principal, task))
+                    .collect(),
+            )
+        })
         .map_err(internal_farm_error)
 }
 
 async fn farm_task_detail(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
     Path(task_id): Path<String>,
 ) -> Result<Json<farm::FarmTask>, (StatusCode, Json<ApiError>)> {
     match state
@@ -302,7 +514,11 @@ async fn farm_task_detail(
         .get(&task_id)
         .map_err(internal_farm_error)?
     {
-        Some(task) => Ok(Json(task)),
+        Some(task) if task_visible(&principal, &task) => Ok(Json(task)),
+        Some(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("task not found: {task_id}"))),
+        )),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ApiError::new(format!("task not found: {task_id}"))),
@@ -312,23 +528,35 @@ async fn farm_task_detail(
 
 async fn farm_artifact_metadata(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
     Path(artifact_id): Path<String>,
 ) -> Result<Json<farm::ArtifactRecord>, (StatusCode, Json<ApiError>)> {
-    state
+    let (records, _) = state
         .farm_artifacts
-        .get(&artifact_id)
-        .map(|(record, _)| Json(record))
-        .map_err(artifact_api_error)
+        .get_records(&artifact_id)
+        .map_err(artifact_api_error)?;
+    records
+        .into_iter()
+        .rev()
+        .find(|record| artifact_record_visible(&state, &principal, record))
+        .map(Json)
+        .ok_or_else(|| hidden_artifact(&artifact_id))
 }
 
 async fn farm_artifact_download(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
     Path(artifact_id): Path<String>,
 ) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
-    let (record, data) = state
+    let (records, data) = state
         .farm_artifacts
-        .get(&artifact_id)
+        .get_records(&artifact_id)
         .map_err(artifact_api_error)?;
+    let record = records
+        .into_iter()
+        .rev()
+        .find(|record| artifact_record_visible(&state, &principal, record))
+        .ok_or_else(|| hidden_artifact(&artifact_id))?;
     let mut response = Response::new(Body::from(data));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -369,8 +597,48 @@ fn artifact_api_error(error: farm::ArtifactError) -> (StatusCode, Json<ApiError>
     (status, Json(ApiError::new(error.to_string())))
 }
 
+fn require_agent_access(
+    principal: &security::ControlPlanePrincipal,
+    agent_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if principal.allows_agent(agent_id) {
+        Ok(())
+    } else {
+        // Do not reveal whether an agent exists across an organization boundary.
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("agent not found: {agent_id}"))),
+        ))
+    }
+}
+
+fn task_visible(principal: &security::ControlPlanePrincipal, task: &farm::FarmTask) -> bool {
+    principal.allows_agent(&task.requester) && principal.allows_agent(&task.assignee)
+}
+
+fn artifact_record_visible(
+    state: &AppState,
+    principal: &security::ControlPlanePrincipal,
+    record: &farm::ArtifactRecord,
+) -> bool {
+    state
+        .farm_tasks
+        .get(&record.task_id)
+        .ok()
+        .flatten()
+        .is_some_and(|task| task_visible(principal, &task))
+}
+
+fn hidden_artifact(artifact_id: &str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError::new(format!("artifact not found: {artifact_id}"))),
+    )
+}
+
 async fn farm_task_create(
     State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
     Json(request): Json<CreateFarmTaskRequest>,
 ) -> Result<(StatusCode, Json<farm::FarmTask>), (StatusCode, Json<ApiError>)> {
     let capability_name = format!("agent://{}/{}", request.assignee, request.skill);
@@ -380,9 +648,12 @@ async fn farm_task_create(
             Json(ApiError::new(err.to_string())),
         )
     })?;
+    let requester_agent = principal.default_agent.clone();
+    require_agent_access(&principal, &requester_agent)?;
+    require_agent_access(&principal, &request.assignee)?;
     let allowed = state
         .farm_registry
-        .capabilities_for(&request.requester)
+        .capabilities_for(&requester_agent)
         .map_err(|err| (StatusCode::FORBIDDEN, Json(ApiError::new(err.to_string()))))?
         .into_iter()
         .any(|capability| capability.uri == capability_uri);
@@ -391,7 +662,7 @@ async fn farm_task_create(
             StatusCode::FORBIDDEN,
             Json(ApiError::new(format!(
                 "agent {} may not delegate {} to {}",
-                request.requester, request.skill, request.assignee
+                requester_agent, request.skill, request.assignee
             ))),
         ));
     }
@@ -419,7 +690,7 @@ async fn farm_task_create(
                 Json(ApiError::new("cannot delegate from a terminal parent task")),
             ));
         }
-        if parent.assignee != request.requester {
+        if !task_visible(&principal, parent) || parent.assignee != requester_agent {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiError::new(
@@ -446,7 +717,7 @@ async fn farm_task_create(
         .unwrap_or(0);
     let requester = state
         .farm_registry
-        .get(&request.requester)
+        .get(&requester_agent)
         .expect("capability lookup proved requester exists");
     if depth > requester.manifest.a2a.max_delegation_depth {
         return Err((
@@ -486,7 +757,7 @@ async fn farm_task_create(
         id: task_id.clone(),
         context_id,
         parent_task_id: request.parent_task_id,
-        requester: request.requester,
+        requester: requester_agent,
         assignee: request.assignee,
         skill: request.skill,
         state: farm::TaskState::Submitted,
@@ -874,6 +1145,90 @@ async fn admin_heartbeat_status(State(_state): State<AppState>) -> Json<Heartbea
 #[cfg(test)]
 mod api_test {
     use super::*;
+    use axum::body::to_bytes;
+    use common::config::{
+        HostControlPlanePrincipalConfig, HostControlPlaneRole, HostExecutionMode,
+    };
+    use tower::ServiceExt;
+
+    static AUTH_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn secured_test_state() -> (tempfile::TempDir, AppState, String, String, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let token_a = "org-a-control-plane-token-00000001".to_string();
+        let token_b = "org-b-control-plane-token-00000002".to_string();
+        std::env::set_var("IRONCLAW_TEST_ORG_A_TOKEN", &token_a);
+        std::env::set_var("IRONCLAW_TEST_ORG_B_TOKEN", &token_b);
+        std::env::set_var("OPENAI_API_KEY", "test-only-api-key");
+        let mut config = common::config::HostConfig::default_for_local(temp.path().join("users"));
+        config.execution_mode = HostExecutionMode::HostOnly;
+        config.farm.enabled = true;
+        config.farm.manifests_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demos/engineering-team/agents");
+        config.farm.entry_agent = Some("product-manager".to_string());
+        config.security.control_plane.enabled = true;
+        config.security.control_plane.principals = vec![
+            HostControlPlanePrincipalConfig {
+                id: "alice".to_string(),
+                organization_id: "org-a".to_string(),
+                role: HostControlPlaneRole::Operator,
+                token_env: "IRONCLAW_TEST_ORG_A_TOKEN".to_string(),
+                default_agent: "product-manager".to_string(),
+                allowed_agents: vec![
+                    "product-manager".to_string(),
+                    "engineering-lead".to_string(),
+                ],
+            },
+            HostControlPlanePrincipalConfig {
+                id: "bob".to_string(),
+                organization_id: "org-b".to_string(),
+                role: HostControlPlaneRole::Viewer,
+                token_env: "IRONCLAW_TEST_ORG_B_TOKEN".to_string(),
+                default_agent: "backend-engineer".to_string(),
+                allowed_agents: vec!["backend-engineer".to_string()],
+            },
+        ];
+        let state = AppState::new(config).unwrap();
+        let artifact = state
+            .farm_artifacts
+            .put(
+                "org-a-task",
+                "engineering-lead",
+                "private.txt",
+                "text/plain",
+                "org a only",
+                b"org-a-private-artifact",
+                2,
+            )
+            .unwrap();
+        state
+            .farm_tasks
+            .insert(farm::FarmTask {
+                id: "org-a-task".to_string(),
+                context_id: "org-a-context".to_string(),
+                parent_task_id: None,
+                requester: "product-manager".to_string(),
+                assignee: "engineering-lead".to_string(),
+                skill: "lead_delivery".to_string(),
+                state: farm::TaskState::Completed,
+                input: serde_json::json!({"secret": "org-a-only"}),
+                output: Some(serde_json::json!({"result": "done"})),
+                artifact_ids: vec![artifact.id.clone()],
+                delegation_depth: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            })
+            .unwrap();
+        (temp, state, token_a, token_b, artifact.id)
+    }
+
+    fn authorized_request(path: &str, token: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
 
     #[test]
     fn health_response_version() {
@@ -904,5 +1259,162 @@ mod api_test {
         assert!(json.contains("/api/admin/keys"));
         assert!(json.contains("/api/admin/memory"));
         assert!(json.contains("/api/admin/heartbeat"));
+    }
+
+    #[tokio::test]
+    async fn control_plane_auth_and_tenant_filters_fail_closed() {
+        let _guard = AUTH_ENV_LOCK.lock().await;
+        let (_temp, state, token_a, token_b, artifact_id) = secured_test_state();
+        let router = build_router(state.clone());
+
+        let public = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(public.status(), StatusCode::OK);
+
+        let missing = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/farm/tasks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let org_a = router
+            .clone()
+            .oneshot(authorized_request("/api/farm/tasks", &token_a))
+            .await
+            .unwrap();
+        assert_eq!(org_a.status(), StatusCode::OK);
+        let org_a_body = to_bytes(org_a.into_body(), 64 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&org_a_body).contains("org-a-task"));
+
+        let org_b = router
+            .clone()
+            .oneshot(authorized_request("/api/farm/tasks", &token_b))
+            .await
+            .unwrap();
+        assert_eq!(org_b.status(), StatusCode::OK);
+        let org_b_body = to_bytes(org_b.into_body(), 64 * 1024).await.unwrap();
+        assert!(!String::from_utf8_lossy(&org_b_body).contains("org-a-task"));
+
+        let hidden = router
+            .clone()
+            .oneshot(authorized_request("/api/farm/tasks/org-a-task", &token_b))
+            .await
+            .unwrap();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+        let foreign_artifact = router
+            .clone()
+            .oneshot(authorized_request(
+                &format!("/api/farm/artifacts/{artifact_id}"),
+                &token_b,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(foreign_artifact.status(), StatusCode::NOT_FOUND);
+
+        let own_artifact = router
+            .clone()
+            .oneshot(authorized_request(
+                &format!("/api/farm/artifacts/{artifact_id}"),
+                &token_a,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(own_artifact.status(), StatusCode::OK);
+
+        let ticket_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/ws-ticket")
+                    .header(header::AUTHORIZATION, format!("Bearer {token_a}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"agent_id":"product-manager"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ticket_response.status(), StatusCode::OK);
+        let ticket_body = to_bytes(ticket_response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let ticket: serde_json::Value = serde_json::from_slice(&ticket_body).unwrap();
+        let ticket = ticket["ticket"].as_str().unwrap();
+        assert!(state.consume_ws_ticket(ticket, "product-manager").is_some());
+        assert!(state.consume_ws_ticket(ticket, "product-manager").is_none());
+
+        let admin_denied = router
+            .clone()
+            .oneshot(authorized_request("/api/admin/vms", &token_b))
+            .await
+            .unwrap();
+        assert_eq!(admin_denied.status(), StatusCode::FORBIDDEN);
+
+        let forged = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/tasks")
+                    .header(header::AUTHORIZATION, format!("Bearer {token_a}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "requester": "backend-engineer",
+                            "assignee": "engineering-lead",
+                            "skill": "lead_delivery",
+                            "input": {"objective": "identity binding test"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(forged.status(), StatusCode::CREATED);
+        let forged_body = to_bytes(forged.into_body(), 64 * 1024).await.unwrap();
+        let forged_task: farm::FarmTask = serde_json::from_slice(&forged_body).unwrap();
+        assert_eq!(forged_task.requester, "product-manager");
+
+        let viewer_write = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/tasks")
+                    .header(header::AUTHORIZATION, format!("Bearer {token_b}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(viewer_write.status(), StatusCode::FORBIDDEN);
+
+        let audit_count: i64 = crate::open_security_db(&state)
+            .unwrap()
+            .query_row("select count(*) from control_plane_audit", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(audit_count >= 5);
+        std::env::remove_var("IRONCLAW_TEST_ORG_A_TOKEN");
+        std::env::remove_var("IRONCLAW_TEST_ORG_B_TOKEN");
+        std::env::remove_var("OPENAI_API_KEY");
     }
 }

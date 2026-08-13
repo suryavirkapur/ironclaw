@@ -376,6 +376,39 @@ pub struct HostSecurityConfig {
     pub rate_limit: HostRateLimitConfig,
     #[serde(default)]
     pub network: HostNetworkConfig,
+    #[serde(default)]
+    pub control_plane: HostControlPlaneConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct HostControlPlaneConfig {
+    /// Require an authenticated principal for control-plane REST and WebSocket access.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Static principals whose bearer tokens are loaded from host environment variables.
+    #[serde(default)]
+    pub principals: Vec<HostControlPlanePrincipalConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostControlPlanePrincipalConfig {
+    pub id: String,
+    pub organization_id: String,
+    pub role: HostControlPlaneRole,
+    pub token_env: String,
+    /// Agent identity used as the requester for tasks created by this principal.
+    pub default_agent: String,
+    /// Agents visible to this principal. Administrators may use an empty list for all agents.
+    #[serde(default)]
+    pub allowed_agents: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostControlPlaneRole {
+    Admin,
+    Operator,
+    Viewer,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -429,6 +462,7 @@ impl Default for HostSecurityConfig {
             webhook_secret: String::new(),
             rate_limit: HostRateLimitConfig::default(),
             network: HostNetworkConfig::default(),
+            control_plane: HostControlPlaneConfig::default(),
         }
     }
 }

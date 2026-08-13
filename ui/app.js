@@ -7,6 +7,7 @@ const state = {
   chat: null,
   pendingFile: null,
   threads: loadThreads(),
+  accessToken: loadAccessToken(),
 };
 
 const elements = {
@@ -40,13 +41,26 @@ const terminalStates = new Set(["completed", "failed", "canceled", "rejected"]);
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 async function api(path, options = {}) {
+  const authorization = state.accessToken ? { authorization: `Bearer ${state.accessToken}` } : {};
   const response = await fetch(path, {
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    headers: { "content-type": "application/json", ...authorization, ...(options.headers || {}) },
     ...options,
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error || `${response.status} ${response.statusText}`);
   return body;
+}
+
+function loadAccessToken() {
+  return sessionStorage.getItem("ironclaw.controlPlaneToken") || "";
+}
+
+function promptForAccessToken() {
+  const supplied = window.prompt("Enter your Ironclaw control-plane access token");
+  if (!supplied) return false;
+  state.accessToken = supplied.trim();
+  sessionStorage.setItem("ironclaw.controlPlaneToken", state.accessToken);
+  return Boolean(state.accessToken);
 }
 
 function node(tag, className, text) {
@@ -380,7 +394,8 @@ async function connectChat(agentId) {
   closeChat();
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const sessionId = `workspace-${agentId}`;
-  const socket = new WebSocket(`${protocol}//${location.host}/ws?user_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}`);
+  const auth = await api("/api/auth/ws-ticket", { method: "POST", body: JSON.stringify({ agent_id: agentId }) });
+  const socket = new WebSocket(`${protocol}//${location.host}/ws?user_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(auth.ticket)}`);
   const chat = { agentId, socket, ready: false, response: "" };
   state.chat = chat;
   socket.binaryType = "arraybuffer";
@@ -552,6 +567,10 @@ async function submitA2aQuestion(event) {
     addMessage(requester.id, { role: "agent", text: `${target.name} replied via A2A:\n\n${response}`, taskId: completed.id, fromAgent: requester.id, toAgent: target.id });
     await refresh();
   } catch (error) {
+    if (/401|bearer token/i.test(error.message) && promptForAccessToken()) {
+      window.setTimeout(refresh, 0);
+      return;
+    }
     elements.a2aError.textContent = error.message;
     addMessage(requester.id, { role: "system", text: `A2A request failed: ${error.message}` });
   }
@@ -590,6 +609,10 @@ async function refresh() {
       if (selected && state.view === "tasks") inspectTask(selected);
     }
   } catch (error) {
+    if (/401|bearer token/i.test(error.message) && promptForAccessToken()) {
+      window.setTimeout(refresh, 0);
+      return;
+    }
     elements.healthDot.classList.remove("online");
     elements.connectionLabel.textContent = "offline";
     if (state.view !== "chat") elements.content.replaceChildren(node("div", "empty-state error", error.message));

@@ -46,6 +46,17 @@ poll_timeout_seconds = 2
 [security]
 allowed_channels = ["telegram", "websocket"]
 
+[security.control_plane]
+enabled = true
+
+[[security.control_plane.principals]]
+id = "engineering-owner"
+organization_id = "engineering-demo"
+role = "admin"
+token_env = "IRONCLAW_CONTROL_PLANE_TOKEN"
+default_agent = "product-manager"
+allowed_agents = []
+
 [security.network]
 allowed_domains = []
 

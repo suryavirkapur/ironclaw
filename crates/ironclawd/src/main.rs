@@ -11,7 +11,8 @@ mod whatsapp;
 
 use auth_transport::AuthenticatedTransport;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -133,7 +134,7 @@ async fn run_server(
     };
     let addr = format!("{}:{}", config.server.bind, config.server.port);
     let state = AppState::new(config)?;
-    let legacy_routes = Router::new()
+    let public_legacy_routes = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/gateway/pair/start", post(gateway_pair_start_handler))
         .route(
@@ -144,15 +145,24 @@ async fn run_server(
         .route("/webhooks/{channel}", post(webhook_handler))
         .route("/ui", get(ui_index_handler))
         .route("/ui/{*path}", get(ui_asset_handler))
+        .with_state(state.clone());
+    let protected_legacy_routes = Router::new()
         .route("/api/soul-guard/pending", get(soul_guard_pending_handler))
         .route(
             "/api/soul-guard/decision",
             post(soul_guard_decision_handler),
         )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            api::control_plane_auth,
+        ))
         .with_state(state.clone());
 
     let api_routes = api::build_router(state.clone());
-    let app = legacy_routes.merge(api_routes);
+    let app = public_legacy_routes
+        .merge(protected_legacy_routes)
+        .merge(api_routes)
+        .layer(middleware::from_fn(security_response_headers));
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -259,6 +269,25 @@ async fn run_server(
         tracing::warn!("vm shutdown cleanup failed: {err}");
     }
     result
+}
+
+async fn security_response_headers(request: Request<axum::body::Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+        ("permissions-policy", "camera=(), microphone=(), geolocation=()"),
+        ("strict-transport-security", "max-age=31536000; includeSubDomains"),
+        (
+            "content-security-policy",
+            "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' ws: wss:",
+        ),
+    ] {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+    response
 }
 
 fn test_no_bind_enabled() -> bool {
@@ -417,12 +446,15 @@ struct AppState {
     farm_registry: Arc<FarmRegistry>,
     farm_tasks: TaskLedger,
     farm_artifacts: farm::ArtifactStore,
+    control_plane_authorizer: Arc<security::ControlPlaneAuthorizer>,
+    ws_tickets: Arc<std::sync::Mutex<HashMap<String, WsTicketRecord>>>,
     mcp_gateway: Arc<mcp::McpGateway>,
     farm_agent_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
     fn new(config: HostConfig) -> Result<Self, IronclawError> {
+        let control_plane_authorizer = build_control_plane_authorizer(&config)?;
         let farm_registry = if config.farm.enabled {
             FarmRegistry::load_dir(&config.farm.manifests_dir).map_err(|err| {
                 IronclawError::new(format!("agent farm manifest load failed: {err}"))
@@ -530,6 +562,8 @@ impl AppState {
             farm_registry,
             farm_tasks,
             farm_artifacts,
+            control_plane_authorizer: Arc::new(control_plane_authorizer),
+            ws_tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_gateway,
             farm_agent_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
@@ -538,6 +572,148 @@ impl AppState {
     fn idle_timeout_duration(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.host_config.idle_timeout_minutes.saturating_mul(60))
     }
+
+    fn issue_ws_ticket(
+        &self,
+        principal: security::ControlPlanePrincipal,
+        agent_id: &str,
+    ) -> Result<(String, u64), IronclawError> {
+        if !principal.allows_agent(agent_id) {
+            return Err(IronclawError::new("agent not found"));
+        }
+        use rand::Rng;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        let ticket = hex::encode(bytes);
+        let expires_at_ms = now_ms()?.saturating_add(60_000);
+        self.ws_tickets
+            .lock()
+            .map_err(|_| IronclawError::new("WebSocket ticket store lock poisoned"))?
+            .insert(
+                ticket.clone(),
+                WsTicketRecord {
+                    principal,
+                    agent_id: agent_id.to_string(),
+                    expires_at_ms,
+                },
+            );
+        Ok((ticket, expires_at_ms))
+    }
+
+    fn consume_ws_ticket(
+        &self,
+        ticket: &str,
+        agent_id: &str,
+    ) -> Option<security::ControlPlanePrincipal> {
+        let record = self.ws_tickets.lock().ok()?.remove(ticket)?;
+        (record.agent_id == agent_id
+            && record.expires_at_ms >= now_ms().ok()?
+            && record.principal.allows_agent(agent_id))
+        .then_some(record.principal)
+    }
+}
+
+#[derive(Clone)]
+struct WsTicketRecord {
+    principal: security::ControlPlanePrincipal,
+    agent_id: String,
+    expires_at_ms: u64,
+}
+
+fn build_control_plane_authorizer(
+    config: &HostConfig,
+) -> Result<security::ControlPlaneAuthorizer, IronclawError> {
+    if !config.security.control_plane.enabled {
+        if !matches!(
+            config.server.bind.as_str(),
+            "127.0.0.1" | "::1" | "localhost"
+        ) {
+            return Err(IronclawError::new(
+                "control-plane authentication must be enabled for a non-loopback server bind",
+            ));
+        }
+        return Ok(security::ControlPlaneAuthorizer::default());
+    }
+    if config.security.control_plane.principals.is_empty() {
+        return Err(IronclawError::new(
+            "control-plane authentication is enabled but no principals are configured",
+        ));
+    }
+    let mut entries = Vec::new();
+    let mut principal_ids = std::collections::HashSet::new();
+    let mut token_env_names = std::collections::HashSet::new();
+    let validation_registry = config
+        .farm
+        .enabled
+        .then(|| {
+            FarmRegistry::load_dir(&config.farm.manifests_dir).map_err(|err| {
+                IronclawError::new(format!("agent farm manifest load failed: {err}"))
+            })
+        })
+        .transpose()?;
+    for configured in &config.security.control_plane.principals {
+        if configured.id.trim().is_empty()
+            || configured.organization_id.trim().is_empty()
+            || configured.default_agent.trim().is_empty()
+            || configured.token_env.trim().is_empty()
+        {
+            return Err(IronclawError::new(
+                "control-plane principal id, organization_id, default_agent, and token_env must be non-empty",
+            ));
+        }
+        if !principal_ids.insert(configured.id.clone()) {
+            return Err(IronclawError::new(format!(
+                "duplicate control-plane principal id: {}",
+                configured.id
+            )));
+        }
+        if !token_env_names.insert(configured.token_env.clone()) {
+            return Err(IronclawError::new(format!(
+                "control-plane token environment variable is reused: {}",
+                configured.token_env
+            )));
+        }
+        if let Some(manifests) = &validation_registry {
+            if manifests.get(&configured.default_agent).is_none() {
+                return Err(IronclawError::new(format!(
+                    "control-plane principal {} has unknown default_agent {}",
+                    configured.id, configured.default_agent
+                )));
+            }
+            for agent_id in &configured.allowed_agents {
+                if manifests.get(agent_id).is_none() {
+                    return Err(IronclawError::new(format!(
+                        "control-plane principal {} allows unknown agent {}",
+                        configured.id, agent_id
+                    )));
+                }
+            }
+        }
+        let token = std::env::var(&configured.token_env).map_err(|_| {
+            IronclawError::new(format!(
+                "control-plane token environment variable {} is unavailable",
+                configured.token_env
+            ))
+        })?;
+        std::env::remove_var(&configured.token_env);
+        let role = match configured.role {
+            common::config::HostControlPlaneRole::Admin => security::ControlPlaneRole::Admin,
+            common::config::HostControlPlaneRole::Operator => security::ControlPlaneRole::Operator,
+            common::config::HostControlPlaneRole::Viewer => security::ControlPlaneRole::Viewer,
+        };
+        entries.push((
+            token,
+            security::ControlPlanePrincipal::new(
+                &configured.id,
+                &configured.organization_id,
+                role,
+                &configured.default_agent,
+                configured.allowed_agents.clone(),
+            ),
+        ));
+    }
+    security::ControlPlaneAuthorizer::new(entries)
+        .map_err(|err| IronclawError::new(format!("control-plane auth init failed: {err}")))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -598,6 +774,7 @@ struct WsQuery {
     user_id: Option<String>,
     session_id: Option<String>,
     node_id: Option<String>,
+    ticket: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -637,7 +814,34 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "unauthorized gateway").into_response();
     }
     let user_id = resolve_owner_user_id(ChannelSource::WebSocket, query.user_id.as_deref());
-    if let Err(err) = enforce_rate_limit(&state, &user_id, "websocket", 0) {
+    let control_principal = if state.host_config.security.control_plane.enabled {
+        let principal = extract_bearer_token(&headers)
+            .and_then(|token| state.control_plane_authorizer.authenticate(token))
+            .or_else(|| {
+                query
+                    .ticket
+                    .as_deref()
+                    .and_then(|ticket| state.consume_ws_ticket(ticket, &user_id))
+            });
+        let Some(principal) = principal else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "valid control-plane bearer token required",
+            )
+                .into_response();
+        };
+        if !principal.allows_agent(&user_id) {
+            return (StatusCode::NOT_FOUND, "agent not found").into_response();
+        }
+        Some(principal)
+    } else {
+        None
+    };
+    let rate_limit_identity = control_principal
+        .as_ref()
+        .map(|principal| format!("organization:{}", principal.organization_id))
+        .unwrap_or_else(|| user_id.clone());
+    if let Err(err) = enforce_rate_limit(&state, &rate_limit_identity, "websocket", 0) {
         tracing::warn!(
             "rate limit hit user_id={} channel=websocket err={}",
             user_id,
@@ -2116,7 +2320,7 @@ fn open_memory_db(state: &AppState, user_id: &str) -> Result<Connection, Ironcla
     Ok(conn)
 }
 
-fn open_security_db(state: &AppState) -> Result<Connection, IronclawError> {
+pub(crate) fn open_security_db(state: &AppState) -> Result<Connection, IronclawError> {
     open_security_db_path(&state.security_db_path)
 }
 
@@ -5888,5 +6092,17 @@ __________
         assert!(brain_ext4_path(&root, "owner/session").is_err());
         assert!(brain_ext4_path(&root, "owner_123").is_ok());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_bind_requires_control_plane_authentication() {
+        let mut config = common::config::HostConfig::default_for_local(std::env::temp_dir());
+        config.server.bind = "0.0.0.0".to_string();
+        config.security.control_plane.enabled = false;
+        let error = match crate::build_control_plane_authorizer(&config) {
+            Ok(_) => panic!("public bind unexpectedly accepted without authentication"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("non-loopback"));
     }
 }
