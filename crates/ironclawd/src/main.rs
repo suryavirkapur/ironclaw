@@ -2275,18 +2275,33 @@ async fn host_plan_tool_response(
 ) -> Result<String, String> {
     let request = decode_host_plan_request(raw_request);
     if request.observations.is_empty() {
+        if let Some(plan) = deterministic_a2a_plan(
+            &state.farm_registry,
+            user_id,
+            &request.user_text,
+            allowed_tools,
+        ) {
+            return tool_plan_to_json(&plan);
+        }
         if let Some(plan) = deterministic_guest_tools_plan(&request.user_text, allowed_tools) {
             return tool_plan_to_json(&plan);
         }
+    } else if let Some(plan) = deterministic_await_a2a_plan(&request.observations, allowed_tools) {
+        return tool_plan_to_json(&plan);
     }
 
-    let memory_block = load_memory_block(
+    let mut memory_block = load_memory_block(
         state,
         user_id,
         &request.user_text,
         MEMORY_PROMPT_BUDGET_CHARS,
     )
     .map_err(|err| format!("memory retrieval failed: {err}"))?;
+    let organization = agent_organization_context(&state.farm_registry, user_id);
+    if !organization.is_empty() {
+        memory_block.push_str("\n\n");
+        memory_block.push_str(&organization);
+    }
     const HOST_PLANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
     let planning = state.llm_client.plan_tool_or_answer(
         &request.user_text,
@@ -2390,14 +2405,17 @@ async fn execute_requested_host_tool(
                             .map_err(|err| format!("delegated task encode failed: {err}"))
                     })
             }
-            None => Err("delegate_task is only available while executing an A2A task".to_string()),
+            None => create_direct_delegated_task(state, user_id, &request.input).and_then(|task| {
+                serde_json::to_string(&task)
+                    .map_err(|err| format!("delegated task encode failed: {err}"))
+            }),
         }
     } else if request.tool == "await_task" {
         match active_task_id {
             Some(parent_task_id) => {
                 await_delegated_task(state, user_id, parent_task_id, &request.input).await
             }
-            None => Err("await_task is only available while executing an A2A task".to_string()),
+            None => await_direct_delegated_task(state, user_id, &request.input).await,
         }
     } else {
         run_host_tool(
@@ -2412,6 +2430,46 @@ async fn execute_requested_host_tool(
     match result {
         Ok(output) => (true, truncate_tool_output(&output)),
         Err(error) => (false, truncate_tool_output(&error)),
+    }
+}
+
+fn create_direct_delegated_task(
+    state: &AppState,
+    requester: &str,
+    raw_input: &str,
+) -> Result<FarmTask, String> {
+    let input: DelegateTaskInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("delegate task input is invalid: {err}"))?;
+    create_channel_farm_task(state, requester, &input.assignee, &input.skill, input.input)
+        .map_err(|err| err.to_string())
+}
+
+async fn await_direct_delegated_task(
+    state: &AppState,
+    requester: &str,
+    raw_input: &str,
+) -> Result<String, String> {
+    let input: AwaitTaskInput = serde_json::from_str(raw_input)
+        .map_err(|err| format!("await task input is invalid: {err}"))?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(input.timeout_seconds.clamp(1, 300));
+    loop {
+        let task = state
+            .farm_tasks
+            .get(&input.task_id)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| format!("delegated task not found: {}", input.task_id))?;
+        if task.requester != requester || task.parent_task_id.is_some() {
+            return Err("agent may await only its own direct delegated task".to_string());
+        }
+        if task.state.terminal() {
+            return serde_json::to_string(&task)
+                .map_err(|err| format!("delegated task encode failed: {err}"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for delegated task {}", task.id));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 }
 
@@ -2542,6 +2600,124 @@ fn decode_host_plan_request(raw: &str) -> HostPlanRequest {
             observations: Vec::new(),
         },
     }
+}
+
+fn agent_organization_context(registry: &farm::FarmRegistry, agent_id: &str) -> String {
+    let Some(agent) = registry.get(agent_id) else {
+        return String::new();
+    };
+    let mut lines = vec![format!(
+        "Organization chart (authoritative): You are {} ({}) with agent id `{}`.",
+        agent.manifest.name, agent.manifest.role, agent.manifest.id
+    )];
+    for record in registry.agents() {
+        let manager = record
+            .manifest
+            .reports_to
+            .as_deref()
+            .and_then(|id| registry.get(id))
+            .map(|manager| {
+                format!(
+                    "; reports to {} (`{}`)",
+                    manager.manifest.name, manager.manifest.id
+                )
+            })
+            .unwrap_or_default();
+        lines.push(format!(
+            "- {} — {} (`{}`){manager}",
+            record.manifest.name, record.manifest.role, record.manifest.id
+        ));
+    }
+    lines.push("Authorized A2A routes available to you:".to_string());
+    for target_id in &agent.manifest.a2a.delegate_to {
+        let Some(target) = registry.get(target_id) else {
+            continue;
+        };
+        for skill in &target.manifest.skills {
+            lines.push(format!(
+                "- Ask {} (`{}`) using delegate_task with assignee=`{}`, skill=`{}`: {}",
+                target.manifest.name,
+                target.manifest.id,
+                target.manifest.id,
+                skill.id,
+                skill.description
+            ));
+        }
+    }
+    lines.push(
+        "When the user asks you to ask, contact, or check with a teammate, call delegate_task and then await_task; do not claim that you cannot reach them. For a request about something the teammate remembers (including a secret or fact previously told to them), set input.purpose=`authorized_memory_request` and put the complete request in input.request. Private memory is disclosed only through this explicit authorized A2A task."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn deterministic_a2a_plan(
+    registry: &farm::FarmRegistry,
+    requester: &str,
+    user_text: &str,
+    allowed_tools: &[String],
+) -> Option<ToolPlan> {
+    if !allowed_tools.iter().any(|tool| tool == "delegate_task") {
+        return None;
+    }
+    let normalized = user_text.to_ascii_lowercase();
+    let requests_contact = ["ask ", "contact ", "message ", "check with ", "talk to "]
+        .iter()
+        .any(|phrase| normalized.contains(phrase));
+    if !requests_contact {
+        return None;
+    }
+    let requester_record = registry.get(requester)?;
+    for target_id in &requester_record.manifest.a2a.delegate_to {
+        let target = registry.get(target_id)?;
+        let mentions_target = normalized.contains(&target.manifest.name.to_ascii_lowercase())
+            || normalized.contains(&target.manifest.id.to_ascii_lowercase());
+        if !mentions_target {
+            continue;
+        }
+        let memory_request = [
+            "secret", "remember", "memory", "told", "knows", "know ", "fact",
+        ]
+        .iter()
+        .any(|word| normalized.contains(word));
+        // Memory hand-offs have a strict host-side purpose marker, so make this common
+        // natural-language route deterministic. Other work remains with the planner so it
+        // can select the best specialization from the full organization context.
+        if !memory_request {
+            return None;
+        }
+        let skill = target.manifest.skills.first()?;
+        let mut input = serde_json::json!({"request": user_text});
+        input["purpose"] = serde_json::Value::String("authorized_memory_request".to_string());
+        return Some(ToolPlan::Tool {
+            tool: "delegate_task".to_string(),
+            input: serde_json::json!({
+                "assignee": target.manifest.id,
+                "skill": skill.id,
+                "input": input,
+            })
+            .to_string(),
+        });
+    }
+    None
+}
+
+fn deterministic_await_a2a_plan(
+    observations: &[ToolLoopObservation],
+    allowed_tools: &[String],
+) -> Option<ToolPlan> {
+    if !allowed_tools.iter().any(|tool| tool == "await_task") {
+        return None;
+    }
+    let observation = observations.last()?;
+    if observation.tool != "delegate_task" || !observation.ok {
+        return None;
+    }
+    let task: FarmTask = serde_json::from_str(&observation.output).ok()?;
+    Some(ToolPlan::Tool {
+        tool: "await_task".to_string(),
+        input: serde_json::json!({"task_id": task.id, "timeout_seconds": 120}).to_string(),
+    })
 }
 
 fn deterministic_guest_tools_plan(user_text: &str, allowed_tools: &[String]) -> Option<ToolPlan> {
@@ -4914,8 +5090,9 @@ fn summarize_whatsapp_session_memory(
 #[cfg(test)]
 mod tests {
     use super::{
-        allowed_tools_for_runtime, brain_ext4_path, decode_host_plan_request,
-        decode_websocket_upload, deterministic_guest_tools_plan, handle_guest_job_trigger,
+        agent_organization_context, allowed_tools_for_runtime, brain_ext4_path,
+        decode_host_plan_request, decode_websocket_upload, deterministic_a2a_plan,
+        deterministic_await_a2a_plan, deterministic_guest_tools_plan, handle_guest_job_trigger,
         load_telegram_offset, load_telegram_transcript, parse_telegram_team_command,
         render_telegram_html, resolve_owner_user_id, save_telegram_offset,
         save_telegram_transcript, should_enter_idle_sleep, split_telegram_chunks,
@@ -5430,6 +5607,71 @@ __________
         assert_eq!(request.observations[0].tool, "code_exec");
         assert!(request.observations[0].ok);
         assert_eq!(request.observations[0].output, "report.png created");
+    }
+
+    #[test]
+    fn organization_context_names_team_and_authorized_routes() {
+        let agents_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demos/engineering-team/agents");
+        let registry = farm::FarmRegistry::load_dir(&agents_dir).unwrap();
+        let context = agent_organization_context(&registry, "engineering-lead");
+        assert!(context.contains("You are Ravi (Engineering Lead)"));
+        assert!(context.contains("Nora — Backend Engineer (`backend-engineer`)"));
+        assert!(context.contains("Ask Nora (`backend-engineer`)"));
+        assert!(context.contains("skill=`implement_backend`"));
+        assert!(context.contains("authorized_memory_request"));
+    }
+
+    #[test]
+    fn natural_teammate_request_delegates_and_then_awaits() {
+        let agents_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demos/engineering-team/agents");
+        let registry = farm::FarmRegistry::load_dir(&agents_dir).unwrap();
+        let tools = vec!["delegate_task".to_string(), "await_task".to_string()];
+        let plan = deterministic_a2a_plan(
+            &registry,
+            "engineering-lead",
+            "ask Nora for the secret and tell me",
+            &tools,
+        )
+        .unwrap();
+        let ToolPlan::Tool { tool, input } = plan else {
+            panic!("expected delegation tool plan");
+        };
+        assert_eq!(tool, "delegate_task");
+        let input: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(input["assignee"], "backend-engineer");
+        assert_eq!(input["skill"], "implement_backend");
+        assert_eq!(input["input"]["purpose"], "authorized_memory_request");
+
+        let task = farm::FarmTask {
+            id: "task-direct-a2a".to_string(),
+            context_id: "context-direct-a2a".to_string(),
+            parent_task_id: None,
+            requester: "engineering-lead".to_string(),
+            assignee: "backend-engineer".to_string(),
+            skill: "implement_backend".to_string(),
+            state: farm::TaskState::Submitted,
+            input: serde_json::json!({}),
+            output: None,
+            artifact_ids: Vec::new(),
+            delegation_depth: 0,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let observations = vec![crate::llm_client::ToolLoopObservation {
+            iteration: 1,
+            tool: "delegate_task".to_string(),
+            input: "{}".to_string(),
+            ok: true,
+            output: serde_json::to_string(&task).unwrap(),
+        }];
+        let await_plan = deterministic_await_a2a_plan(&observations, &tools).unwrap();
+        let ToolPlan::Tool { tool, input } = await_plan else {
+            panic!("expected await tool plan");
+        };
+        assert_eq!(tool, "await_task");
+        assert!(input.contains("task-direct-a2a"));
     }
 
     #[test]

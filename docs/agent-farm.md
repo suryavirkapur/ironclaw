@@ -55,6 +55,21 @@ Task creation is checked against both sides of the A2A ACL. Tasks are stored ato
 `<users_root>/_farm/tasks.json` and carry context, parent, requester, assignee, skill, and
 delegation-depth fields.
 
+## Organization-aware conversations
+
+Every farm agent receives an authoritative organization context generated from all loaded
+manifests. It includes teammate names, roles, reporting lines, and only the A2A routes that the
+current agent is allowed to invoke. A direct message such as `ask Nora for the secret and tell me`
+therefore becomes a capability-checked durable task, waits for Nora's result, and returns it to the
+same conversation. The direct-chat path applies the same requester, assignee, skill, concurrency,
+and A2A ACL checks as API-created tasks.
+
+Requests for a fact in another agent's private memory carry the explicit
+`authorized_memory_request` purpose. The target agent retrieves its own private memory inside its
+own VM; the requester never receives direct access to that memory store.
+
+![Natural-language A2A memory hand-off](screenshots/agent-natural-a2a-org-chart.png)
+
 Example task request:
 
 ```json
