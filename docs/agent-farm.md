@@ -40,6 +40,22 @@ token outside the guest VM and task payloads.
 
 The included `agents/*.agent.toml` files form a small example organization.
 
+## Per-agent memory
+
+Every manifest selects `engine = "core-agent-memory"`. The engine is an embedded Rust adaptation
+of Memori, with SQLite, FTS5, optional local FastEmbed vectors, Reciprocal Rank Fusion,
+deduplication, and access/recency scoring. Its tables are namespaced as `core_agent_memories*`
+inside the agent's private database, so existing Ironclaw memory data can be migrated without a
+destructive schema replacement.
+
+Each MicroVM owns a separate database. There is no global memory catalog and no cross-agent SQL
+access. A teammate can disclose a remembered fact only through an authorized A2A task.
+
+The reusable implementation lives in `core-agent-memory/`. It is independently buildable and
+packable as both the `core-agent-memory` Rust crate and the `@ironclaw/core-agent-memory` Node
+N-API package. The guest build disables model downloads and uses FTS5; standalone consumers may
+enable the default embeddings feature for local 384-dimensional vector search.
+
 ## Control-plane API
 
 ```text

@@ -8,6 +8,7 @@ provider = "openrouter"
 model = "minimax/minimax-m2.5"
 
 [memory]
+engine = "core-agent-memory"
 private = true
 collections = ["architecture", "delivery", "decisions"]
 

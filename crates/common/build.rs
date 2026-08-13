@@ -1,6 +1,9 @@
 fn main() {
     let proto_file = "proto/ironclaw.proto";
 
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("locate vendored protoc");
+    std::env::set_var("PROTOC", protoc);
+
     println!("cargo:rerun-if-changed={proto_file}");
 
     let mut config = prost_build::Config::new();

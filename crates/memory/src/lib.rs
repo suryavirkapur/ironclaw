@@ -216,7 +216,127 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), MemoryError> {
             ON summaries(user_id, turn_range);",
     )
     .map_err(|err| MemoryError::new(format!("schema init failed: {err}")))?;
+    core_agent_memory::schema::init_db(conn)
+        .map_err(|err| MemoryError::new(format!("core agent memory schema init failed: {err}")))?;
+    sync_all_memories_to_core(conn)?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct CoreSyncRow {
+    id: i64,
+    user_id: String,
+    created_ms: u64,
+    updated_ms: u64,
+    importance: i64,
+    pinned: bool,
+    kind: String,
+    text: String,
+    tags_json: String,
+    source_json: String,
+    disabled: bool,
+}
+
+fn sync_all_memories_to_core(conn: &Connection) -> Result<(), MemoryError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, user_id, created_ms, updated_ms, importance, pinned, kind, text, tags, source, disabled FROM memories",
+        )
+        .map_err(|err| MemoryError::new(format!("core memory migration prepare failed: {err}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(CoreSyncRow {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                created_ms: row.get::<_, i64>(2)? as u64,
+                updated_ms: row.get::<_, i64>(3)? as u64,
+                importance: row.get(4)?,
+                pinned: row.get::<_, i64>(5)? == 1,
+                kind: row.get(6)?,
+                text: row.get(7)?,
+                tags_json: row.get(8)?,
+                source_json: row.get(9)?,
+                disabled: row.get::<_, i64>(10)? == 1,
+            })
+        })
+        .map_err(|err| MemoryError::new(format!("core memory migration query failed: {err}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| MemoryError::new(format!("core memory migration row failed: {err}")))?;
+    drop(statement);
+    for row in rows {
+        sync_memory_to_core(conn, &row)?;
+    }
+    Ok(())
+}
+
+fn sync_memory_to_core(conn: &Connection, row: &CoreSyncRow) -> Result<(), MemoryError> {
+    let core_id = format!("legacy-{}", row.id);
+    if row.disabled {
+        let _ = core_agent_memory::storage::delete(conn, &core_id);
+        return Ok(());
+    }
+    let tags = serde_json::from_str(&row.tags_json).unwrap_or(serde_json::Value::Null);
+    let source = serde_json::from_str(&row.source_json).unwrap_or(serde_json::Value::Null);
+    let metadata = json!({
+        "legacy_id": row.id,
+        "user_id": row.user_id,
+        "importance": row.importance,
+        "pinned": row.pinned,
+        "type": row.kind,
+        "tags": tags,
+        "source": source,
+    });
+    if core_agent_memory::storage::get_raw(conn, &core_id)
+        .map_err(|err| MemoryError::new(format!("core memory lookup failed: {err}")))?
+        .is_some()
+    {
+        core_agent_memory::storage::update(
+            conn,
+            &core_id,
+            Some(&row.text),
+            None,
+            Some(metadata),
+            false,
+        )
+        .map_err(|err| MemoryError::new(format!("core memory update failed: {err}")))?;
+    } else {
+        core_agent_memory::storage::insert_with_id(
+            conn,
+            &core_id,
+            &row.text,
+            None,
+            Some(metadata),
+            row.created_ms as f64 / 1_000.0,
+            row.updated_ms as f64 / 1_000.0,
+        )
+        .map_err(|err| MemoryError::new(format!("core memory insert failed: {err}")))?;
+    }
+    Ok(())
+}
+
+fn sync_memory_id_to_core(conn: &Connection, id: i64) -> Result<(), MemoryError> {
+    let row = conn
+        .query_row(
+            "SELECT id, user_id, created_ms, updated_ms, importance, pinned, kind, text, tags, source, disabled FROM memories WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(CoreSyncRow {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    created_ms: row.get::<_, i64>(2)? as u64,
+                    updated_ms: row.get::<_, i64>(3)? as u64,
+                    importance: row.get(4)?,
+                    pinned: row.get::<_, i64>(5)? == 1,
+                    kind: row.get(6)?,
+                    text: row.get(7)?,
+                    tags_json: row.get(8)?,
+                    source_json: row.get(9)?,
+                    disabled: row.get::<_, i64>(10)? == 1,
+                })
+            },
+        )
+        .map_err(|err| MemoryError::new(format!("core memory source lookup failed: {err}")))?;
+    sync_memory_to_core(conn, &row)
 }
 
 pub fn index_chunks(
@@ -542,6 +662,7 @@ pub fn upsert_memory(
         .map_err(|err| MemoryError::new(format!("memory id lookup failed: {err}")))?;
 
     sync_memory_fts(conn, id)?;
+    sync_memory_id_to_core(conn, id)?;
     Ok(id)
 }
 
@@ -592,6 +713,7 @@ pub fn forget_memory_by_id(conn: &Connection, user_id: &str, id: i64) -> Result<
         .map_err(|err| MemoryError::new(format!("forget by id failed: {err}")))?;
     if changed > 0 {
         rebuild_memory_fts(conn)?;
+        sync_memory_id_to_core(conn, id)?;
     }
     Ok(changed > 0)
 }
@@ -645,6 +767,59 @@ pub fn retrieve_memories(
     limit: usize,
     now_ms: u64,
 ) -> Result<Vec<RetrievedMemory>, MemoryError> {
+    let core_results = core_agent_memory::search::search(
+        conn,
+        core_agent_memory::SearchQuery {
+            text: Some(query.to_string()),
+            filter: Some(json!({"user_id": user_id})),
+            limit,
+            text_only: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|err| MemoryError::new(format!("core memory retrieval failed: {err}")))?;
+    if !core_results.is_empty() {
+        let mut retrieved = Vec::with_capacity(core_results.len());
+        for item in core_results {
+            let metadata = item.metadata.unwrap_or_default();
+            let Some(id) = metadata
+                .get("legacy_id")
+                .and_then(serde_json::Value::as_i64)
+            else {
+                continue;
+            };
+            retrieved.push(RetrievedMemory {
+                memory: MemoryRow {
+                    id,
+                    created_ms: (item.created_at * 1_000.0) as u64,
+                    updated_ms: (item.updated_at * 1_000.0) as u64,
+                    importance: metadata
+                        .get("importance")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(50),
+                    pinned: metadata
+                        .get("pinned")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                    kind: metadata
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("memory")
+                        .to_string(),
+                    text: item.content,
+                    tags_json: metadata
+                        .get("tags")
+                        .cloned()
+                        .unwrap_or_else(|| json!([]))
+                        .to_string(),
+                },
+                score: item.score.unwrap_or_default(),
+            });
+        }
+        if !retrieved.is_empty() {
+            return Ok(retrieved);
+        }
+    }
     let fts_query = fts_query_from_text(query);
     if fts_query.is_empty() {
         return Ok(Vec::new());

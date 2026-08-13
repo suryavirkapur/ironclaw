@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+core-agent-memory = { path = "../../core-agent-memory/crates/core", default-features = false }
 rusqlite = { version = "*", features = ["bundled", "load_extension", "functions"] }
 serde_json = "*"
 sha2 = "*"
-

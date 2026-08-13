@@ -81,6 +81,8 @@ impl Default for ComputeConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct MemoryConfig {
+    #[serde(default = "default_memory_engine")]
+    pub engine: String,
     #[serde(default = "private_memory")]
     pub private: bool,
     #[serde(default)]
@@ -91,9 +93,14 @@ fn private_memory() -> bool {
     true
 }
 
+fn default_memory_engine() -> String {
+    "core-agent-memory".to_string()
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
+            engine: default_memory_engine(),
             private: true,
             collections: Vec::new(),
         }
@@ -293,6 +300,12 @@ impl AgentManifest {
             return Err(ManifestError::Validation(format!(
                 "agent {} has invalid compute limits",
                 self.id
+            )));
+        }
+        if self.memory.engine != "core-agent-memory" {
+            return Err(ManifestError::Validation(format!(
+                "agent {} uses unsupported memory engine {}",
+                self.id, self.memory.engine
             )));
         }
         validate_relative_path("wasm.tools_dir", &self.wasm.tools_dir)?;

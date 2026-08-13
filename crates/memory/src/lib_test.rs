@@ -59,6 +59,43 @@ fn retrieval_includes_pinned_memory() {
 }
 
 #[test]
+fn core_agent_memory_is_initialized_and_scoped_per_agent() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    initialize_schema(&conn).expect("init schema");
+    for (agent, text) in [
+        ("backend-engineer", "backend owns the cobalt service"),
+        ("frontend-engineer", "frontend owns the violet interface"),
+    ] {
+        upsert_memory(
+            &conn,
+            10,
+            &NewMemory {
+                user_id: agent.to_string(),
+                importance: 90,
+                pinned: true,
+                kind: "specialization".to_string(),
+                text: text.to_string(),
+                tags_json: "[\"agent\"]".to_string(),
+                source_json: "{}".to_string(),
+            },
+        )
+        .expect("upsert agent memory");
+    }
+
+    let core_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM core_agent_memories", [], |row| {
+            row.get(0)
+        })
+        .expect("core memory count");
+    assert_eq!(core_count, 2);
+    let backend = retrieve_memories(&conn, "backend-engineer", "owns", 10, 100)
+        .expect("retrieve backend memory");
+    assert_eq!(backend.len(), 1);
+    assert!(backend[0].memory.text.contains("cobalt"));
+    assert!(!backend[0].memory.text.contains("violet"));
+}
+
+#[test]
 fn redacts_key_like_strings() {
     let input = "token sk-abc12345678901234567890 api_key=secret";
     let redacted = redact_secrets(input);

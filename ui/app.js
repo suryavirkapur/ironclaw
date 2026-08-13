@@ -353,7 +353,7 @@ function inspectTask(task) {
 
 async function inspectAgent(agent) {
   elements.detailTitle.textContent = agent.name;
-  elements.detailContent.replaceChildren(detailRow("Role", agent.role), detailRow("Agent ID", agent.id), detailRow("Memory", "Private VM"), detailRow("Active work", String(activeCount(agent.id))), detailRow("Wasm tools", String(agent.wasm_tools)), detailRow("MCP servers", String(agent.mcp_servers)));
+  elements.detailContent.replaceChildren(detailRow("Role", agent.role), detailRow("Agent ID", agent.id), detailRow("Memory", `${agent.memory_engine || "core-agent-memory"} · Private VM`), detailRow("Active work", String(activeCount(agent.id))), detailRow("Wasm tools", String(agent.wasm_tools)), detailRow("MCP servers", String(agent.mcp_servers)));
   try {
     const capabilities = await api(`/api/farm/agents/${encodeURIComponent(agent.id)}/capabilities`);
     elements.detailContent.append(node("h3", "", "Authorized capabilities"));

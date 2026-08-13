@@ -1,0 +1,53 @@
+[package]
+name = "core-agent-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Isolated persistent memory for autonomous agents using SQLite, FTS5, and vector search"
+repository.workspace = true
+readme = "README.md"
+keywords = ["agent", "memory", "sqlite", "fts5", "vector-search"]
+categories = ["database", "data-structures"]
+rust-version = "1.85"
+include = ["src/**", "tests/**", "benches/**", "README.md", "LICENSE-MEMORI", "NOTICE"]
+
+[lib]
+name = "core_agent_memory"
+path = "src/lib.rs"
+
+[features]
+default = ["embeddings"]
+embeddings = ["fastembed"]
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled", "vtab"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+fastembed = { version = "5", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+rand = "0.9"
+
+[[bench]]
+name = "search_bench"
+harness = false
+
+[[bench]]
+name = "crud_bench"
+harness = false
+
+[[bench]]
+name = "vector_ops_bench"
+harness = false
+
+[[bench]]
+name = "embed_bench"
+harness = false
+required-features = ["embeddings"]
+
+[[bench]]
+name = "memory_bench"
+harness = false

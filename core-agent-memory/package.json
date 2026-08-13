@@ -1,0 +1,49 @@
+{
+  "name": "@ironclaw/core-agent-memory",
+  "version": "0.1.0",
+  "description": "Private, embedded memory for autonomous agents — Rust, SQLite, FTS5, vectors, and N-API",
+  "license": "MIT",
+  "main": "crates/napi/index.js",
+  "types": "crates/napi/index.d.ts",
+  "files": [
+    "crates/napi/index.js",
+    "crates/napi/index.d.ts",
+    "crates/napi/*.node",
+    "README.md",
+    "LICENSE",
+    "LICENSE-MEMORI",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "napi build --manifest-path crates/napi/Cargo.toml --platform --release",
+    "build:debug": "napi build --manifest-path crates/napi/Cargo.toml --platform",
+    "test": "node test.js",
+    "prepack": "npm run build"
+  },
+  "napi": {
+    "binaryName": "core-agent-memory",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suryavirkapur/ironclaw.git",
+    "directory": "core-agent-memory"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.1"
+  }
+}

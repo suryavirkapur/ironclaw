@@ -11,6 +11,7 @@ members = [
   "crates/ironclaw-cli",
   "crates/farm",
 ]
+exclude = ["core-agent-memory"]
 resolver = "2"
 
 [workspace.package]

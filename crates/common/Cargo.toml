@@ -19,6 +19,7 @@ znskr-firecracker = { git = "https://github.com/suryavirkapur/znskr-firecracker"
 
 [build-dependencies]
 prost-build = "*"
+protoc-bin-vendored = "*"
 
 [dev-dependencies]
 toml = "*"

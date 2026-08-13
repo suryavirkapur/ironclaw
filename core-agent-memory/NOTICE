@@ -1,0 +1,9 @@
+core-agent-memory includes and adapts Memori by Archit Singh.
+
+Upstream: https://github.com/archit15singh/memori
+Imported commit: 01adf3bfae688b042f7350cd896a763d122498ef
+Upstream release: 0.7.0
+
+Memori is distributed under the MIT License. Its original license is preserved
+as LICENSE-MEMORI. The derived core remains MIT-licensed.
+
