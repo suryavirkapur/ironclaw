@@ -186,6 +186,11 @@ ironclaw_run(input_ptr: i32, input_len: i32) -> i64
 MCP (`mcp_call`) and other agents (`delegate_task` / `await_task`) stay
 host-mediated.
 
+Tools are the employee's job. Memory is the specialized knowledge they accumulate
+inside their own VM. Every planner step and tool result is appended as an agentic
+trace under `<users_root>/_farm/traces/<agent_id>/` so those trajectories can later
+fine-tune a narrower model per role. See [docs/agent-farm.md](docs/agent-farm.md).
+
 ## Tests
 
 ```bash

@@ -100,6 +100,7 @@ assign the engineering lead but cannot bypass the lead and directly assign an en
 - live agent roster and per-agent active-task count;
 - direct per-agent conversations with streaming replies and local thread history;
 - image/document upload, preview, and guest-workspace inspection;
+- tools as the job, private memory as specialized knowledge, and agentic traces for later fine-tunes;
 - authorized A2A memory requests with visible provenance;
 - delivery board backed by the durable farm task ledger;
 - capability-aware A2A task creation;

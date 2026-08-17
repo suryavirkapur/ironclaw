@@ -12,6 +12,7 @@ pub mod reconcile;
 pub mod registry;
 pub mod router;
 pub mod task;
+pub mod trace;
 #[cfg(feature = "wasm-runtime")]
 pub mod wasm;
 
@@ -22,5 +23,9 @@ pub use reconcile::{AgentRuntimeState, ReconcileAction, ReconcilePlan, RuntimePh
 pub use registry::{AgentRecord, FarmRegistry};
 pub use router::{CapabilityBackend, CapabilityRouter, Invocation, InvocationResult, RouterError};
 pub use task::{FarmTask, TaskError, TaskLedger, TaskState};
+pub use trace::{
+    infer_channel, PlanRecord, TaskRecord, ToolRecord, TraceError, TraceEvent, TraceStore,
+    TraceToolStep, Trajectory,
+};
 #[cfg(feature = "wasm-runtime")]
 pub use wasm::{WasmExecutor, WasmRuntimeError};

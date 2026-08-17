@@ -56,6 +56,30 @@ packable as both the `core-agent-memory` Rust crate and the `@ironclaw/core-agen
 N-API package. The guest build disables model downloads and uses FTS5; standalone consumers may
 enable the default embeddings feature for local 384-dimensional vector search.
 
+## Employee work model
+
+A farm agent is an employee. Three stores have to stay distinct:
+
+- **Tools** replace the work that role would otherwise do by hand. `bash`, Wasm modules, MCP, and
+  `delegate_task` are the job, not chat helpers.
+- **Memory** is that employee's specialized knowledge about the work they have already done. It
+  stays inside the agent's private MicroVM.
+- **Traces** are the complete tool-use trajectories. They are the training corpus for later
+  specialist models of that role. Record them from the first production turn.
+
+The host appends traces under `<users_root>/_farm/traces/<agent_id>/`:
+
+```text
+events.jsonl          one operational event per line (plan, tool, task_start, task_end)
+trajectories.jsonl    one completed or interrupted turn per line
+```
+
+Each trajectory includes OpenAI-style `messages` (system, user, tool_calls, tool results, answer)
+so a later fine-tune job can copy the file with almost no conversion. Filter `planner == "llm"`
+to drop deterministic shortcuts. Provider tokens in payloads are redacted.
+
+A trace write never fails an agent turn. If the store cannot append, the daemon logs and continues.
+
 ## Control-plane API
 
 Production-facing control-plane routes require a bearer identity. Tokens are supplied through host

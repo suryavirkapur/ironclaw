@@ -472,6 +472,7 @@ struct AppState {
     farm_registry: Arc<FarmRegistry>,
     farm_tasks: TaskLedger,
     farm_artifacts: farm::ArtifactStore,
+    farm_traces: farm::TraceStore,
     control_plane_authorizer: Arc<security::ControlPlaneAuthorizer>,
     ws_tickets: Arc<std::sync::Mutex<HashMap<String, WsTicketRecord>>>,
     mcp_gateway: Arc<mcp::McpGateway>,
@@ -573,6 +574,11 @@ impl AppState {
                 .map_err(|err| {
                     IronclawError::new(format!("farm artifact store init failed: {err}"))
                 })?;
+        let farm_traces =
+            farm::TraceStore::open(config.storage.users_root.join("_farm").join("traces"))
+                .map_err(|err| {
+                    IronclawError::new(format!("farm trace store init failed: {err}"))
+                })?;
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -588,6 +594,7 @@ impl AppState {
             farm_registry,
             farm_tasks,
             farm_artifacts,
+            farm_traces,
             control_plane_authorizer: Arc::new(control_plane_authorizer),
             ws_tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_gateway,
@@ -1610,6 +1617,13 @@ async fn start_vm_pair(
 
 fn spawn_farm_task_dispatch(state: AppState, task: FarmTask) {
     tokio::spawn(async move {
+        record_farm_task_trace(
+            &state,
+            &task,
+            "task_start",
+            "submitted",
+            serde_json::json!({"requester": task.requester}),
+        );
         if let Err(error) = dispatch_farm_task(&state, &task).await {
             tracing::error!(task_id = %task.id, assignee = %task.assignee, "A2A task failed: {error}");
             let current = state.farm_tasks.get(&task.id).ok().flatten();
@@ -1622,6 +1636,19 @@ fn spawn_farm_task_dispatch(state: AppState, task: FarmTask) {
                 );
             }
         }
+        let finished = state
+            .farm_tasks
+            .get(&task.id)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| task.clone());
+        record_farm_task_trace(
+            &state,
+            &finished,
+            "task_end",
+            format!("{:?}", finished.state).to_ascii_lowercase(),
+            finished.output.clone().unwrap_or(serde_json::Value::Null),
+        );
     });
 }
 
@@ -2527,75 +2554,132 @@ fn ws_text_to_guest_payload(text: &str, next_msg_id: u64) -> (message_envelope::
 async fn host_plan_tool_response(
     state: &AppState,
     user_id: &str,
+    session_id: &str,
     raw_request: &str,
     allowed_tools: &[String],
     history: Option<&[ConversationMessage]>,
-    allow_direct_a2a_shortcut: bool,
+    active_task_id: Option<&str>,
 ) -> Result<String, String> {
     let request = decode_host_plan_request(raw_request);
+    let outcome = compute_host_plan(
+        state,
+        user_id,
+        &request,
+        allowed_tools,
+        history,
+        active_task_id,
+    )
+    .await;
+    record_host_plan_trace(
+        state,
+        user_id,
+        session_id,
+        active_task_id,
+        &request,
+        outcome.planner,
+        &outcome.memory,
+        &outcome.result,
+    );
+    outcome.result
+}
+
+struct HostPlanOutcome {
+    planner: &'static str,
+    memory: String,
+    result: Result<String, String>,
+}
+
+async fn compute_host_plan(
+    state: &AppState,
+    user_id: &str,
+    request: &HostPlanRequest,
+    allowed_tools: &[String],
+    history: Option<&[ConversationMessage]>,
+    active_task_id: Option<&str>,
+) -> HostPlanOutcome {
     if request.observations.is_empty() {
-        if allow_direct_a2a_shortcut {
+        if active_task_id.is_none() {
             if let Some(plan) = deterministic_a2a_plan(
                 &state.farm_registry,
                 user_id,
                 &request.user_text,
                 allowed_tools,
             ) {
-                return tool_plan_to_json(&plan);
+                return HostPlanOutcome {
+                    planner: "deterministic_a2a",
+                    memory: String::new(),
+                    result: tool_plan_to_json(&plan),
+                };
             }
         }
         if let Some(plan) = deterministic_guest_tools_plan(&request.user_text, allowed_tools) {
-            return tool_plan_to_json(&plan);
+            return HostPlanOutcome {
+                planner: "deterministic_guest_tools",
+                memory: String::new(),
+                result: tool_plan_to_json(&plan),
+            };
         }
     } else if let Some(plan) = deterministic_await_a2a_plan(&request.observations, allowed_tools) {
-        return tool_plan_to_json(&plan);
+        return HostPlanOutcome {
+            planner: "deterministic_await",
+            memory: String::new(),
+            result: tool_plan_to_json(&plan),
+        };
     }
 
-    let mut memory_block = load_memory_block(
+    let mut memory = match load_memory_block(
         state,
         user_id,
         &request.user_text,
         MEMORY_PROMPT_BUDGET_CHARS,
-    )
-    .map_err(|err| format!("memory retrieval failed: {err}"))?;
+    ) {
+        Ok(block) => block,
+        Err(err) => {
+            return HostPlanOutcome {
+                planner: "llm",
+                memory: String::new(),
+                result: Err(format!("memory retrieval failed: {err}")),
+            };
+        }
+    };
     let organization = agent_organization_context(&state.farm_registry, user_id);
     if !organization.is_empty() {
-        memory_block.push_str("\n\n");
-        memory_block.push_str(&organization);
+        memory.push_str("\n\n");
+        memory.push_str(&organization);
     }
     const HOST_PLANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
     let planning = state.llm_client.plan_tool_or_answer(
         &request.user_text,
         allowed_tools,
-        Some(memory_block.as_str()),
+        Some(memory.as_str()),
         history,
         Some(&request.observations),
     );
-    let plan = match tokio::time::timeout(HOST_PLANNER_TIMEOUT, planning).await {
-        Err(_) => {
-            return Err(format!(
-                "host planner timed out after {} seconds",
-                HOST_PLANNER_TIMEOUT.as_secs()
-            ));
-        }
-        Ok(result) => match result {
-            Ok(plan) => plan,
-            Err(err) => {
-                // GuestTools mode should remain usable even when no LLM key is configured.
-                // Fall back to a deterministic stub answer instead of failing the whole guest loop.
-                let msg = err.to_string();
-                if msg.contains("missing openai_api_key") {
-                    ToolPlan::Answer {
+    let result = match tokio::time::timeout(HOST_PLANNER_TIMEOUT, planning).await {
+        Err(_) => Err(format!(
+            "host planner timed out after {} seconds",
+            HOST_PLANNER_TIMEOUT.as_secs()
+        )),
+        Ok(Ok(plan)) => tool_plan_to_json(&plan),
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            if msg.contains("missing openai_api_key") {
+                return HostPlanOutcome {
+                    planner: "stub",
+                    memory,
+                    result: tool_plan_to_json(&ToolPlan::Answer {
                         text: format!("stub: {}", request.user_text.trim()),
-                    }
-                } else {
-                    return Err(format!("host plan failed: {err}"));
-                }
+                    }),
+                };
             }
-        },
+            Err(format!("host plan failed: {err}"))
+        }
     };
-
-    tool_plan_to_json(&plan)
+    HostPlanOutcome {
+        planner: "llm",
+        memory,
+        result,
+    }
 }
 
 #[derive(Deserialize)]
@@ -2654,10 +2738,11 @@ async fn execute_requested_host_tool(
         host_plan_tool_response(
             state,
             user_id,
+            session_id,
             &request.input,
             host_allowed_tools,
             history,
-            active_task_id.is_none(),
+            active_task_id,
         )
         .await
     } else if request.tool == "mcp_call" {
@@ -2716,7 +2801,20 @@ async fn execute_requested_host_tool(
         )
         .await
     };
-    finalize_requested_host_tool_response(&request.tool, result)
+    let (ok, output) = finalize_requested_host_tool_response(&request.tool, result);
+    if request.tool != "host_plan" {
+        record_host_tool_trace(
+            state,
+            user_id,
+            session_id,
+            active_task_id,
+            &request.tool,
+            &request.input,
+            ok,
+            &output,
+        );
+    }
+    (ok, output)
 }
 
 fn finalize_requested_host_tool_response(
@@ -3000,6 +3098,153 @@ fn decode_host_plan_request(raw: &str) -> HostPlanRequest {
     }
 }
 
+fn ignore_trace_error<T>(result: Result<T, farm::TraceError>) {
+    if let Err(err) = result {
+        tracing::debug!(error = %err, "agentic trace not written");
+    }
+}
+
+fn trace_role(state: &AppState, agent_id: &str) -> Option<String> {
+    state
+        .farm_registry
+        .get(agent_id)
+        .map(|record| record.manifest.role.clone())
+}
+
+fn trace_task_skill(state: &AppState, task_id: Option<&str>) -> Option<String> {
+    task_id.and_then(|id| {
+        state
+            .farm_tasks
+            .get(id)
+            .ok()
+            .flatten()
+            .map(|task| task.skill)
+    })
+}
+
+fn record_host_plan_trace(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    active_task_id: Option<&str>,
+    request: &HostPlanRequest,
+    planner: &str,
+    memory: &str,
+    result: &Result<String, String>,
+) {
+    let (plan_tool, plan_answer, error) = match result {
+        Ok(output) => match serde_json::from_str::<serde_json::Value>(output) {
+            Ok(value) if value.get("action").and_then(|item| item.as_str()) == Some("tool") => (
+                Some((
+                    value
+                        .get("tool")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    value
+                        .get("input")
+                        .map(|item| match item {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_default(),
+                )),
+                None,
+                None,
+            ),
+            Ok(value) if value.get("action").and_then(|item| item.as_str()) == Some("answer") => (
+                None,
+                Some(
+                    value
+                        .get("text")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or(output)
+                        .to_string(),
+                ),
+                None,
+            ),
+            _ => (None, Some(output.clone()), None),
+        },
+        Err(err) => (None, None, Some(err.clone())),
+    };
+    ignore_trace_error(
+        state.farm_traces.record_plan(farm::PlanRecord {
+            agent_id: agent_id.to_string(),
+            role: trace_role(state, agent_id),
+            session_id: session_id.to_string(),
+            task_id: active_task_id.map(str::to_string),
+            skill: trace_task_skill(state, active_task_id),
+            channel: farm::infer_channel(session_id, active_task_id).to_string(),
+            model: state.host_config.llm.model.clone(),
+            user_text: request.user_text.clone(),
+            memory: memory.to_string(),
+            observations: request
+                .observations
+                .iter()
+                .map(|observation| farm::TraceToolStep {
+                    iteration: observation.iteration,
+                    name: observation.tool.clone(),
+                    input: observation.input.clone(),
+                    ok: observation.ok,
+                    output: observation.output.clone(),
+                })
+                .collect(),
+            planner: planner.to_string(),
+            plan_tool,
+            plan_answer,
+            error,
+            recorded_at_ms: now_ms().unwrap_or(0),
+        }),
+    );
+}
+
+fn record_host_tool_trace(
+    state: &AppState,
+    agent_id: &str,
+    session_id: &str,
+    active_task_id: Option<&str>,
+    tool: &str,
+    input: &str,
+    ok: bool,
+    output: &str,
+) {
+    ignore_trace_error(state.farm_traces.record_tool(farm::ToolRecord {
+        agent_id: agent_id.to_string(),
+        role: trace_role(state, agent_id),
+        session_id: session_id.to_string(),
+        task_id: active_task_id.map(str::to_string),
+        skill: trace_task_skill(state, active_task_id),
+        channel: farm::infer_channel(session_id, active_task_id).to_string(),
+        model: Some(state.host_config.llm.model.clone()),
+        tool: tool.to_string(),
+        input: input.to_string(),
+        ok,
+        output: output.to_string(),
+        recorded_at_ms: now_ms().unwrap_or(0),
+    }));
+}
+
+fn record_farm_task_trace(
+    state: &AppState,
+    task: &FarmTask,
+    kind: &str,
+    task_state: impl Into<String>,
+    payload: serde_json::Value,
+) {
+    ignore_trace_error(state.farm_traces.record_task(farm::TaskRecord {
+        agent_id: task.assignee.clone(),
+        role: trace_role(state, &task.assignee),
+        task_id: task.id.clone(),
+        skill: task.skill.clone(),
+        requester: task.requester.clone(),
+        channel: "a2a".to_string(),
+        kind: kind.to_string(),
+        state: task_state.into(),
+        recorded_at_ms: now_ms().unwrap_or(task.updated_at_ms),
+        payload,
+    }));
+}
+
 fn agent_organization_context(registry: &farm::FarmRegistry, agent_id: &str) -> String {
     let Some(agent) = registry.get(agent_id) else {
         return String::new();
@@ -3229,6 +3474,21 @@ async fn run_host_turn(
         )
         .await
         .map_err(|err| IronclawError::new(format!("tool planning failed: {err}")))?;
+    let plan_json = tool_plan_to_json(&plan).map_err(IronclawError::new)?;
+    record_host_plan_trace(
+        state,
+        user_id,
+        user_id,
+        None,
+        &HostPlanRequest {
+            version: 1,
+            user_text: user_text.to_string(),
+            observations: Vec::new(),
+        },
+        "llm",
+        &memory_block,
+        &Ok(plan_json),
+    );
 
     match plan {
         ToolPlan::Answer { text } => {
@@ -3250,13 +3510,14 @@ async fn run_host_turn(
                 Err(output) => (false, output),
             };
             let output = truncate_tool_output(&raw_output);
+            record_host_tool_trace(state, user_id, user_id, None, &tool, &input, ok, &output);
             tracing::info!(
                 "tool execution tool={} ok={} output_len={}",
                 tool,
                 ok,
                 output.len()
             );
-            state
+            let answer = state
                 .llm_client
                 .finalize_with_tool_output(
                     user_text,
@@ -3268,7 +3529,30 @@ async fn run_host_turn(
                     history,
                 )
                 .await
-                .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))
+                .map_err(|err| IronclawError::new(format!("tool finalize failed: {err}")))?;
+            record_host_plan_trace(
+                state,
+                user_id,
+                user_id,
+                None,
+                &HostPlanRequest {
+                    version: 1,
+                    user_text: user_text.to_string(),
+                    observations: vec![ToolLoopObservation {
+                        iteration: 1,
+                        tool: tool.clone(),
+                        input: input.clone(),
+                        ok,
+                        output: output.clone(),
+                    }],
+                },
+                "llm",
+                &memory_block,
+                &tool_plan_to_json(&ToolPlan::Answer {
+                    text: answer.clone(),
+                }),
+            );
+            Ok(answer)
         }
     }
 }
