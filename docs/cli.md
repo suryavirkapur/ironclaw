@@ -15,17 +15,24 @@ Build or refresh the guest image first:
 The image is Ubuntu 24.04 and starts `irowclaw` as uid 0. The agent can use `apt`,
 Python, and normal Linux tooling inside the microVM. Firecracker TAP networking requires
 `CAP_NET_ADMIN`; run the daemon as root or grant that capability through your service
-manager. The filesystem holding `data/users` must support reflinks (Btrfs or suitably
+manager. The filesystem holding guest disks must support reflinks (Btrfs or suitably
 configured XFS); Ironclaw refuses to fall back to a shared writable base or full mutable
-copy. Then, in the first terminal:
+copy.
+
+An installed `ironclawd` with no `--config` writes `~/.config/ironclaw/` on first start
+and reads `ironclawd.toml` from there. Relative paths are resolved against that directory.
+From a source checkout, pass a repo config; its directory is the root for relative kernel,
+rootfs, and data paths.
+
+Then, in the first terminal:
 
 ```bash
 set -a
 source .env
 set +a
-sudo --preserve-env=OPENROUTER_API_KEY \
-  IRONCLAWD_CONFIG=configs/ironclawd.cli.toml \
-  cargo +nightly-2025-12-26 run -p ironclawd --features firecracker
+sudo --preserve-env=OPENAI_API_KEY \
+  cargo run -p ironclawd --features firecracker -- \
+  --config configs/ironclawd.cli.toml
 ```
 
 ## Verify the sandbox

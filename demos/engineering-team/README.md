@@ -33,7 +33,9 @@ Build the VM image if necessary, then run the demo:
 ./scripts/run-engineering-team-demo.sh
 ```
 
-Open <http://127.0.0.1:9938/ui> for the team workspace.
+Open <http://127.0.0.1:9938/ui> for the team workspace. Relative kernel, rootfs, and
+agent paths in `configs/ironclawd.engineering-team.telegram.toml` are resolved from
+`configs/`, so you can invoke `ironclawd --config` from any working directory.
 
 ## Verified workspace screenshots
 

@@ -1,6 +1,6 @@
 use crate::logging::LogLevel;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostConfig {
@@ -251,7 +251,43 @@ impl Default for HostTelegramConfig {
     }
 }
 
+/// Resolve a path from a config file. Absolute paths stay unchanged; relative
+/// paths are joined onto `root` (the directory that contains the config file).
+pub fn resolve_against_root(path: &Path, root: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return root.to_path_buf();
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
 impl HostConfig {
+    /// Make every relative filesystem path in this config live under `root`.
+    pub fn resolve_relative_paths(&mut self, root: &Path) {
+        self.firecracker.kernel_path = resolve_against_root(&self.firecracker.kernel_path, root);
+        self.firecracker.rootfs_path = resolve_against_root(&self.firecracker.rootfs_path, root);
+        self.firecracker.api_socket_dir =
+            resolve_against_root(&self.firecracker.api_socket_dir, root);
+        if let Some(path) = &self.firecracker.vsock_uds_dir {
+            self.firecracker.vsock_uds_dir = Some(resolve_against_root(path, root));
+        }
+        self.storage.users_root = resolve_against_root(&self.storage.users_root, root);
+        if let Some(path) = &self.daemon.pid_file {
+            self.daemon.pid_file = Some(resolve_against_root(path, root));
+        }
+        if let Some(path) = &self.daemon.log_file {
+            self.daemon.log_file = Some(resolve_against_root(path, root));
+        }
+        self.farm.manifests_dir = resolve_against_root(&self.farm.manifests_dir, root);
+        let session_dir = PathBuf::from(&self.whatsapp.session_dir);
+        self.whatsapp.session_dir = resolve_against_root(&session_dir, root)
+            .to_string_lossy()
+            .into_owned();
+    }
+
     pub fn default_for_local(users_root: PathBuf) -> Self {
         Self {
             server: HostServerConfig {
@@ -681,5 +717,58 @@ mod tests {
         assert_eq!(config.farm.entry_agent.as_deref(), Some("product-manager"));
         assert!(config.telegram.enabled);
         assert_eq!(config.execution_mode, HostExecutionMode::GuestTools);
+    }
+
+    #[test]
+    fn farm_loopback_config_is_valid() {
+        let config: HostConfig =
+            toml::from_str(include_str!("../../../configs/ironclawd.farm.toml"))
+                .expect("farm config");
+        assert!(config.farm.enabled);
+        assert_eq!(config.farm.entry_agent.as_deref(), Some("product-manager"));
+        assert!(!config.telegram.enabled);
+        assert!(!config.security.control_plane.enabled);
+        assert_eq!(config.server.bind, "127.0.0.1");
+        assert_eq!(config.execution_mode, HostExecutionMode::GuestTools);
+    }
+
+    #[test]
+    fn relative_paths_resolve_against_the_config_directory() {
+        let mut config: HostConfig =
+            toml::from_str(include_str!("../../../configs/ironclawd.farm.toml"))
+                .expect("farm config");
+        config.resolve_relative_paths(Path::new("/opt/ironclaw"));
+        assert_eq!(
+            config.storage.users_root,
+            PathBuf::from("/opt/ironclaw/../data/farm/users")
+        );
+        assert_eq!(
+            config.farm.manifests_dir,
+            PathBuf::from("/opt/ironclaw/../demos/engineering-team/agents")
+        );
+        assert_eq!(
+            config.firecracker.kernel_path,
+            PathBuf::from("/opt/ironclaw/../kernels/firecracker/vmlinux-6.1.155.bin")
+        );
+        assert_eq!(
+            config.firecracker.api_socket_dir,
+            PathBuf::from("/tmp/ironclaw-farm/fc")
+        );
+        assert_eq!(
+            config.daemon.pid_file.as_deref(),
+            Some(Path::new("/tmp/ironclaw-farm/ironclawd.pid"))
+        );
+    }
+
+    #[test]
+    fn absolute_paths_are_left_alone() {
+        assert_eq!(
+            resolve_against_root(Path::new("/tmp/kernel"), Path::new("/home/me/ironclaw")),
+            PathBuf::from("/tmp/kernel")
+        );
+        assert_eq!(
+            resolve_against_root(Path::new("users"), Path::new("/home/me/ironclaw")),
+            PathBuf::from("/home/me/ironclaw/users")
+        );
     }
 }

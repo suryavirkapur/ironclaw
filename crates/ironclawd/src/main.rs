@@ -3,6 +3,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 mod api;
 mod auth_transport;
 mod daemon;
+mod host_home;
 mod host_tools;
 mod llm_client;
 mod mcp;
@@ -72,8 +73,38 @@ const IDLE_CHECK_SECONDS: u64 = 10;
 #[tokio::main]
 async fn main() -> Result<(), IronclawError> {
     let cli = daemon::CliArgs::parse()?;
-    let config_path = host_config_path()?;
-    let config = load_host_config_from_path(&config_path)?;
+    if cli.help {
+        daemon::print_usage();
+        return Ok(());
+    }
+
+    let config_path = host_home::resolve_config_path(cli.config.as_deref())?;
+    if cli.stop {
+        let config = if config_path.exists() {
+            Some(host_home::load_host_config_from_path(&config_path)?)
+        } else {
+            None
+        };
+        let pid_file = if let Some(path) = &cli.pid_file {
+            path.clone()
+        } else if let Some(config) = config.as_ref() {
+            resolve_pid_file(&cli, config)?
+        } else {
+            daemon::default_runtime_dir()?.join("ironclawd.pid")
+        };
+        daemon::stop_daemon(&pid_file)?;
+        return Ok(());
+    }
+
+    let prep = host_home::prepare_host_home(&config_path)?;
+    if !test_no_bind_enabled() {
+        host_home::print_prep(&prep);
+    }
+    let config = host_home::load_host_config_from_path(&prep.config_path)?;
+
+    if cli.init {
+        return Ok(());
+    }
 
     if let Some(command) = cli.gateway_command.clone() {
         return run_gateway_cli(&config, command);
@@ -81,13 +112,8 @@ async fn main() -> Result<(), IronclawError> {
 
     let pid_file = resolve_pid_file(&cli, &config)?;
 
-    if cli.stop {
-        daemon::stop_daemon(&pid_file)?;
-        return Ok(());
-    }
-
     if cli.should_spawn_daemon() {
-        daemon::spawn_daemon_child(&cli)?;
+        daemon::spawn_daemon_child(&cli, &prep.config_path)?;
         return Ok(());
     }
 
@@ -106,7 +132,7 @@ async fn main() -> Result<(), IronclawError> {
     })
     .map_err(|err| IronclawError::new(format!("logging init failed: {err}")))?;
 
-    run_server(config, config_path, logging).await
+    run_server(config, prep.config_path, logging).await
 }
 
 async fn run_server(
@@ -341,7 +367,7 @@ fn spawn_reload_signal_task(config_path: PathBuf, logging: LoggingHandle) {
         loop {
             tokio::select! {
                 _ = hup.recv() => {
-                    match load_host_config_from_path(&config_path) {
+                    match host_home::load_host_config_from_path(&config_path) {
                         Ok(reloaded) => {
                             if let Err(err) = logging.set_level(reloaded.log_level) {
                                 tracing::error!("sighup logging reload failed: {err}");
@@ -2248,26 +2274,6 @@ fn ui_file_response(path: &str) -> Response {
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
-}
-
-fn load_host_config_from_path(path: &StdPath) -> Result<HostConfig, IronclawError> {
-    if path.exists() {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|err| IronclawError::new(format!("config read failed: {err}")))?;
-        toml::from_str(&contents)
-            .map_err(|err| IronclawError::new(format!("config parse failed: {err}")))
-    } else {
-        let users_root = PathBuf::from("data/users");
-        Ok(HostConfig::default_for_local(users_root))
-    }
-}
-
-fn host_config_path() -> Result<PathBuf, IronclawError> {
-    if let Ok(path) = std::env::var("IRONCLAWD_CONFIG") {
-        return Ok(PathBuf::from(path));
-    }
-    let home = dirs::home_dir().ok_or_else(|| IronclawError::new("home dir missing"))?;
-    Ok(home.join(".config/ironclaw/ironclawd.toml"))
 }
 
 fn guest_config_path() -> PathBuf {

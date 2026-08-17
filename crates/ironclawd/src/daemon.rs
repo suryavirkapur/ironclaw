@@ -8,7 +8,10 @@ pub struct CliArgs {
     pub stop: bool,
     pub telegram: bool,
     pub whatsapp: bool,
+    pub help: bool,
+    pub init: bool,
     pub pid_file: Option<PathBuf>,
+    pub config: Option<PathBuf>,
     pub gateway_command: Option<GatewayCommand>,
 }
 
@@ -25,16 +28,28 @@ pub enum GatewayCommand {
 
 impl CliArgs {
     pub fn parse() -> Result<Self, IronclawError> {
-        let mut args = std::env::args().skip(1);
+        Self::from_args(std::env::args().skip(1))
+    }
+
+    pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self, IronclawError> {
+        let mut args = args.into_iter();
         let mut cli = Self::default();
 
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "-h" | "--help" => cli.help = true,
+                "init" => cli.init = true,
                 "--daemon" => cli.daemon = true,
                 "--daemon-child" => cli.daemon_child = true,
                 "--stop" => cli.stop = true,
                 "--telegram" => cli.telegram = true,
                 "--whatsapp" => cli.whatsapp = true,
+                "--config" | "-c" => {
+                    let Some(path) = args.next() else {
+                        return Err(IronclawError::new("missing value for --config"));
+                    };
+                    cli.config = Some(PathBuf::from(path));
+                }
                 "gateway" => {
                     cli.gateway_command = Some(parse_gateway_subcommand(&mut args)?);
                 }
@@ -54,8 +69,41 @@ impl CliArgs {
     }
 
     pub fn should_spawn_daemon(&self) -> bool {
-        self.daemon && !self.daemon_child && self.gateway_command.is_none()
+        self.daemon && !self.daemon_child && self.gateway_command.is_none() && !self.init
     }
+}
+
+pub fn print_usage() {
+    println!(
+        "\
+ironclawd — self-hosted Firecracker agent daemon
+
+Usage:
+  ironclawd [OPTIONS]
+  ironclawd init [--config FILE]
+  ironclawd --stop [--config FILE] [--pid-file FILE]
+
+With no --config, the first start writes ~/.config/ironclaw/ironclawd.toml and
+the folders next to it, then reads that file. Relative paths in the file are
+resolved against its directory.
+
+Pass --config FILE to use a different home: FILE is created if missing, and
+every relative path in it is resolved against FILE's parent directory.
+
+Options:
+  -c, --config FILE   Host config path (default: ~/.config/ironclaw/ironclawd.toml)
+                      Also accepted as IRONCLAWD_CONFIG
+      --daemon        Spawn in the background
+      --stop          Stop a background daemon
+      --pid-file FILE Override the pid file path
+      --telegram      Enable the Telegram channel
+      --whatsapp      Enable the WhatsApp channel
+  -h, --help          Show this help
+
+Install:
+  cargo install --path crates/ironclawd --features firecracker
+  cargo install --path crates/ironclaw-cli"
+    );
 }
 
 fn parse_gateway_subcommand(
@@ -125,12 +173,14 @@ pub fn default_runtime_dir() -> Result<PathBuf, IronclawError> {
     Ok(local)
 }
 
-pub fn spawn_daemon_child(cli: &CliArgs) -> Result<(), IronclawError> {
+pub fn spawn_daemon_child(cli: &CliArgs, config_path: &Path) -> Result<(), IronclawError> {
     let exe = std::env::current_exe()
         .map_err(|err| IronclawError::new(format!("resolve current exe failed: {err}")))?;
     let mut command = std::process::Command::new(exe);
     command
         .arg("--daemon-child")
+        .arg("--config")
+        .arg(config_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -231,5 +281,24 @@ mod tests {
         assert!(!cli.whatsapp);
         assert!(cli.pid_file.is_none());
         assert!(cli.gateway_command.is_none());
+        assert!(cli.config.is_none());
+        assert!(!cli.init);
+        assert!(!cli.help);
+    }
+
+    #[test]
+    fn parses_config_and_init() {
+        let cli = CliArgs::from_args([
+            "--config".to_string(),
+            "/tmp/team/ironclawd.toml".to_string(),
+            "init".to_string(),
+        ])
+        .expect("parse");
+        assert_eq!(
+            cli.config.as_deref(),
+            Some(Path::new("/tmp/team/ironclawd.toml"))
+        );
+        assert!(cli.init);
+        assert!(!cli.should_spawn_daemon());
     }
 }

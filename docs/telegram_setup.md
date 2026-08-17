@@ -62,7 +62,8 @@ source .env
 set +a
 IRONCLAWD_CONFIG=configs/ironclawd.telegram.toml \
   sudo --preserve-env=OPENAI_API_KEY,BRAVE_API_KEY,TELEGRAM_BOT_TOKEN,OWNER_TELEGRAM_CHAT_ID \
-  cargo +nightly-2025-12-26 run -p ironclawd --features firecracker
+  cargo run -p ironclawd --features firecracker -- \
+  --config configs/ironclawd.telegram.toml
 ```
 
 Wait for `telegram loop started` in the logs, then send the bot a message. On its first

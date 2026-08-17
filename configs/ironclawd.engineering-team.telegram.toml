@@ -12,7 +12,7 @@ mount = "/ui"
 index_file = "index.html"
 
 [storage]
-users_root = "data/engineering-team/users"
+users_root = "../data/engineering-team/users"
 
 [llm]
 model = "minimax/minimax-m2.5"
@@ -24,8 +24,8 @@ enabled = true
 # The team communicates with the host over vsock and uses TAP for controlled guest internet access.
 # Run the host daemon with CAP_NET_ADMIN/root so it can provision TAP and firewall rules.
 enable_network = true
-kernel_path = "kernels/firecracker/vmlinux-6.1.155.bin"
-rootfs_path = "rootfs/build/ubuntu-24.04.ext4"
+kernel_path = "../kernels/firecracker/vmlinux-6.1.155.bin"
+rootfs_path = "../rootfs/build/ubuntu-24.04.ext4"
 api_socket_dir = "/tmp/ironclaw-engineering-team/fc"
 vsock_uds_dir = "/tmp/ironclaw-engineering-team/vsock"
 vsock_port = 5000
@@ -35,7 +35,7 @@ disk_quota_mb = 512
 
 [farm]
 enabled = true
-manifests_dir = "demos/engineering-team/agents"
+manifests_dir = "../demos/engineering-team/agents"
 public_base_url = "http://127.0.0.1:9938"
 entry_agent = "product-manager"
 
@@ -69,6 +69,6 @@ log_rotate_max_bytes = 10485760
 
 [whatsapp]
 enabled = false
-session_dir = "data/engineering-team/whatsapp"
+session_dir = "../data/engineering-team/whatsapp"
 auth_method = "md5"
 qr_timeout_ms = 120000

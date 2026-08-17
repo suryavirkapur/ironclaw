@@ -17,7 +17,7 @@ router has checked the subject, task, capability visibility, delegation depth, a
 
 ## Enable the farm
 
-Add this to `ironclawd.toml`:
+Add this to `ironclawd.toml` (paths are relative to the config file):
 
 ```toml
 [farm]

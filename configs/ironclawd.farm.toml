@@ -1,4 +1,5 @@
-# Firecracker-only configuration for local CLI development.
+# Loopback farm: one daemon, several agents, no Telegram or bearer token.
+# Each agent is a TOML file in manifests_dir. The workspace at /ui lists them all.
 execution_mode = "guest_tools"
 idle_timeout_minutes = 15
 log_level = "info"
@@ -12,7 +13,7 @@ mount = "/ui"
 index_file = "index.html"
 
 [storage]
-users_root = "../data/users"
+users_root = "../data/farm/users"
 
 [llm]
 model = "minimax/minimax-m2.5"
@@ -23,12 +24,18 @@ api = "chat_completions"
 enabled = true
 kernel_path = "../kernels/firecracker/vmlinux-6.1.155.bin"
 rootfs_path = "../rootfs/build/ubuntu-24.04.ext4"
-api_socket_dir = "/tmp/ironclaw-fc"
-vsock_uds_dir = "/tmp/ironclaw/vsock"
+api_socket_dir = "/tmp/ironclaw-farm/fc"
+vsock_uds_dir = "/tmp/ironclaw-farm/vsock"
 vsock_port = 5000
 vcpus = 2
 memory_mib = 2048
 disk_quota_mb = 512
+
+[farm]
+enabled = true
+manifests_dir = "../demos/engineering-team/agents"
+public_base_url = "http://127.0.0.1:9938"
+entry_agent = "product-manager"
 
 [security]
 allowed_channels = ["websocket"]
@@ -37,8 +44,8 @@ allowed_channels = ["websocket"]
 allowed_domains = []
 
 [daemon]
-pid_file = "/tmp/ironclaw/ironclawd.pid"
-log_file = "/tmp/ironclaw/ironclawd.log"
+pid_file = "/tmp/ironclaw-farm/ironclawd.pid"
+log_file = "/tmp/ironclaw-farm/ironclawd.log"
 graceful_timeout_ms = 5000
 log_rotate_keep = 5
 log_rotate_max_bytes = 10485760
@@ -48,6 +55,6 @@ enabled = false
 
 [whatsapp]
 enabled = false
-session_dir = "../data/whatsapp"
+session_dir = "../data/farm/whatsapp"
 auth_method = "md5"
 qr_timeout_ms = 120000

@@ -31,4 +31,4 @@ if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
 fi
 
 export IRONCLAWD_CONFIG="configs/ironclawd.engineering-team.telegram.toml"
-exec cargo run -p ironclawd --features firecracker
+exec cargo run -p ironclawd --features firecracker -- --config "$IRONCLAWD_CONFIG"
