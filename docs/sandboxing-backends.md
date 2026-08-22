@@ -150,14 +150,50 @@ agent as a host process confined by a macOS Seatbelt profile:
 
 ---
 
+## Host-process backend (implemented, portable)
+
+`common::process_sandbox::HostProcessManager` is an implemented, cross-platform
+backend selected with `backend = "host-process"`. It runs **one supervised OS
+process per agent** with a private, writable brain directory, and implements the
+full `VmManager` lifecycle:
+
+- `start_vm` spawns the guest process (default: a supervised keeper that writes a
+  heartbeat into the agent's brain dir; override with `[sandbox] guest_command`,
+  where `{agent}`/`{brain}` are substituted).
+- `stop_vm` / `stop_all` kill the process(es); `is_vm_running` reflects real
+  process liveness.
+- On **macOS** it wraps the guest with `sandbox-exec -f <profile>` (Seatbelt)
+  when `[sandbox] macos_profile` is set — this is the working macOS sandbox today
+  while the heavier `apple-vz` microVM backend lands.
+
+This is weaker than a microVM (shared kernel, same OS user) but is a real,
+per-agent, resource-tracked boundary and the concrete proof that new backends
+drop into the same seam, API, and workspace UI (the Boot/Stop buttons spawn and
+kill these processes).
+
+## Configuration
+
+```toml
+[sandbox]
+backend = "auto"          # auto | firecracker | host-stub | host-process | wsl2 | apple-vz
+# guest_command = "/usr/local/bin/irowclaw --agent {agent} --brain {brain}"
+# macos_profile = "configs/ironclaw.sb"   # sandbox-exec profile (macOS)
+```
+
+`auto` resolves to `firecracker` on Linux+KVM (with the feature), else
+`host-stub`. `wsl2` requires building `common` with `--features wsl2`. The active
+backend is reported in `GET /api/farm/vms` and shown as a chip in the workspace
+team view.
+
 ## Summary
 
-| Backend      | Boundary                     | Transport          | Availability |
-| ------------ | ---------------------------- | ------------------ | ------------ |
-| firecracker  | microVM per boot (KVM)       | virtio-vsock       | Linux + KVM  |
-| apple-vz     | Linux VM per agent (VZ)      | virtio-vsock       | macOS        |
-| wsl2         | WSL2 distro per agent        | HvSocket / stdio   | Windows      |
-| host-stub    | none (in-process)            | in-memory pipe     | any (dev)    |
+| Backend      | Boundary                     | Transport          | Availability | Status        |
+| ------------ | ---------------------------- | ------------------ | ------------ | ------------- |
+| firecracker  | microVM per boot (KVM)       | virtio-vsock       | Linux + KVM  | implemented   |
+| host-process | supervised process per agent | in-memory (lifecycle) | any (sandbox-exec on macOS) | implemented |
+| wsl2         | WSL2 distro per agent        | HvSocket / stdio   | Windows      | implemented (feature `wsl2`); transport = integration point |
+| apple-vz     | Linux VM per agent (VZ)      | virtio-vsock       | macOS        | designed      |
+| host-stub    | none (in-process)            | in-memory pipe     | any (dev)    | implemented   |
 
 All backends run the **same guest agent and wire protocol** and implement the
 **same `VmManager` trait**, so `/api/farm/*` and the workspace UI (including the
