@@ -26,6 +26,8 @@ toml = "*"
 
 [features]
 firecracker = ["znskr-firecracker"]
+# WSL2 sandbox backend (Windows). Portable std-only orchestration of wsl.exe.
+wsl2 = []
 
 [[example]]
 name = "firecracker_vsock_roundtrip"

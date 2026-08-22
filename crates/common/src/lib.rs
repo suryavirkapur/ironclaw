@@ -6,7 +6,10 @@ pub mod disk_quota;
 pub mod firecracker;
 pub mod logging;
 pub mod network_firewall;
+pub mod process_sandbox;
 pub mod proto;
 pub mod slack;
 pub mod stream_transport;
 pub mod transport;
+#[cfg(feature = "wsl2")]
+pub mod wsl2;

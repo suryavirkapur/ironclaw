@@ -27,6 +27,51 @@ pub struct HostConfig {
     pub security: HostSecurityConfig,
     #[serde(default)]
     pub farm: HostFarmConfig,
+    #[serde(default)]
+    pub sandbox: HostSandboxConfig,
+}
+
+/// Which sandbox backend isolates agent execution.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxBackend {
+    /// Pick automatically: firecracker on Linux+KVM, else the host stub.
+    #[default]
+    Auto,
+    /// Firecracker microVM per agent (Linux + KVM). Requires the `firecracker` feature.
+    Firecracker,
+    /// No isolation; in-process stub (local development).
+    HostStub,
+    /// Portable process-isolation sandbox: one supervised process per agent
+    /// (uses `sandbox-exec` on macOS).
+    HostProcess,
+    /// WSL2 distro per agent (Windows). Requires the `wsl2` feature.
+    Wsl2,
+    /// Apple Virtualization.framework VM per agent (macOS).
+    AppleVz,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostSandboxConfig {
+    #[serde(default)]
+    pub backend: SandboxBackend,
+    /// Optional guest command template for the host-process backend
+    /// (`{agent}` and `{brain}` are substituted).
+    #[serde(default)]
+    pub guest_command: Option<String>,
+    /// Optional macOS `sandbox-exec` (Seatbelt) profile for the host-process backend.
+    #[serde(default)]
+    pub macos_profile: Option<PathBuf>,
+}
+
+impl Default for HostSandboxConfig {
+    fn default() -> Self {
+        Self {
+            backend: SandboxBackend::Auto,
+            guest_command: None,
+            macos_profile: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -325,6 +370,7 @@ impl HostConfig {
             gateway: HostGatewayConfig::default(),
             security: HostSecurityConfig::default(),
             farm: HostFarmConfig::default(),
+            sandbox: HostSandboxConfig::default(),
         }
     }
 }
