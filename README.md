@@ -144,6 +144,28 @@ Walkthrough: [demos/engineering-team/README.md](demos/engineering-team/README.md
 Control plane: [docs/agent-farm.md](docs/agent-farm.md). Telegram:
 [docs/telegram_setup.md](docs/telegram_setup.md). CLI flags: [docs/cli.md](docs/cli.md).
 
+## Native workspace (GPUI)
+
+`crates/ironclaw-gpui` is a native desktop client for the farm, built with
+[GPUI](https://github.com/zed-industries/zed) — the GPU-accelerated Rust UI
+framework behind the Zed editor. It mirrors the web workspace (the rail,
+sidebar, delivery/team/architecture/conversation views, live metrics, task
+inspector, and the New Task dialog) and talks to the same `/api/farm/*`
+control-plane REST API on `ironclawd`.
+
+Start a daemon with the farm enabled (any execution mode), then run the client:
+
+```bash
+IRONCLAW_BASE_URL=http://127.0.0.1:9938 \
+  cargo run --manifest-path crates/ironclaw-gpui/Cargo.toml
+```
+
+The crate pins Rust 1.95 (its own `rust-toolchain.toml`) and is excluded from
+the main workspace so its GPUI dependency tree stays isolated. On Linux it needs
+the usual GPUI system libraries (`libxkbcommon`, `libwayland`, `fontconfig`,
+`freetype`, `dbus`, and X11/xcb dev packages) plus a Vulkan driver; on headless
+hosts Mesa's software renderer (`mesa-vulkan-drivers`, lavapipe) is enough.
+
 ## Tools
 
 Two layers.

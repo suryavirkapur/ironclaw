@@ -1,0 +1,18 @@
+[package]
+name = "ironclaw-gpui"
+version = "0.10.0"
+edition = "2021"
+license = "unlicense"
+description = "Native GPUI desktop client for the Ironclaw agent-farm workspace."
+
+[[bin]]
+name = "ironclaw-workspace"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe", features = ["font-kit", "x11", "wayland"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json", "tls"] }
+anyhow = "1"
