@@ -479,16 +479,7 @@ pub struct VmState {
 
 /// Name of the active sandbox backend, for display in clients.
 fn sandbox_backend_name(state: &AppState) -> String {
-    if state.host_config.firecracker.enabled {
-        if cfg!(feature = "firecracker") {
-            "firecracker".to_string()
-        } else {
-            // configured for firecracker, but this binary lacks the feature
-            "firecracker (unavailable)".to_string()
-        }
-    } else {
-        "host-stub".to_string()
-    }
+    state.sandbox_backend.clone()
 }
 
 fn agent_exists(state: &AppState, agent_id: &str) -> bool {

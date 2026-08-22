@@ -19,7 +19,7 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use base64::Engine as _;
-use common::config::{GuestConfig, HostConfig, HostExecutionMode};
+use common::config::{GuestConfig, HostConfig, HostExecutionMode, SandboxBackend};
 #[cfg(feature = "firecracker")]
 use common::firecracker::{FirecrackerManager, FirecrackerManagerConfig};
 use common::firecracker::{StubVmManager, VmConfig, VmInstance, VmManager};
@@ -461,6 +461,7 @@ struct AppState {
     host_config: Arc<HostConfig>,
     llm_client: Arc<LlmClient>,
     vm_manager: Arc<dyn VmManager>,
+    sandbox_backend: String,
     guest_config_path: Arc<PathBuf>,
     local_guest: bool,
     stub_vm_manager: Option<Arc<StubVmManager>>,
@@ -549,6 +550,60 @@ impl AppState {
             let vm_manager: Arc<dyn VmManager> = stub_vm_manager.clone();
             (vm_manager, Some(stub_vm_manager))
         };
+
+        // Optional explicit sandbox backend selection. Auto / Firecracker /
+        // HostStub keep the manager chosen above; HostProcess and (feature-gated)
+        // Wsl2 install a real alternative backend. AppleVz is documented but not
+        // yet built here, so it warns and keeps the default.
+        let (vm_manager, stub_vm_manager, sandbox_backend) = match config.sandbox.backend {
+            SandboxBackend::HostProcess => {
+                tracing::info!("sandbox backend: host-process");
+                let manager = Arc::new(common::process_sandbox::HostProcessManager::new(
+                    config.sandbox.guest_command.clone(),
+                    config.sandbox.macos_profile.clone(),
+                ));
+                (
+                    manager as Arc<dyn VmManager>,
+                    None,
+                    "host-process".to_string(),
+                )
+            }
+            SandboxBackend::Wsl2 => {
+                #[cfg(feature = "wsl2")]
+                {
+                    tracing::info!("sandbox backend: wsl2");
+                    let base_tar = config.firecracker.rootfs_path.clone();
+                    let state_root = config.storage.users_root.join("_wsl2");
+                    let manager =
+                        Arc::new(common::wsl2::Wsl2Manager::new(base_tar, state_root));
+                    (manager as Arc<dyn VmManager>, None, "wsl2".to_string())
+                }
+                #[cfg(not(feature = "wsl2"))]
+                {
+                    tracing::warn!(
+                        "sandbox backend 'wsl2' requested but this binary lacks the wsl2 feature; \
+                         falling back to the default manager"
+                    );
+                    (vm_manager, stub_vm_manager, "host-stub (wsl2 unavailable)".to_string())
+                }
+            }
+            SandboxBackend::AppleVz => {
+                tracing::warn!(
+                    "sandbox backend 'apple-vz' is not built into this binary; select \
+                     'host-process' for a macOS process sandbox. Using the default manager."
+                );
+                (vm_manager, stub_vm_manager, "apple-vz (unavailable)".to_string())
+            }
+            SandboxBackend::HostStub => (vm_manager, stub_vm_manager, "host-stub".to_string()),
+            SandboxBackend::Firecracker | SandboxBackend::Auto => {
+                let name = if firecracker_runtime_enabled {
+                    "firecracker".to_string()
+                } else {
+                    "host-stub".to_string()
+                };
+                (vm_manager, stub_vm_manager, name)
+            }
+        };
         let execution_mode = RuntimeExecutionMode::from_config(&config);
         let soul_guard_db = soul_guard_db_path(&config.storage.users_root);
         let security_db = security_db_path(&config.storage.users_root);
@@ -577,6 +632,7 @@ impl AppState {
             host_config: Arc::new(config),
             llm_client,
             vm_manager,
+            sandbox_backend,
             guest_config_path,
             local_guest,
             stub_vm_manager,
