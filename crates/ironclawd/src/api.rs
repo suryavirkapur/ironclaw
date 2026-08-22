@@ -12,6 +12,7 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_scalar::{Scalar, Servable};
 
 use crate::AppState;
+use common::firecracker::{VmConfig, VmManager};
 
 /// openapi doc aggregator
 #[derive(OpenApi)]
@@ -116,6 +117,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/farm/agents/{agent_id}/capabilities",
             get(farm_agent_capabilities),
         )
+        // agent sandbox lifecycle (boot / stop / status)
+        .route("/api/farm/vms", get(farm_vms_list))
+        .route("/api/farm/agents/{agent_id}/boot", post(farm_agent_boot))
+        .route("/api/farm/agents/{agent_id}/stop", post(farm_agent_stop))
         .route(
             "/api/farm/tasks",
             get(farm_tasks_list).post(farm_task_create),
@@ -462,6 +467,129 @@ async fn farm_agent_capabilities(
         .capabilities_for(&agent_id)
         .map(Json)
         .map_err(|err| (StatusCode::NOT_FOUND, Json(ApiError::new(err.to_string()))))
+}
+
+/// Runtime state of an agent's sandbox (microVM / isolated guest).
+#[derive(Serialize)]
+pub struct VmState {
+    pub agent_id: String,
+    pub running: bool,
+    pub backend: String,
+}
+
+/// Name of the active sandbox backend, for display in clients.
+fn sandbox_backend_name(state: &AppState) -> String {
+    if state.host_config.firecracker.enabled {
+        if cfg!(feature = "firecracker") {
+            "firecracker".to_string()
+        } else {
+            // configured for firecracker, but this binary lacks the feature
+            "firecracker (unavailable)".to_string()
+        }
+    } else {
+        "host-stub".to_string()
+    }
+}
+
+fn agent_exists(state: &AppState, agent_id: &str) -> bool {
+    state
+        .farm_registry
+        .agents()
+        .any(|record| record.manifest.id == agent_id)
+}
+
+/// List every agent the caller may see, with whether its sandbox is running.
+async fn farm_vms_list(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+) -> Json<Vec<VmState>> {
+    let backend = sandbox_backend_name(&state);
+    let ids: Vec<String> = state
+        .farm_registry
+        .agents()
+        .filter(|record| principal.allows_agent(&record.manifest.id))
+        .map(|record| record.manifest.id.clone())
+        .collect();
+    let mut states = Vec::with_capacity(ids.len());
+    for agent_id in ids {
+        let running = state
+            .vm_manager
+            .is_vm_running(&agent_id)
+            .await
+            .unwrap_or(false);
+        states.push(VmState {
+            agent_id,
+            running,
+            backend: backend.clone(),
+        });
+    }
+    Json(states)
+}
+
+/// Boot (spawn) an agent's sandbox so it is ready to run work.
+async fn farm_agent_boot(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<VmState>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &agent_id)?;
+    if !agent_exists(&state, &agent_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("unknown agent: {agent_id}"))),
+        ));
+    }
+    let already = state
+        .vm_manager
+        .is_vm_running(&agent_id)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError::new(err.to_string()))))?;
+    if !already {
+        let brain_path = crate::brain_ext4_path(&state.host_config.storage.users_root, &agent_id)
+            .map_err(|err| (StatusCode::BAD_REQUEST, Json(ApiError::new(err.to_string()))))?;
+        let config = VmConfig {
+            user_id: agent_id.clone(),
+            brain_path,
+            allowed_domains: state.host_config.security.network.allowed_domains.clone(),
+        };
+        state
+            .vm_manager
+            .start_vm(config)
+            .await
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError::new(err.to_string()))))?;
+        tracing::info!(agent_id = %agent_id, "farm agent sandbox booted");
+    }
+    Ok(Json(VmState {
+        agent_id,
+        running: true,
+        backend: sandbox_backend_name(&state),
+    }))
+}
+
+/// Stop (tear down) an agent's sandbox.
+async fn farm_agent_stop(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<VmState>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &agent_id)?;
+    if !agent_exists(&state, &agent_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("unknown agent: {agent_id}"))),
+        ));
+    }
+    state
+        .vm_manager
+        .stop_vm(&agent_id)
+        .await
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError::new(err.to_string()))))?;
+    tracing::info!(agent_id = %agent_id, "farm agent sandbox stopped");
+    Ok(Json(VmState {
+        agent_id,
+        running: false,
+        backend: sandbox_backend_name(&state),
+    }))
 }
 
 async fn farm_agent_card(
