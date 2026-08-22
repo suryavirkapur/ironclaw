@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    div, point, prelude::*, px, rgb, rgba, size, App, Bounds, Context, FocusHandle, FontWeight,
-    KeyDownEvent, Rgba, Task, Window, WindowBounds, WindowOptions,
+    div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba, size, App,
+    Background, Bounds, BoxShadow, Context, FocusHandle, FontWeight, KeyDownEvent, Rgba, Task,
+    Window, WindowBounds, WindowOptions,
 };
 use gpui_platform::application;
 
@@ -22,9 +23,7 @@ use models::{AgentSummary, Capability, FarmTask, TaskState};
 // ---------------------------------------------------------------------------
 // Palette (matches ui/app.css)
 // ---------------------------------------------------------------------------
-const BG: u32 = 0x111318;
 const RAIL: u32 = 0x090b0f;
-const SIDEBAR: u32 = 0x181b22;
 const PANEL: u32 = 0x1e222b;
 const PANEL2: u32 = 0x242934;
 const TEXT: u32 = 0xf4f6fb;
@@ -34,6 +33,41 @@ const ACCENT: u32 = 0x8b7cf6;
 const ACCENT2: u32 = 0x55d6be;
 const DANGER: u32 = 0xf26b76;
 const WARNING: u32 = 0xe9b44c;
+
+// -- visual helpers ---------------------------------------------------------
+
+/// A diagonal two-stop gradient background.
+fn grad(from: u32, to: u32, angle: f32) -> Background {
+    linear_gradient(
+        angle,
+        linear_color_stop(rgb(from), 0.),
+        linear_color_stop(rgb(to), 1.),
+    )
+}
+
+/// The avatar gradient used across the workspace.
+fn avatar_grad() -> Background {
+    grad(0x6b5cf0, 0x2fb8a8, 145.)
+}
+
+/// Soft elevation shadow for cards.
+fn shadow_soft() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(6.), rgba(0x00000055).into())
+        .blur_radius(px(18.))
+        .spread_radius(px(-6.))]
+}
+
+/// Pronounced elevation shadow for floating surfaces (dialog).
+fn shadow_deep() -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(30.), rgba(0x000000cc).into())
+        .blur_radius(px(80.))
+        .spread_radius(px(-10.))]
+}
+
+/// A soft colored glow (e.g. presence / status dots, accent buttons).
+fn glow(argb: u32, blur: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(0.), rgba(argb).into()).blur_radius(px(blur))]
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -341,25 +375,27 @@ fn state_colors(state: TaskState) -> (u32, Rgba) {
 }
 
 fn avatar(text: String, big: bool) -> impl IntoElement {
-    let s = if big { px(52.) } else { px(34.) };
+    let s = if big { px(50.) } else { px(36.) };
     div()
         .w(s)
         .h(s)
-        .rounded(px(if big { 15. } else { 10. }))
-        .bg(rgb(0x5c50bc))
+        .rounded(px(if big { 16. } else { 11. }))
+        .bg(avatar_grad())
         .text_color(rgb(0xffffff))
-        .text_xs()
+        .when(big, |e| e.text_sm())
+        .when(!big, |e| e.text_xs())
         .font_weight(FontWeight::BOLD)
         .flex()
         .items_center()
         .justify_center()
+        .shadow(glow(0x6b5cf055, 12.))
         .child(text)
 }
 
 fn section_label(text: &str) -> impl IntoElement {
     div()
         .text_xs()
-        .text_color(rgb(MUTED))
+        .text_color(rgb(0x7d8494))
         .font_weight(FontWeight::BOLD)
         .child(text.to_uppercase())
 }
@@ -396,7 +432,7 @@ impl Render for Workspace {
             .on_key_down(cx.listener(Self::on_key))
             .relative()
             .size_full()
-            .bg(rgb(BG))
+            .bg(grad(0x0d0f14, 0x14161d, 160.))
             .text_color(rgb(TEXT))
             .text_sm()
             .child(row)
@@ -411,53 +447,57 @@ impl Workspace {
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(14.))
+            .gap(px(16.))
             .w(px(72.))
             .h_full()
-            .py(px(16.))
+            .py(px(18.))
             .bg(rgb(RAIL))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(0x23262f))
             .child(
                 div()
                     .w(px(46.))
                     .h(px(46.))
                     .rounded(px(15.))
-                    .bg(rgb(ACCENT))
+                    .bg(avatar_grad())
                     .text_color(rgb(0xffffff))
                     .font_weight(FontWeight::BOLD)
                     .flex()
                     .items_center()
                     .justify_center()
+                    .shadow(glow(0x6b5cf066, 16.))
                     .child("IC"),
             )
             .child(
                 div()
                     .w(px(46.))
                     .h(px(46.))
-                    .rounded(px(12.))
+                    .rounded(px(14.))
                     .border_1()
                     .border_color(rgb(ACCENT2))
                     .bg(rgb(PANEL))
+                    .text_color(rgb(ACCENT2))
                     .flex()
                     .items_center()
                     .justify_center()
                     .font_weight(FontWeight::BOLD)
+                    .shadow(glow(0x55d6be3d, 12.))
                     .child("E"),
             )
             .child(div().flex_1())
             .child(
                 div()
-                    .w(px(10.))
-                    .h(px(10.))
+                    .w(px(11.))
+                    .h(px(11.))
                     .rounded_full()
-                    .bg(rgb(if online { ACCENT2 } else { 0x596171 })),
+                    .bg(rgb(if online { ACCENT2 } else { 0x596171 }))
+                    .when(online, |e| e.shadow(glow(0x55d6beaa, 12.))),
             )
     }
 
     fn render_sidebar(&self, snap: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let label = if snap.connected {
-            format!("{} · live", snap.health.status)
+            "live".to_string()
         } else {
             "offline".to_string()
         };
@@ -467,24 +507,38 @@ impl Workspace {
             (View::Team, "#", "team"),
             (View::Architecture, "#", "architecture"),
         ];
-        let mut nav = div().flex().flex_col().gap(px(2.)).px(px(12.)).py(px(20.));
+        let mut nav = div().flex().flex_col().gap(px(3.)).px(px(12.)).py(px(18.));
         for (view, prefix, name) in channels {
             let active = self.view == view;
             nav = nav.child(
                 div()
                     .id(SharedElementId::channel(name))
                     .flex()
-                    .gap(px(8.))
+                    .gap(px(9.))
                     .items_center()
                     .w_full()
-                    .px(px(10.))
+                    .px(px(11.))
                     .py(px(9.))
-                    .rounded(px(7.))
+                    .rounded(px(9.))
                     .cursor_pointer()
-                    .when(active, |e| e.bg(rgb(PANEL2)).text_color(rgb(TEXT)))
-                    .when(!active, |e| e.text_color(rgb(MUTED)))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(div().text_color(rgb(MUTED)).child(prefix))
+                    .when(active, |e| {
+                        e.bg(grad(0x241f3a, 0x1c2130, 90.))
+                            .text_color(rgb(TEXT))
+                            .border_l_2()
+                            .border_color(rgb(ACCENT))
+                    })
+                    .when(!active, |e| {
+                        e.text_color(rgb(MUTED))
+                            .border_l_2()
+                            .border_color(rgba(0x00000000))
+                            .hover(|s| s.bg(rgb(PANEL2)).text_color(rgb(TEXT)))
+                    })
+                    .child(
+                        div()
+                            .text_color(rgb(if active { ACCENT } else { MUTED }))
+                            .child(prefix),
+                    )
                     .child(name)
                     .on_click(cx.listener(move |this, _, _, cx| this.select_view(view, cx))),
             );
@@ -502,11 +556,17 @@ impl Workspace {
                     .id(SharedElementId::agent(&agent.id))
                     .flex()
                     .items_center()
-                    .gap(px(9.))
-                    .p(px(7.))
-                    .rounded(px(8.))
+                    .gap(px(10.))
+                    .p(px(8.))
+                    .rounded(px(10.))
                     .cursor_pointer()
-                    .when(selected, |e| e.bg(rgb(PANEL2)))
+                    .border_l_2()
+                    .border_color(rgba(0x00000000))
+                    .when(selected, |e| {
+                        e.bg(grad(0x241f3a, 0x1c2130, 90.))
+                            .border_color(rgb(ACCENT))
+                    })
+                    .when(!selected, |e| e.hover(|s| s.bg(rgb(PANEL2))))
                     .child(avatar(initials(&agent.name), false))
                     .child(
                         div()
@@ -530,10 +590,11 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .w(px(10.))
-                            .h(px(10.))
+                            .w(px(9.))
+                            .h(px(9.))
                             .rounded_full()
-                            .bg(rgb(if busy { WARNING } else { ACCENT2 })),
+                            .bg(rgb(if busy { WARNING } else { ACCENT2 }))
+                            .shadow(glow(if busy { 0xe9b44caa } else { 0x55d6beaa }, 10.)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.open_agent_chat(id.clone(), cx))),
             );
@@ -544,7 +605,7 @@ impl Workspace {
             .flex_col()
             .w(px(260.))
             .h_full()
-            .bg(rgb(SIDEBAR))
+            .bg(grad(0x181b22, 0x14161d, 180.))
             .border_r_1()
             .border_color(rgb(BORDER))
             .child(
@@ -567,7 +628,36 @@ impl Workspace {
                                     .child("Engineering"),
                             ),
                     )
-                    .child(div().text_xs().text_color(rgb(ACCENT2)).child(label)),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(9.))
+                            .py(px(5.))
+                            .rounded_full()
+                            .bg(rgba(if snap.connected { 0x55d6be1f } else { 0x59617133 }))
+                            .border_1()
+                            .border_color(rgba(if snap.connected {
+                                0x55d6be55
+                            } else {
+                                0x59617155
+                            }))
+                            .child(
+                                div()
+                                    .w(px(6.))
+                                    .h(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(if snap.connected { ACCENT2 } else { MUTED })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(if snap.connected { ACCENT2 } else { MUTED }))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(label),
+                            ),
+                    ),
             )
             .child(nav)
             .child(
@@ -615,21 +705,23 @@ impl Workspace {
             .flex()
             .justify_between()
             .items_center()
-            .h(px(77.))
-            .px(px(20.))
+            .h(px(78.))
+            .px(px(24.))
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .gap(px(3.))
                     .child(
                         div()
                             .flex()
-                            .gap(px(6.))
-                            .text_lg()
+                            .gap(px(7.))
+                            .items_center()
+                            .text_xl()
                             .font_weight(FontWeight::BOLD)
-                            .child(div().text_color(rgb(MUTED)).child(prefix))
+                            .child(div().text_color(rgb(ACCENT)).child(prefix))
                             .child(title),
                     )
                     .child(div().text_xs().text_color(rgb(MUTED)).child(description)),
@@ -637,23 +729,28 @@ impl Workspace {
             .child(if chat_actions {
                 div()
                     .id(SharedElementId::simple("ask"))
-                    .px(px(15.))
+                    .px(px(16.))
                     .py(px(10.))
-                    .rounded(px(8.))
+                    .rounded(px(9.))
                     .bg(rgb(PANEL2))
+                    .border_1()
+                    .border_color(rgb(BORDER))
                     .font_weight(FontWeight::BOLD)
                     .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x2c313d)))
                     .child("Ask teammate")
             } else {
                 div()
                     .id(SharedElementId::simple("new-task"))
-                    .px(px(15.))
+                    .px(px(17.))
                     .py(px(10.))
-                    .rounded(px(8.))
-                    .bg(rgb(ACCENT))
+                    .rounded(px(9.))
+                    .bg(grad(0x9a8bff, 0x7a68f0, 160.))
                     .text_color(rgb(0xffffff))
                     .font_weight(FontWeight::BOLD)
+                    .shadow(glow(0x8b7cf666, 16.))
                     .cursor_pointer()
+                    .hover(|s| s.bg(grad(0xa899ff, 0x8877ff, 160.)))
                     .child("New task")
                     .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)))
             });
@@ -682,10 +779,14 @@ impl Workspace {
             .filter(|t| matches!(t.state, TaskState::Failed | TaskState::Rejected))
             .count();
         let cells = [
-            (active.to_string(), "active"),
-            (completed.to_string(), "completed"),
-            (failed.to_string(), "needs attention"),
-            (snap.agents.len().to_string(), "agents"),
+            (active.to_string(), "active", TEXT),
+            (completed.to_string(), "completed", ACCENT2),
+            (
+                failed.to_string(),
+                "needs attention",
+                if failed > 0 { DANGER } else { MUTED },
+            ),
+            (snap.agents.len().to_string(), "agents", ACCENT),
         ];
         let mut row = div()
             .flex()
@@ -693,23 +794,30 @@ impl Workspace {
             .bg(rgb(BORDER))
             .border_b_1()
             .border_color(rgb(BORDER));
-        for (value, label) in cells {
+        for (value, label, color) in cells {
             row = row.child(
                 div()
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .gap(px(3.))
-                    .px(px(20.))
-                    .py(px(16.))
-                    .bg(rgb(BG))
+                    .gap(px(4.))
+                    .px(px(24.))
+                    .py(px(18.))
+                    .bg(grad(0x171a21, 0x121419, 180.))
                     .child(
                         div()
                             .text_2xl()
                             .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(color))
                             .child(value),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(label)),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(label),
+                    ),
             );
         }
         row
@@ -755,12 +863,17 @@ impl Workspace {
                     .id(SharedElementId::task(&task.id))
                     .flex()
                     .flex_col()
-                    .p(px(16.))
-                    .rounded(px(11.))
-                    .bg(rgb(PANEL))
+                    .p(px(17.))
+                    .rounded(px(13.))
+                    .bg(grad(0x1f232d, 0x1a1e27, 160.))
                     .border_1()
                     .border_color(rgb(if selected { ACCENT } else { BORDER }))
                     .cursor_pointer()
+                    .shadow(shadow_soft())
+                    .when(selected, |e| e.shadow(glow(0x8b7cf655, 18.)))
+                    .when(!selected, |e| {
+                        e.hover(|s| s.border_color(rgb(0x4a4f5e)))
+                    })
                     .child(
                         div()
                             .flex()
@@ -768,13 +881,27 @@ impl Workspace {
                             .items_center()
                             .child(
                                 div()
-                                    .px(px(8.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .px(px(9.))
                                     .py(px(4.))
                                     .rounded_full()
                                     .bg(bg)
-                                    .text_color(rgb(fg))
-                                    .text_xs()
-                                    .child(task.state.label()),
+                                    .child(
+                                        div()
+                                            .w(px(6.))
+                                            .h(px(6.))
+                                            .rounded_full()
+                                            .bg(rgb(fg)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(rgb(fg))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(task.state.label()),
+                                    ),
                             )
                             .child(
                                 div()
@@ -785,7 +912,7 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .mt(px(12.))
+                            .mt(px(13.))
                             .text_color(rgb(TEXT))
                             .font_weight(FontWeight::BOLD)
                             .child(task.skill.replace('_', " ")),
@@ -799,10 +926,15 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .mt(px(10.))
+                            .mt(px(11.))
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child(format!("{}  →  {}", task.requester, task.assignee)),
+                            .child(task.requester.clone())
+                            .child(div().text_color(rgb(ACCENT)).child("→"))
+                            .child(task.assignee.clone()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected_task = Some(id.clone());
@@ -823,13 +955,15 @@ impl Workspace {
                     .id(SharedElementId::team(&agent.id))
                     .flex()
                     .flex_col()
-                    .w(px(220.))
+                    .w(px(224.))
                     .p(px(20.))
-                    .rounded(px(11.))
-                    .bg(rgb(PANEL))
+                    .rounded(px(14.))
+                    .bg(grad(0x1f232d, 0x1a1e27, 160.))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .cursor_pointer()
+                    .shadow(shadow_soft())
+                    .hover(|s| s.border_color(rgb(ACCENT)).bg(grad(0x242a36, 0x1d2129, 160.)))
                     .child(avatar(initials(&agent.name), true))
                     .child(
                         div()
@@ -866,13 +1000,16 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .items_center()
-                .px(px(18.))
-                .py(px(13.))
-                .rounded(px(10.))
-                .bg(rgb(PANEL))
+                .px(px(20.))
+                .py(px(14.))
+                .rounded(px(12.))
                 .border_1()
                 .border_color(rgb(if host { ACCENT } else { BORDER }))
-                .child(div().font_weight(FontWeight::BOLD).child(title));
+                .when(host, |e| {
+                    e.bg(grad(0x241f3a, 0x1b2030, 150.)).shadow(glow(0x8b7cf644, 20.))
+                })
+                .when(!host, |e| e.bg(grad(0x1f232d, 0x1a1e27, 160.)).shadow(shadow_soft()))
+                .child(div().font_weight(FontWeight::BOLD).text_color(rgb(TEXT)).child(title));
             if let Some(sub) = sub {
                 n = n.child(div().mt(px(5.)).text_xs().text_color(rgb(MUTED)).child(sub));
             }
@@ -964,12 +1101,22 @@ impl Workspace {
                     .child(
                         div()
                             .mt(px(6.))
-                            .p(px(12.))
-                            .rounded(px(12.))
+                            .p(px(13.))
+                            .rounded(px(14.))
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(if is_user { 0x5f52bd } else { PANEL }))
-                            .when(is_system, |e| e.text_xs().text_color(rgb(MUTED)))
+                            .border_color(rgb(if is_user { 0x7a68f0 } else { BORDER }))
+                            .when(is_user, |e| {
+                                e.bg(grad(0x6b5cf0, 0x5647c9, 150.))
+                                    .text_color(rgb(0xffffff))
+                                    .shadow(shadow_soft())
+                            })
+                            .when(is_system && !is_user, |e| {
+                                e.bg(rgba(0x55d6be14))
+                                    .border_color(rgba(0x55d6be44))
+                                    .text_xs()
+                                    .text_color(rgb(0xb8ded7))
+                            })
+                            .when(!is_user && !is_system, |e| e.bg(rgb(PANEL)))
                             .child(msg.text.clone()),
                     ),
             );
@@ -984,29 +1131,31 @@ impl Workspace {
             .flex()
             .items_center()
             .gap(px(8.))
-            .mt(px(14.))
-            .p(px(8.))
-            .rounded(px(13.))
+            .mt(px(16.))
+            .p(px(9.))
+            .rounded(px(14.))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(ACCENT))
             .bg(rgb(PANEL))
+            .shadow(glow(0x8b7cf62e, 16.))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .px(px(6.))
+                    .px(px(8.))
                     .py(px(8.))
                     .text_color(rgb(if self.composer_text.is_empty() { MUTED } else { TEXT }))
                     .child(composer_preview),
             )
             .child(
                 div()
-                    .px(px(15.))
+                    .px(px(17.))
                     .py(px(10.))
-                    .rounded(px(9.))
-                    .bg(rgb(ACCENT))
+                    .rounded(px(10.))
+                    .bg(grad(0x9a8bff, 0x7a68f0, 160.))
                     .text_color(rgb(0xffffff))
                     .font_weight(FontWeight::BOLD)
+                    .shadow(glow(0x8b7cf655, 12.))
                     .child("Send"),
             );
 
@@ -1058,9 +1207,12 @@ impl Workspace {
                         body = body.child(
                             div()
                                 .my(px(5.))
-                                .p(px(7.))
-                                .rounded(px(6.))
-                                .bg(rgb(RAIL))
+                                .px(px(9.))
+                                .py(px(7.))
+                                .rounded(px(8.))
+                                .bg(rgba(0x55d6be14))
+                                .border_1()
+                                .border_color(rgba(0x55d6be3d))
                                 .text_color(rgb(ACCENT2))
                                 .text_xs()
                                 .child(cap.uri.clone()),
@@ -1096,7 +1248,7 @@ impl Workspace {
             .flex_col()
             .w(px(320.))
             .h_full()
-            .bg(rgb(SIDEBAR))
+            .bg(grad(0x181b22, 0x14161d, 180.))
             .border_l_1()
             .border_color(rgb(BORDER))
             .child(
@@ -1150,11 +1302,12 @@ impl Workspace {
             .flex_col()
             .gap(px(16.))
             .w(px(560.))
-            .p(px(22.))
-            .rounded(px(14.))
-            .bg(rgb(SIDEBAR))
+            .p(px(24.))
+            .rounded(px(16.))
+            .bg(grad(0x1c2029, 0x161922, 160.))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(0x363c49))
+            .shadow(shadow_deep())
             .child(
                 div()
                     .flex()
@@ -1176,13 +1329,14 @@ impl Workspace {
                     .child(
                         div()
                             .id(SharedElementId::simple("dlg-requester"))
-                            .px(px(11.))
+                            .px(px(12.))
                             .py(px(11.))
-                            .rounded(px(8.))
-                            .bg(rgb(BG))
+                            .rounded(px(9.))
+                            .bg(rgb(0x0c0e12))
                             .border_1()
                             .border_color(rgb(BORDER))
                             .cursor_pointer()
+                            .hover(|s| s.border_color(rgb(0x4a4f5e)))
                             .child(requester)
                             .on_click(cx.listener(|this, _, _, cx| this.cycle_requester(cx))),
                     ),
@@ -1196,13 +1350,14 @@ impl Workspace {
                     .child(
                         div()
                             .id(SharedElementId::simple("dlg-cap"))
-                            .px(px(11.))
+                            .px(px(12.))
                             .py(px(11.))
-                            .rounded(px(8.))
-                            .bg(rgb(BG))
+                            .rounded(px(9.))
+                            .bg(rgb(0x0c0e12))
                             .border_1()
                             .border_color(rgb(BORDER))
                             .cursor_pointer()
+                            .hover(|s| s.border_color(rgb(0x4a4f5e)))
                             .child(capability)
                             .on_click(cx.listener(|this, _, _, cx| this.cycle_capability(cx))),
                     ),
@@ -1216,12 +1371,13 @@ impl Workspace {
                     .child(
                         div()
                             .min_h(px(96.))
-                            .px(px(11.))
+                            .px(px(12.))
                             .py(px(11.))
-                            .rounded(px(8.))
-                            .bg(rgb(BG))
+                            .rounded(px(9.))
+                            .bg(rgb(0x0c0e12))
                             .border_1()
                             .border_color(rgb(ACCENT))
+                            .shadow(glow(0x8b7cf62e, 14.))
                             .text_color(rgb(if self.dialog_request.is_empty() { MUTED } else { TEXT }))
                             .child(request_display),
                     ),
@@ -1237,12 +1393,15 @@ impl Workspace {
                     .child(
                         div()
                             .id(SharedElementId::simple("dlg-cancel"))
-                            .px(px(15.))
+                            .px(px(16.))
                             .py(px(10.))
-                            .rounded(px(8.))
+                            .rounded(px(9.))
                             .bg(rgb(PANEL2))
+                            .border_1()
+                            .border_color(rgb(BORDER))
                             .font_weight(FontWeight::BOLD)
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x2c313d)))
                             .child("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.dialog_open = false;
@@ -1252,13 +1411,15 @@ impl Workspace {
                     .child(
                         div()
                             .id(SharedElementId::simple("dlg-submit"))
-                            .px(px(15.))
+                            .px(px(18.))
                             .py(px(10.))
-                            .rounded(px(8.))
-                            .bg(rgb(ACCENT))
+                            .rounded(px(9.))
+                            .bg(grad(0x9a8bff, 0x7a68f0, 160.))
                             .text_color(rgb(0xffffff))
                             .font_weight(FontWeight::BOLD)
+                            .shadow(glow(0x8b7cf666, 16.))
                             .cursor_pointer()
+                            .hover(|s| s.bg(grad(0xa899ff, 0x8877ff, 160.)))
                             .child("Assign task")
                             .on_click(cx.listener(|this, _, _, cx| this.submit_dialog(cx))),
                     ),
@@ -1272,7 +1433,7 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgba(0x06070abf))
+            .bg(rgba(0x05070ad9))
             .child(panel)
     }
 }
@@ -1314,10 +1475,10 @@ fn kv(label: &str, value: String) -> impl IntoElement {
 
 fn inspector_heading(text: &str) -> impl IntoElement {
     div()
-        .mt(px(20.))
-        .mb(px(8.))
+        .mt(px(22.))
+        .mb(px(9.))
         .text_xs()
-        .text_color(rgb(TEXT))
+        .text_color(rgb(ACCENT2))
         .font_weight(FontWeight::BOLD)
         .child(text.to_uppercase())
 }
@@ -1326,8 +1487,10 @@ fn json_block(value: &serde_json::Value) -> impl IntoElement {
     let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
     div()
         .p(px(12.))
-        .rounded(px(8.))
-        .bg(rgb(RAIL))
+        .rounded(px(10.))
+        .bg(rgb(0x0c0e12))
+        .border_1()
+        .border_color(rgb(BORDER))
         .text_xs()
         .text_color(rgb(0xcbd2df))
         .child(text)

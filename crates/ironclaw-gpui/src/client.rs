@@ -12,6 +12,7 @@ use crate::models::{AgentSummary, Capability, FarmTask, Health};
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub connected: bool,
+    #[allow(dead_code)]
     pub health: Health,
     pub agents: Vec<AgentSummary>,
     pub tasks: Vec<FarmTask>,
