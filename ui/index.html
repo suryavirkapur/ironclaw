@@ -8,45 +8,56 @@
   </head>
   <body>
     <div class="workspace-shell">
-      <aside class="rail" aria-label="Workspace navigation">
-        <div class="workspace-mark">IC</div>
-        <button class="rail-button active" title="Engineering workspace">E</button>
-        <div class="rail-spacer"></div>
-        <span class="health-dot" id="health-dot" title="Daemon status"></span>
-      </aside>
-
       <aside class="sidebar">
         <header class="sidebar-header">
-          <div>
-            <p class="eyebrow">Ironclaw</p>
-            <h1>Engineering</h1>
-          </div>
-          <span class="live-label" id="connection-label">connecting</span>
+          <label class="search-field">
+            <span class="search-icon" aria-hidden="true">⌕</span>
+            <input id="sidebar-search" type="search" placeholder="Search" autocomplete="off" />
+          </label>
         </header>
 
         <nav class="channels" aria-label="Channels">
-          <p class="section-label">Channels</p>
-          <button class="channel" data-view="chat"><span>●</span> conversations</button>
-          <button class="channel active" data-view="tasks"><span>#</span> delivery</button>
-          <button class="channel" data-view="agents"><span>#</span> team</button>
-          <button class="channel" data-view="architecture"><span>#</span> architecture</button>
+          <div class="section-heading">
+            <p class="section-label">Channels</p>
+            <button class="ghost-button" id="create-channel-button" type="button" title="Create channel">+</button>
+          </div>
+          <button class="channel" data-view="tasks" type="button"><span class="hash">#</span> delivery</button>
+          <button class="channel" data-view="architecture" type="button"><span class="hash">#</span> architecture</button>
+          <div id="channel-list" class="channel-list"></div>
         </nav>
 
         <section class="people-section">
-          <p class="section-label">Agents — <span id="agent-count">0</span></p>
+          <div class="section-heading">
+            <p class="section-label">Agents — <span id="agent-count">0</span></p>
+            <button class="ghost-button" id="create-agent-button" type="button" title="Create agent">+</button>
+          </div>
           <div id="agent-list" class="agent-list"></div>
         </section>
+
+        <footer class="sidebar-footer">
+          <span class="sprite human" id="user-sprite" aria-hidden="true">You</span>
+          <div>
+            <strong>You</strong>
+            <small id="connection-label">connecting</small>
+          </div>
+          <span class="health-dot" id="health-dot" title="Daemon status"></span>
+        </footer>
       </aside>
 
       <main class="main-column">
         <header class="channel-header">
-          <div>
-            <h2><span id="view-prefix">#</span> <span id="view-title">delivery</span></h2>
-            <p id="view-description">Live A2A work across the engineering team</p>
+          <div class="header-identity">
+            <span id="view-sprite" class="sprite header-sprite hidden"></span>
+            <div>
+              <h2><span id="view-prefix">#</span> <span id="view-title">delivery</span></h2>
+              <p id="view-description">Live A2A work across the engineering team</p>
+            </div>
           </div>
           <div class="header-actions">
-            <button class="secondary-button hidden" id="ask-agent-button">Ask teammate</button>
-            <button class="primary-button" id="new-task-button">New task</button>
+            <div id="channel-members" class="member-row"></div>
+            <button class="secondary-button hidden" id="add-members-button" type="button">Add agents</button>
+            <button class="secondary-button hidden" id="ask-agent-button" type="button">Ask teammate</button>
+            <button class="primary-button" id="new-task-button" type="button">New task</button>
           </div>
         </header>
 
@@ -82,7 +93,6 @@
           </div>
           <button type="button" class="icon-button" id="close-dialog" aria-label="Close">×</button>
         </header>
-
         <label>
           Requesting agent
           <select id="requester" required></select>
@@ -125,6 +135,87 @@
         <footer>
           <button type="button" class="secondary-button" id="cancel-a2a">Cancel</button>
           <button type="submit" class="primary-button">Send A2A request</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="agent-dialog">
+      <form id="agent-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">Workspace teammate</p>
+            <h2>Create an agent</h2>
+          </div>
+          <button type="button" class="icon-button" id="close-agent-dialog" aria-label="Close">×</button>
+        </header>
+        <label>
+          Name
+          <input id="agent-name" required maxlength="64" placeholder="Account Manager" />
+        </label>
+        <label>
+          Role
+          <input id="agent-role" required maxlength="80" placeholder="Owns outbound pipeline" />
+        </label>
+        <fieldset>
+          <legend>Sprite</legend>
+          <div id="sprite-picker" class="sprite-picker"></div>
+        </fieldset>
+        <fieldset>
+          <legend>Color</legend>
+          <div id="color-picker" class="color-picker"></div>
+        </fieldset>
+        <p class="form-error" id="agent-error"></p>
+        <footer>
+          <button type="button" class="secondary-button" id="cancel-agent">Cancel</button>
+          <button type="submit" class="primary-button">Create agent</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="channel-dialog">
+      <form id="channel-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">Shared room</p>
+            <h2>Create a channel</h2>
+          </div>
+          <button type="button" class="icon-button" id="close-channel-dialog" aria-label="Close">×</button>
+        </header>
+        <label>
+          Name
+          <input id="channel-name" required maxlength="64" placeholder="Sales Outbound" />
+        </label>
+        <label>
+          Topic
+          <input id="channel-topic" maxlength="120" placeholder="What this room is for" />
+        </label>
+        <fieldset>
+          <legend>Add agents</legend>
+          <div id="channel-agent-picker" class="check-list"></div>
+        </fieldset>
+        <p class="form-error" id="channel-error"></p>
+        <footer>
+          <button type="button" class="secondary-button" id="cancel-channel">Cancel</button>
+          <button type="submit" class="primary-button">Create channel</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="members-dialog">
+      <form id="members-form" method="dialog">
+        <header>
+          <div>
+            <p class="eyebrow">Channel members</p>
+            <h2>Add agents</h2>
+          </div>
+          <button type="button" class="icon-button" id="close-members-dialog" aria-label="Close">×</button>
+        </header>
+        <p class="privacy-note" id="members-note">Choose teammates to include in this channel.</p>
+        <div id="members-picker" class="check-list"></div>
+        <p class="form-error" id="members-error"></p>
+        <footer>
+          <button type="button" class="secondary-button" id="cancel-members">Cancel</button>
+          <button type="submit" class="primary-button">Add to channel</button>
         </footer>
       </form>
     </dialog>
