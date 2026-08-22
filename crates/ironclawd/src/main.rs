@@ -472,6 +472,7 @@ struct AppState {
     farm_registry: Arc<FarmRegistry>,
     farm_tasks: TaskLedger,
     farm_artifacts: farm::ArtifactStore,
+    farm_workspace: farm::WorkspaceStore,
     control_plane_authorizer: Arc<security::ControlPlaneAuthorizer>,
     ws_tickets: Arc<std::sync::Mutex<HashMap<String, WsTicketRecord>>>,
     mcp_gateway: Arc<mcp::McpGateway>,
@@ -573,6 +574,14 @@ impl AppState {
                 .map_err(|err| {
                     IronclawError::new(format!("farm artifact store init failed: {err}"))
                 })?;
+        let farm_workspace = farm::WorkspaceStore::open(
+            config
+                .storage
+                .users_root
+                .join("_farm")
+                .join("workspace.json"),
+        )
+        .map_err(|err| IronclawError::new(format!("workspace store init failed: {err}")))?;
         Ok(Self {
             host_config: Arc::new(config),
             llm_client,
@@ -588,6 +597,7 @@ impl AppState {
             farm_registry,
             farm_tasks,
             farm_artifacts,
+            farm_workspace,
             control_plane_authorizer: Arc::new(control_plane_authorizer),
             ws_tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_gateway,

@@ -14,13 +14,15 @@ pub mod router;
 pub mod task;
 #[cfg(feature = "wasm-runtime")]
 pub mod wasm;
+pub mod workspace;
 
 pub use artifact::{ArtifactError, ArtifactRecord, ArtifactStore};
 pub use capability::{Capability, CapabilityEffect, CapabilityKind, CapabilityUri};
-pub use manifest::{AgentManifest, ManifestError};
+pub use manifest::{AgentAppearance, AgentManifest, ManifestError, SPRITE_COLORS, SPRITE_IDS};
 pub use reconcile::{AgentRuntimeState, ReconcileAction, ReconcilePlan, RuntimePhase};
-pub use registry::{AgentRecord, FarmRegistry};
+pub use registry::{AgentRecord, FarmRegistry, RegistryError};
 pub use router::{CapabilityBackend, CapabilityRouter, Invocation, InvocationResult, RouterError};
 pub use task::{FarmTask, TaskError, TaskLedger, TaskState};
 #[cfg(feature = "wasm-runtime")]
 pub use wasm::{WasmExecutor, WasmRuntimeError};
+pub use workspace::{WorkspaceChannel, WorkspaceError, WorkspaceStore};

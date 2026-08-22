@@ -31,6 +31,77 @@ pub struct AgentManifest {
     pub a2a: A2aPolicy,
     #[serde(default)]
     pub skills: Vec<AgentSkill>,
+    #[serde(default)]
+    pub appearance: AgentAppearance,
+}
+
+pub const SPRITE_IDS: &[&str] = &[
+    "bars", "peak", "arch", "orb", "spark", "hex", "petal", "bolt",
+];
+
+pub const SPRITE_COLORS: &[&str] = &[
+    "#0F8A7A", "#6B5CE7", "#E05A67", "#D98A1C", "#2F6FED", "#3B8C4A", "#C44B8A", "#334155",
+];
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentAppearance {
+    #[serde(default)]
+    pub sprite: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+impl AgentAppearance {
+    pub fn default_for(agent_id: &str) -> Self {
+        let hash = agent_id.bytes().fold(0u32, |acc, byte| {
+            acc.wrapping_mul(31).wrapping_add(byte as u32)
+        });
+        Self {
+            sprite: SPRITE_IDS[(hash as usize) % SPRITE_IDS.len()].to_string(),
+            color: SPRITE_COLORS[(hash as usize / SPRITE_IDS.len()) % SPRITE_COLORS.len()]
+                .to_string(),
+        }
+    }
+
+    pub fn resolved(&self, agent_id: &str) -> Self {
+        let fallback = Self::default_for(agent_id);
+        Self {
+            sprite: if valid_sprite(&self.sprite) {
+                self.sprite.clone()
+            } else {
+                fallback.sprite
+            },
+            color: if valid_color(&self.color) {
+                self.color.clone()
+            } else {
+                fallback.color
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        if !valid_sprite(&self.sprite) {
+            return Err(ManifestError::Validation(format!(
+                "unknown sprite {}",
+                self.sprite
+            )));
+        }
+        if !valid_color(&self.color) {
+            return Err(ManifestError::Validation(
+                "appearance color must be #RRGGBB".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_sprite(value: &str) -> bool {
+    SPRITE_IDS.iter().any(|sprite| *sprite == value)
+}
+
+fn valid_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn schema_version() -> u32 {
@@ -380,6 +451,18 @@ impl AgentManifest {
                 self.id
             )));
         }
+        if !self.appearance.sprite.is_empty() && !valid_sprite(&self.appearance.sprite) {
+            return Err(ManifestError::Validation(format!(
+                "agent {} uses unknown sprite {}",
+                self.id, self.appearance.sprite
+            )));
+        }
+        if !self.appearance.color.is_empty() && !valid_color(&self.appearance.color) {
+            return Err(ManifestError::Validation(format!(
+                "agent {} appearance color must be #RRGGBB",
+                self.id
+            )));
+        }
         Ok(())
     }
 }
@@ -468,6 +551,24 @@ description = "Analyze a dataset"
         assert_eq!(manifest.id, "analyst");
         assert_eq!(manifest.compute.memory_mib, 2048);
         assert_eq!(manifest.wasm_tools[0].limits.memory_mib, 64);
+        assert_eq!(manifest.appearance.sprite, "");
+        let appearance = manifest.appearance.resolved(&manifest.id);
+        assert!(SPRITE_IDS.contains(&appearance.sprite.as_str()));
+        assert!(SPRITE_COLORS.contains(&appearance.color.as_str()));
+    }
+
+    #[test]
+    fn accepts_named_sprite_and_hex_color() {
+        let toml = format!("{VALID}\n[appearance]\nsprite = \"arch\"\ncolor = \"#0F8A7A\"\n");
+        let manifest = AgentManifest::from_toml(&toml).unwrap();
+        assert_eq!(manifest.appearance.sprite, "arch");
+        assert_eq!(manifest.appearance.color, "#0F8A7A");
+    }
+
+    #[test]
+    fn rejects_unknown_sprite() {
+        let toml = format!("{VALID}\n[appearance]\nsprite = \"dragon\"\ncolor = \"#0F8A7A\"\n");
+        assert!(AgentManifest::from_toml(&toml).is_err());
     }
 
     #[test]

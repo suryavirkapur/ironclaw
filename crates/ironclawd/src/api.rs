@@ -111,10 +111,25 @@ pub fn build_router(state: AppState) -> Router {
         // heartbeat
         .route("/api/admin/heartbeat", get(admin_heartbeat_status))
         // agent farm control plane
-        .route("/api/farm/agents", get(farm_agents_list))
+        .route(
+            "/api/farm/agents",
+            get(farm_agents_list).post(farm_agent_create),
+        )
         .route(
             "/api/farm/agents/{agent_id}/capabilities",
             get(farm_agent_capabilities),
+        )
+        .route(
+            "/api/farm/agents/{agent_id}/appearance",
+            post(farm_agent_appearance),
+        )
+        .route(
+            "/api/workspace/channels",
+            get(workspace_channels_list).post(workspace_channel_create),
+        )
+        .route(
+            "/api/workspace/channels/{channel_id}/members",
+            post(workspace_channel_add_members),
         )
         .route(
             "/api/farm/tasks",
@@ -372,6 +387,43 @@ pub struct FarmAgentSummary {
     pub wasm_tools: usize,
     pub mcp_servers: usize,
     pub a2a_skills: usize,
+    pub sprite: String,
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFarmAgentRequest {
+    #[serde(default)]
+    id: String,
+    name: String,
+    role: String,
+    #[serde(default)]
+    sprite: String,
+    #[serde(default)]
+    color: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAgentAppearanceRequest {
+    sprite: String,
+    color: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceChannelRequest {
+    name: String,
+    #[serde(default)]
+    topic: String,
+    #[serde(default)]
+    member_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddChannelMembersRequest {
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,21 +486,219 @@ async fn farm_agents_list(
         state
             .farm_registry
             .agents()
+            .into_iter()
             .filter(|record| principal.allows_agent(&record.manifest.id))
-            .map(|record| FarmAgentSummary {
-                id: record.manifest.id.clone(),
-                name: record.manifest.name.clone(),
-                role: record.manifest.role.clone(),
-                reports_to: record.manifest.reports_to.clone(),
-                enabled: record.manifest.enabled,
-                memory_engine: record.manifest.memory.engine.clone(),
-                revision: record.revision.clone(),
-                wasm_tools: record.manifest.wasm_tools.len(),
-                mcp_servers: record.manifest.mcp.len(),
-                a2a_skills: record.manifest.skills.len(),
-            })
+            .map(|record| farm_agent_summary(&record))
             .collect(),
     )
+}
+
+fn farm_agent_summary(record: &farm::AgentRecord) -> FarmAgentSummary {
+    let appearance = record.manifest.appearance.resolved(&record.manifest.id);
+    FarmAgentSummary {
+        id: record.manifest.id.clone(),
+        name: record.manifest.name.clone(),
+        role: record.manifest.role.clone(),
+        reports_to: record.manifest.reports_to.clone(),
+        enabled: record.manifest.enabled,
+        memory_engine: record.manifest.memory.engine.clone(),
+        revision: record.revision.clone(),
+        wasm_tools: record.manifest.wasm_tools.len(),
+        mcp_servers: record.manifest.mcp.len(),
+        a2a_skills: record.manifest.skills.len(),
+        sprite: appearance.sprite,
+        color: appearance.color,
+    }
+}
+
+async fn farm_agent_create(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Json(request): Json<CreateFarmAgentRequest>,
+) -> Result<(StatusCode, Json<FarmAgentSummary>), (StatusCode, Json<ApiError>)> {
+    if !state.host_config.farm.enabled {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new("agent farm is disabled")),
+        ));
+    }
+    let name = request.name.trim();
+    let role = request.role.trim();
+    if name.is_empty() || role.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new("agent name and role are required")),
+        ));
+    }
+    let id = if request.id.trim().is_empty() {
+        slug_id(name)
+    } else {
+        request.id.trim().to_string()
+    };
+    if !principal.allows_agent(&id) && principal.role != security::ControlPlaneRole::Admin {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("agent not found: {id}"))),
+        ));
+    }
+    let appearance = if request.sprite.trim().is_empty() && request.color.trim().is_empty() {
+        farm::AgentAppearance::default_for(&id)
+    } else {
+        farm::AgentAppearance {
+            sprite: request.sprite.trim().to_string(),
+            color: request.color.trim().to_string(),
+        }
+    };
+    let description = format!("Help the team as {role}.");
+    let toml = format!(
+        "id = {}\nname = {}\nrole = {}\n\n[appearance]\nsprite = {}\ncolor = {}\n\n[[skills]]\nid = \"assist\"\ndescription = {}\n",
+        toml::Value::String(id.clone()),
+        toml::Value::String(name.to_string()),
+        toml::Value::String(role.to_string()),
+        toml::Value::String(appearance.sprite.clone()),
+        toml::Value::String(appearance.color.clone()),
+        toml::Value::String(description),
+    );
+    let manifest = farm::AgentManifest::from_toml(&toml).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(err.to_string())),
+        )
+    })?;
+    let record = state
+        .farm_registry
+        .register(&state.host_config.farm.manifests_dir, manifest)
+        .map_err(registry_error)?;
+    Ok((StatusCode::CREATED, Json(farm_agent_summary(&record))))
+}
+
+async fn farm_agent_appearance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<UpdateAgentAppearanceRequest>,
+) -> Result<Json<FarmAgentSummary>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &agent_id)?;
+    let record = state
+        .farm_registry
+        .set_appearance(
+            &agent_id,
+            farm::AgentAppearance {
+                sprite: request.sprite,
+                color: request.color,
+            },
+        )
+        .map_err(registry_error)?;
+    Ok(Json(farm_agent_summary(&record)))
+}
+
+async fn workspace_channels_list(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+) -> Result<Json<Vec<farm::WorkspaceChannel>>, (StatusCode, Json<ApiError>)> {
+    let channels = state
+        .farm_workspace
+        .list()
+        .map_err(workspace_error)?
+        .into_iter()
+        .map(|mut channel| {
+            channel
+                .member_ids
+                .retain(|agent_id| principal.allows_agent(agent_id));
+            channel
+        })
+        .collect();
+    Ok(Json(channels))
+}
+
+async fn workspace_channel_create(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Json(request): Json<CreateWorkspaceChannelRequest>,
+) -> Result<(StatusCode, Json<farm::WorkspaceChannel>), (StatusCode, Json<ApiError>)> {
+    for agent_id in &request.member_ids {
+        require_existing_agent(&state, &principal, agent_id)?;
+    }
+    let now = now_ms().map_err(internal_farm_error)?;
+    let channel = state
+        .farm_workspace
+        .create(&request.name, &request.topic, request.member_ids, now)
+        .map_err(workspace_error)?;
+    Ok((StatusCode::CREATED, Json(channel)))
+}
+
+async fn workspace_channel_add_members(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Path(channel_id): Path<String>,
+    Json(request): Json<AddChannelMembersRequest>,
+) -> Result<Json<farm::WorkspaceChannel>, (StatusCode, Json<ApiError>)> {
+    let mut member_ids = request.agent_ids;
+    if !request.agent_id.trim().is_empty() {
+        member_ids.push(request.agent_id.trim().to_string());
+    }
+    for agent_id in &member_ids {
+        require_existing_agent(&state, &principal, agent_id)?;
+    }
+    let now = now_ms().map_err(internal_farm_error)?;
+    let channel = state
+        .farm_workspace
+        .add_members(&channel_id, member_ids, now)
+        .map_err(workspace_error)?;
+    Ok(Json(channel))
+}
+
+fn require_existing_agent(
+    state: &AppState,
+    principal: &security::ControlPlanePrincipal,
+    agent_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    require_agent_access(principal, agent_id)?;
+    if state.farm_registry.get(agent_id).is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiError::new(format!("agent not found: {agent_id}"))),
+        ));
+    }
+    Ok(())
+}
+
+fn slug_id(name: &str) -> String {
+    let mut slug = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') && !slug.is_empty() {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn registry_error(error: farm::RegistryError) -> (StatusCode, Json<ApiError>) {
+    let status = match &error {
+        farm::RegistryError::UnknownAgent(_) => StatusCode::NOT_FOUND,
+        farm::RegistryError::Validation(message)
+            if message.contains("already exists") || message.contains("duplicate") =>
+        {
+            StatusCode::CONFLICT
+        }
+        farm::RegistryError::Manifest { .. } | farm::RegistryError::Validation(_) => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(ApiError::new(error.to_string())))
+}
+
+fn workspace_error(error: farm::WorkspaceError) -> (StatusCode, Json<ApiError>) {
+    let status = match &error {
+        farm::WorkspaceError::NotFound(_) => StatusCode::NOT_FOUND,
+        farm::WorkspaceError::AlreadyExists(_) => StatusCode::CONFLICT,
+        farm::WorkspaceError::Invalid(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(ApiError::new(error.to_string())))
 }
 
 async fn farm_agent_capabilities(
@@ -1415,6 +1665,136 @@ mod api_test {
         assert!(audit_count >= 5);
         std::env::remove_var("IRONCLAW_TEST_ORG_A_TOKEN");
         std::env::remove_var("IRONCLAW_TEST_ORG_B_TOKEN");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    fn writable_farm_state() -> (tempfile::TempDir, AppState, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let token = "workspace-admin-control-plane-token-01".to_string();
+        std::env::set_var("IRONCLAW_TEST_WORKSPACE_TOKEN", &token);
+        std::env::set_var("OPENAI_API_KEY", "test-only-api-key");
+        let manifests = temp.path().join("agents");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::write(
+            manifests.join("lead.agent.toml"),
+            "id = \"lead\"\nname = \"Lead\"\nrole = \"Team lead\"\n[[skills]]\nid = \"assist\"\ndescription = \"Help\"\n",
+        )
+        .unwrap();
+        let mut config = common::config::HostConfig::default_for_local(temp.path().join("users"));
+        config.execution_mode = HostExecutionMode::HostOnly;
+        config.farm.enabled = true;
+        config.farm.manifests_dir = manifests;
+        config.farm.entry_agent = Some("lead".to_string());
+        config.security.control_plane.enabled = true;
+        config.security.control_plane.principals = vec![HostControlPlanePrincipalConfig {
+            id: "owner".to_string(),
+            organization_id: "org".to_string(),
+            role: HostControlPlaneRole::Admin,
+            token_env: "IRONCLAW_TEST_WORKSPACE_TOKEN".to_string(),
+            default_agent: "lead".to_string(),
+            allowed_agents: vec![],
+        }];
+        (temp, AppState::new(config).unwrap(), token)
+    }
+
+    fn json_request(
+        method: &str,
+        path: &str,
+        token: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn creates_agent_and_adds_them_to_a_channel() {
+        let _guard = AUTH_ENV_LOCK.lock().await;
+        let (_temp, state, token) = writable_farm_state();
+        let router = build_router(state);
+
+        let created_agent = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/farm/agents",
+                &token,
+                serde_json::json!({
+                    "name": "Account Manager",
+                    "role": "Outbound sales",
+                    "sprite": "arch",
+                    "color": "#6B5CE7"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created_agent.status(), StatusCode::CREATED);
+        let agent_body = to_bytes(created_agent.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let agent: serde_json::Value = serde_json::from_slice(&agent_body).unwrap();
+        assert_eq!(agent["id"], "account-manager");
+        assert_eq!(agent["sprite"], "arch");
+        assert_eq!(agent["color"], "#6B5CE7");
+
+        let listed = router
+            .clone()
+            .oneshot(authorized_request("/api/farm/agents", &token))
+            .await
+            .unwrap();
+        let listed_body = to_bytes(listed.into_body(), 64 * 1024).await.unwrap();
+        let agents: Vec<serde_json::Value> = serde_json::from_slice(&listed_body).unwrap();
+        assert!(agents.iter().any(|item| item["id"] == "account-manager"));
+        assert!(agents
+            .iter()
+            .all(|item| item["sprite"].as_str().unwrap().len() > 0));
+
+        let created_channel = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/workspace/channels",
+                &token,
+                serde_json::json!({
+                    "name": "Sales Outbound",
+                    "topic": "Nightly outreach",
+                    "member_ids": ["lead"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created_channel.status(), StatusCode::CREATED);
+        let channel_body = to_bytes(created_channel.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let channel: serde_json::Value = serde_json::from_slice(&channel_body).unwrap();
+        assert_eq!(channel["id"], "sales-outbound");
+        assert_eq!(channel["member_ids"], serde_json::json!(["lead"]));
+
+        let added = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/workspace/channels/sales-outbound/members",
+                &token,
+                serde_json::json!({ "agent_id": "account-manager" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(added.status(), StatusCode::OK);
+        let added_body = to_bytes(added.into_body(), 64 * 1024).await.unwrap();
+        let updated: serde_json::Value = serde_json::from_slice(&added_body).unwrap();
+        assert_eq!(
+            updated["member_ids"],
+            serde_json::json!(["account-manager", "lead"])
+        );
+
+        std::env::remove_var("IRONCLAW_TEST_WORKSPACE_TOKEN");
         std::env::remove_var("OPENAI_API_KEY");
     }
 }

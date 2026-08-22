@@ -48,6 +48,7 @@ impl ReconcilePlan {
         let mut actions = Vec::new();
         let desired_ids = desired
             .agents()
+            .into_iter()
             .filter(|record| record.manifest.enabled)
             .map(|record| record.manifest.id.clone())
             .collect::<BTreeSet<_>>();
