@@ -112,6 +112,16 @@ impl FarmTask {
     }
 }
 
+/// Runtime state of an agent's sandbox, from `/api/farm/vms`.
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct VmState {
+    pub agent_id: String,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub backend: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Capability {
     pub uri: String,

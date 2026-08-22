@@ -187,6 +187,36 @@ impl Workspace {
         });
     }
 
+    fn boot_agent(&self, id: String) {
+        let base = self.base_url.clone();
+        std::thread::spawn(move || {
+            let _ = client::boot_agent(&base, &id);
+        });
+    }
+
+    fn stop_agent(&self, id: String) {
+        let base = self.base_url.clone();
+        std::thread::spawn(move || {
+            let _ = client::stop_agent(&base, &id);
+        });
+    }
+
+    fn boot_all(&self, snap: &Snapshot) {
+        for agent in &snap.agents {
+            if !snap.is_running(&agent.id) {
+                self.boot_agent(agent.id.clone());
+            }
+        }
+    }
+
+    fn stop_all(&self, snap: &Snapshot) {
+        for agent in &snap.agents {
+            if snap.is_running(&agent.id) {
+                self.stop_agent(agent.id.clone());
+            }
+        }
+    }
+
     fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog_open = true;
         self.dialog_error = None;
@@ -551,6 +581,7 @@ impl Workspace {
             let selected =
                 self.selected_agent.as_deref() == Some(agent.id.as_str()) && self.view == View::Conversations;
             let busy = self.active_count(&agent.id, &snap.tasks) > 0;
+            let running = snap.is_running(&agent.id);
             people = people.child(
                 div()
                     .id(SharedElementId::agent(&agent.id))
@@ -593,8 +624,16 @@ impl Workspace {
                             .w(px(9.))
                             .h(px(9.))
                             .rounded_full()
-                            .bg(rgb(if busy { WARNING } else { ACCENT2 }))
-                            .shadow(glow(if busy { 0xe9b44caa } else { 0x55d6beaa }, 10.)),
+                            .bg(rgb(if running {
+                                ACCENT2
+                            } else if busy {
+                                WARNING
+                            } else {
+                                0x4a4f5e
+                            }))
+                            .when(running || busy, |e| {
+                                e.shadow(glow(if running { 0x55d6beaa } else { 0xe9b44caa }, 10.))
+                            }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.open_agent_chat(id.clone(), cx))),
             );
@@ -946,25 +985,186 @@ impl Workspace {
     }
 
     fn render_team(&self, snap: &Snapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let running_count = snap.agents.iter().filter(|a| snap.is_running(&a.id)).count();
+        let backend = if snap.backend.is_empty() {
+            "sandbox".to_string()
+        } else {
+            snap.backend.clone()
+        };
+
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .mb(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(format!("{running_count}/{} sandboxes running", snap.agents.len())),
+                    )
+                    .child(
+                        div()
+                            .px(px(9.))
+                            .py(px(4.))
+                            .rounded_full()
+                            .bg(rgba(0x8b7cf61f))
+                            .border_1()
+                            .border_color(rgba(0x8b7cf655))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(ACCENT))
+                            .child(format!("backend · {backend}")),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id(SharedElementId::simple("boot-all"))
+                            .px(px(14.))
+                            .py(px(9.))
+                            .rounded(px(9.))
+                            .bg(grad(0x9a8bff, 0x7a68f0, 160.))
+                            .text_color(rgb(0xffffff))
+                            .font_weight(FontWeight::BOLD)
+                            .shadow(glow(0x8b7cf655, 14.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(grad(0xa899ff, 0x8877ff, 160.)))
+                            .child("Boot all")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let snap = this.shared.lock().unwrap().clone();
+                                this.boot_all(&snap);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedElementId::simple("stop-all"))
+                            .px(px(14.))
+                            .py(px(9.))
+                            .rounded(px(9.))
+                            .bg(rgb(PANEL2))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x2c313d)))
+                            .child("Stop all")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let snap = this.shared.lock().unwrap().clone();
+                                this.stop_all(&snap);
+                                cx.notify();
+                            })),
+                    ),
+            );
+
         let mut grid = div().flex().flex_wrap().gap(px(12.));
         for agent in &snap.agents {
-            let id = agent.id.clone();
             let active = self.active_count(&agent.id, &snap.tasks);
+            let running = snap.is_running(&agent.id);
+            let boot_id = agent.id.clone();
+            let stop_id = agent.id.clone();
+            let open_id = agent.id.clone();
+
+            let status_pill = div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(9.))
+                .py(px(4.))
+                .rounded_full()
+                .bg(rgba(if running { 0x55d6be1f } else { 0x59617126 }))
+                .border_1()
+                .border_color(rgba(if running { 0x55d6be55 } else { 0x59617144 }))
+                .child(
+                    div()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(rgb(if running { ACCENT2 } else { MUTED })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if running { ACCENT2 } else { MUTED }))
+                        .child(if running { "running" } else { "idle" }),
+                );
+
+            let action = if running {
+                div()
+                    .id(SharedElementId::stop(&agent.id))
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(9.))
+                    .bg(rgba(0xf26b761c))
+                    .border_1()
+                    .border_color(rgba(0xf26b7655))
+                    .text_color(rgb(DANGER))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(0xf26b7626)))
+                    .child("Stop")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.stop_agent(stop_id.clone());
+                        cx.notify();
+                    }))
+            } else {
+                div()
+                    .id(SharedElementId::boot(&agent.id))
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(9.))
+                    .bg(grad(0x9a8bff, 0x7a68f0, 160.))
+                    .text_color(rgb(0xffffff))
+                    .text_xs()
+                    .font_weight(FontWeight::BOLD)
+                    .shadow(glow(0x8b7cf655, 12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(grad(0xa899ff, 0x8877ff, 160.)))
+                    .child("Boot")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.boot_agent(boot_id.clone());
+                        cx.notify();
+                    }))
+            };
+
             grid = grid.child(
                 div()
                     .id(SharedElementId::team(&agent.id))
                     .flex()
                     .flex_col()
-                    .w(px(224.))
+                    .w(px(236.))
                     .p(px(20.))
                     .rounded(px(14.))
                     .bg(grad(0x1f232d, 0x1a1e27, 160.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .cursor_pointer()
+                    .border_color(rgb(if running { ACCENT2 } else { BORDER }))
                     .shadow(shadow_soft())
-                    .hover(|s| s.border_color(rgb(ACCENT)).bg(grad(0x242a36, 0x1d2129, 160.)))
-                    .child(avatar(initials(&agent.name), true))
+                    .hover(|s| s.border_color(rgb(ACCENT)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(avatar(initials(&agent.name), true))
+                            .child(status_pill),
+                    )
                     .child(
                         div()
                             .mt(px(14.))
@@ -983,15 +1183,32 @@ impl Workspace {
                     .child(
                         div()
                             .mt(px(16.))
-                            .text_xs()
-                            .text_color(rgb(ACCENT2))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Open conversation →"),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_agent_chat(id.clone(), cx))),
+                            .flex()
+                            .gap(px(8.))
+                            .child(action)
+                            .child(
+                                div()
+                                    .id(SharedElementId::open(&agent.id))
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .rounded(px(9.))
+                                    .bg(rgb(PANEL2))
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(ACCENT2))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x2c313d)))
+                                    .child("Open →")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_agent_chat(open_id.clone(), cx)
+                                    })),
+                            ),
+                    ),
             );
         }
-        grid
+        div().flex().flex_col().child(toolbar).child(grid)
     }
 
     fn render_architecture(&self, snap: &Snapshot) -> impl IntoElement {
@@ -1510,6 +1727,15 @@ impl SharedElementId {
     }
     fn team(id: &str) -> gpui::ElementId {
         gpui::ElementId::Name(format!("team-{id}").into())
+    }
+    fn boot(id: &str) -> gpui::ElementId {
+        gpui::ElementId::Name(format!("boot-{id}").into())
+    }
+    fn stop(id: &str) -> gpui::ElementId {
+        gpui::ElementId::Name(format!("stop-{id}").into())
+    }
+    fn open(id: &str) -> gpui::ElementId {
+        gpui::ElementId::Name(format!("open-{id}").into())
     }
     fn task(id: &str) -> gpui::ElementId {
         gpui::ElementId::Name(format!("task-{id}").into())

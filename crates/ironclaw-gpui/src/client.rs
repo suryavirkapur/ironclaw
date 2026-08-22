@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde_json::json;
 
-use crate::models::{AgentSummary, Capability, FarmTask, Health};
+use crate::models::{AgentSummary, Capability, FarmTask, Health, VmState};
 
 /// Latest known state of the daemon, shared between the poll thread and the UI.
 #[derive(Clone, Debug, Default)]
@@ -16,8 +16,19 @@ pub struct Snapshot {
     pub health: Health,
     pub agents: Vec<AgentSummary>,
     pub tasks: Vec<FarmTask>,
+    pub vms: Vec<VmState>,
+    pub backend: String,
     pub error: Option<String>,
     pub polls: u64,
+}
+
+impl Snapshot {
+    /// Whether the given agent's sandbox is currently running.
+    pub fn is_running(&self, agent_id: &str) -> bool {
+        self.vms
+            .iter()
+            .any(|vm| vm.agent_id == agent_id && vm.running)
+    }
 }
 
 pub type Shared = Arc<Mutex<Snapshot>>;
@@ -41,14 +52,41 @@ fn poll_once(base_url: &str) -> Result<Snapshot> {
     let health: Health = get_json(&format!("{base_url}/api/health"))?;
     let agents: Vec<AgentSummary> = get_json(&format!("{base_url}/api/farm/agents"))?;
     let tasks: Vec<FarmTask> = get_json(&format!("{base_url}/api/farm/tasks"))?;
+    let vms: Vec<VmState> = get_json(&format!("{base_url}/api/farm/vms")).unwrap_or_default();
+    let backend = vms
+        .first()
+        .map(|vm| vm.backend.clone())
+        .unwrap_or_default();
     Ok(Snapshot {
         connected: true,
         health,
         agents,
         tasks,
+        vms,
+        backend,
         error: None,
         polls: 0,
     })
+}
+
+/// Boot (spawn) an agent's sandbox via `POST /api/farm/agents/{id}/boot`.
+pub fn boot_agent(base_url: &str, agent_id: &str) -> Result<()> {
+    let url = format!("{base_url}/api/farm/agents/{agent_id}/boot");
+    auth(ureq::post(&url))
+        .timeout(Duration::from_secs(20))
+        .call()
+        .map_err(|err| anyhow!("{err}"))?;
+    Ok(())
+}
+
+/// Stop an agent's sandbox via `POST /api/farm/agents/{id}/stop`.
+pub fn stop_agent(base_url: &str, agent_id: &str) -> Result<()> {
+    let url = format!("{base_url}/api/farm/agents/{agent_id}/stop");
+    auth(ureq::post(&url))
+        .timeout(Duration::from_secs(20))
+        .call()
+        .map_err(|err| anyhow!("{err}"))?;
+    Ok(())
 }
 
 /// Start polling `base_url` every two seconds, writing results into `shared`.
