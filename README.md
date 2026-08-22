@@ -166,6 +166,20 @@ the usual GPUI system libraries (`libxkbcommon`, `libwayland`, `fontconfig`,
 `freetype`, `dbus`, and X11/xcb dev packages) plus a Vulkan driver; on headless
 hosts Mesa's software renderer (`mesa-vulkan-drivers`, lavapipe) is enough.
 
+The **team** view has per-agent **Boot**/**Stop** controls plus **Boot all** /
+**Stop all**, a live `running/idle` status per agent, and a chip showing the
+active sandbox backend. These drive the control-plane endpoints
+`POST /api/farm/agents/{id}/boot`, `POST /api/farm/agents/{id}/stop`, and
+`GET /api/farm/vms`, which spawn and tear down each agent's sandbox through the
+`VmManager` seam.
+
+## Sandbox backends
+
+Agent isolation is pluggable behind the `VmManager` trait. Firecracker (Linux +
+KVM) is implemented today; **WSL2** (Windows) and **Apple Virtualization**
+(macOS) backends slot into the same seam, transport, and guest protocol. See
+[docs/sandboxing-backends.md](docs/sandboxing-backends.md) for the design.
+
 ## Tools
 
 Two layers.
