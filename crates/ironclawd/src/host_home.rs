@@ -25,10 +25,6 @@ log_level = "info"
 bind = "127.0.0.1"
 port = 9938
 
-[ui]
-mount = "/ui"
-index_file = "index.html"
-
 [storage]
 users_root = "users"
 
@@ -290,5 +286,15 @@ mod tests {
         assert!(config.firecracker.enabled);
         assert_eq!(config.storage.users_root, PathBuf::from("users"));
         assert_eq!(config.farm.manifests_dir, PathBuf::from("agents"));
+        assert!(config.ui.mount.is_empty());
+    }
+
+    #[test]
+    fn leftover_ui_section_still_parses() {
+        let mut toml = DEFAULT_IRONCLAWD_TOML.to_string();
+        toml.push_str("\n[ui]\nmount = \"/ui\"\nindex_file = \"index.html\"\n");
+        let config: HostConfig = toml::from_str(&toml).expect("legacy ui toml");
+        assert_eq!(config.ui.mount, "/ui");
+        assert_eq!(config.ui.index_file, "index.html");
     }
 }

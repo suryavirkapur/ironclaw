@@ -33,14 +33,15 @@ Build the VM image if necessary, then run the demo:
 ./scripts/run-engineering-team-demo.sh
 ```
 
-Open <http://127.0.0.1:9938/ui> for the team workspace. Relative kernel, rootfs, and
+Run `ironclaw-app` for the team workspace (it talks to the daemon at
+`http://127.0.0.1:9938` unless `IRONCLAW_URL` is set). Relative kernel, rootfs, and
 agent paths in `configs/ironclawd.engineering-team.telegram.toml` are resolved from
 `configs/`, so you can invoke `ironclawd --config` from any working directory.
 
-## Verified workspace screenshots
+## Workspace views
 
-The workspace has been exercised in Chromium against a live local daemon, including loading all
-five agents, selecting a valid A2A capability, submitting a task, and observing its completed state.
+`ironclaw-app` shows the same farm roster, delivery board, assignment form, and task
+inspector. Historical screenshots of those views:
 
 ![Five-agent team view](../../docs/screenshots/engineering-workspace-team.png)
 
@@ -50,9 +51,8 @@ five agents, selecting a valid A2A capability, submitting a task, and observing 
 
 ### Private conversations and A2A memory
 
-Select any agent in the sidebar to open its private MicroVM conversation. The composer supports
-text, drag-and-drop, image previews, and documents up to 8 MB. Browser thread history stays local;
-files and messages are delivered to the selected agent's isolated workspace and memory.
+Select any agent in the sidebar to open its private MicroVM conversation. Messages
+are delivered to the selected agent's isolated workspace and memory.
 
 To test consented memory sharing:
 

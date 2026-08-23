@@ -12,7 +12,7 @@ ironclaw is a sovereign, self-hosted ai agent platform built for absolute data o
 
 the system is split into:
 
-- the warden (host): rust daemon that boots firecracker microvms, handles auth and integrations, proxies traffic to the guest over vsock, and serves the embedded frontend.
+- the warden (host): rust daemon that boots firecracker microvms, handles auth and integrations, and proxies traffic to the guest over vsock.
 - the inmate (guest): rust agent runtime running inside the vm, executing tools and managing “sovereign memory” stored as human-readable markdown.
 
 key decisions in v0.1.0
@@ -21,7 +21,7 @@ key decisions in v0.1.0
 - host db is separate: host auth user db may exist, but is not shared with the vm.
 - per-agent default model selection: no auto-router as the default policy; each agent declares its preferred model provider.
 - config files use toml, not json.
-- tooling packaging: rust 1.92, node 24, rsbuild, cargo workspace layout with /ui.
+- tooling packaging: rust 1.92, cargo workspace layout with a gpui desktop app.
 
 ---
 
@@ -42,7 +42,7 @@ graph td
 
   vm_pool -->|vsock| ironclaw
   brain -->|persists| hoststorage[host fs ./data/users/<uid>/brain.ext4]
-  warden -->|serves| ui[/ui frontend (embedded static)]
+  warden -->|http websocket| app[ironclaw-app (gpui desktop)]
 
 ---
 
@@ -50,7 +50,7 @@ graph td
 
 3.1 ironclawd (host daemon / the warden)
 
-role: orchestrator + api gateway + integration router + ui server
+role: orchestrator + api gateway + integration router
 tech: rust (tokio, axum), firecracker control, vsock
 
 responsibilities
@@ -58,9 +58,9 @@ responsibilities
 - authenticate users (host-side store can be sqlite, but separate from the vm db).
 - boot stop microvms per user (fast startup, user-scoped resources).
 - proxy
-  - web ui websocket sessions to guest agent via vsock
+  - desktop workspace websocket sessions to guest agent via vsock
   - webhooks (telegram slack etc) to guest agent via vsock
-- serve frontend at http://localhost:<port>/ui from embedded static assets.
+- expose the host http api for ironclaw-app, the cli, and integrations.
 
 3.2 irowclaw (guest binary / the inmate runtime)
 
@@ -74,34 +74,32 @@ responsibilities
 - executes tools (shell files browser) inside vm.
 - runs scheduled jobs (cron-like autonomy).
 
-3.3 /ui (frontend)
+3.3 ironclaw-app (desktop workspace)
 
-framework: solid.js + typescript
-build: rsbuild
-serving: static assets embedded served by ironclawd at /ui
+framework: rust + gpui
+serving: native window; talks to ironclawd over http and websocket
 
 features
 
 - chat interface with streaming responses.
-- memory inspector: browse edit markdown files in /mnt/brain; view retrieval index status.
-- instruction mode: edit /mnt/brain/instructions/*.md
-- cron ui: create edit schedules (stored in toml + mirrored in sqlite)
+- farm roster, delivery board, and task inspector.
+- capability-aware assignment and teammate handoff.
 
 ---
 
 4. repository & build layout (cargo workspace)
 
-everything lives in one cargo workspace; node frontend is in /ui.
+everything lives in one cargo workspace; the desktop workspace is `crates/ironclaw-app`.
 
 repo/
   Cargo.toml
   crates/
     ironclawd/
+    ironclaw-app/
     irowclaw/
     common/
     tools/
     memory/
-  ui/
   assets/
   rootfs/
   kernels/
@@ -234,7 +232,6 @@ contains
 - firecracker paths (kernel, rootfs template)
 - per-user storage dirs
 - integration tokens
-- ui serving settings
 
 10.2 guest (irowclaw)
 
@@ -294,8 +291,7 @@ all messages include
 13. development configuration
 
 - rust: 1.92
-- node: 24+
-- frontend build: rsbuild; output embedded into ironclawd
+- desktop workspace: gpui (`ironclaw-app`)
 - database vm-only sqlite at /mnt/brain/db/ironclaw.db
 - host database may exist separately
 
@@ -317,13 +313,12 @@ phase b: host daemon (ironclawd)
 - axum api + websocket streaming
 - firecracker vm lifecycle + per-user disk mounts
 - vsock protocol bridge
-- embed serve /ui
+- http api for the desktop workspace
 
-phase c: ui (/ui)
+phase c: desktop workspace (ironclaw-app)
 
-- chat ui + streaming
-- memory inspector + instruction editor
-- cron job editor
+- gpui chat + streaming
+- farm roster, delivery board, task inspector
 
 ---
 

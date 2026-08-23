@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HostConfig {
     pub server: HostServerConfig,
+    /// Retained so existing `ironclawd.toml` files with `[ui]` still parse.
+    /// The host no longer serves a web frontend.
+    #[serde(default)]
     pub ui: HostUiConfig,
     pub firecracker: HostFirecrackerConfig,
     pub storage: HostStorageConfig,
@@ -88,9 +91,11 @@ pub struct HostServerConfig {
     pub port: u16,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct HostUiConfig {
+    #[serde(default)]
     pub mount: String,
+    #[serde(default)]
     pub index_file: String,
 }
 
@@ -294,10 +299,7 @@ impl HostConfig {
                 bind: "127.0.0.1".to_string(),
                 port: 9938,
             },
-            ui: HostUiConfig {
-                mount: "/ui".to_string(),
-                index_file: "index.html".to_string(),
-            },
+            ui: HostUiConfig::default(),
             firecracker: HostFirecrackerConfig {
                 enabled: false,
                 enable_network: default_firecracker_network(),

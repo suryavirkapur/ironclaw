@@ -6,10 +6,6 @@ log_level = "info"
 bind = "127.0.0.1"
 port = 9938
 
-[ui]
-mount = "/ui"
-index_file = "index.html"
-
 [storage]
 users_root = "../data/users"
 
