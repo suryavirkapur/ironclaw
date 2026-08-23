@@ -33,8 +33,9 @@ Build the VM image if necessary, then run the demo:
 ./scripts/run-engineering-team-demo.sh
 ```
 
-Run `ironclaw-app` for the team workspace (it talks to the daemon at
-`http://127.0.0.1:9938` unless `IRONCLAW_URL` is set). Relative kernel, rootfs, and
+Run `ironclaw-app` and pick the daemon config folder (the directory that contains
+`ironclawd.toml`). The app opens that folder and connects using `[server] bind` /
+`port` from the config, unless `IRONCLAW_URL` is set. Relative kernel, rootfs, and
 agent paths in `configs/ironclawd.engineering-team.telegram.toml` are resolved from
 `configs/`, so you can invoke `ironclawd --config` from any working directory.
 

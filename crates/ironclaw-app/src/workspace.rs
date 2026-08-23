@@ -12,9 +12,17 @@ use gpui::{
     Window,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
-actions!(workspace, [Quit, NewTask, AskTeammate]);
+actions!(
+    workspace,
+    [Quit, NewTask, AskTeammate, ChangeHome, RevealHome]
+);
+
+pub enum WorkspaceEvent {
+    ChangeHome,
+}
 
 enum Dialog {
     Hidden,
@@ -33,6 +41,7 @@ enum Dialog {
 }
 
 pub struct Workspace {
+    home: PathBuf,
     client: DaemonClient,
     view: WorkspaceView,
     health: String,
@@ -51,8 +60,10 @@ pub struct Workspace {
     focus_handle: FocusHandle,
 }
 
+impl gpui::EventEmitter<WorkspaceEvent> for Workspace {}
+
 impl Workspace {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn open(home: crate::home::OpenedHome, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| TextInput::new(cx, "Message agent…"));
         let request = cx.new(|cx| TextInput::new(cx, "Describe the outcome and constraints."));
         cx.subscribe(&composer, |this, _input, submitted: &Submitted, cx| {
@@ -60,7 +71,8 @@ impl Workspace {
         })
         .detach();
         let mut workspace = Self {
-            client: DaemonClient::from_env(),
+            home: home.folder.clone(),
+            client: DaemonClient::from_home(&home),
             view: WorkspaceView::Delivery,
             health: "connecting".into(),
             error: None,
@@ -516,6 +528,14 @@ impl Workspace {
         cx.quit();
     }
 
+    fn change_home(&mut self, _: &ChangeHome, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::ChangeHome);
+    }
+
+    fn reveal_home(&mut self, _: &RevealHome, _: &mut Window, cx: &mut Context<Self>) {
+        cx.open_with_system(&self.home);
+    }
+
     fn new_task_action(&mut self, _: &NewTask, _: &mut Window, cx: &mut Context<Self>) {
         self.open_new_task(cx);
     }
@@ -592,13 +612,42 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .child(div().text_xs().text_color(theme::muted()).child("IRONCLAW"))
-                            .child(div().text_color(theme::text()).child("Engineering")),
+                            .child(div().text_color(theme::text()).child("Engineering"))
+                            .child(
+                                div()
+                                    .id("reveal-home")
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        cx.open_with_system(&this.home);
+                                    }))
+                                    .child(self.home.display().to_string()),
+                            ),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme::accent_2())
-                            .child(self.health.clone()),
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::accent_2())
+                                    .child(self.health.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("change-home")
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.change_home(&ChangeHome, window, cx);
+                                    }))
+                                    .child("Change folder"),
+                            ),
                     ),
             )
             .child(
@@ -1567,6 +1616,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::new_task_action))
             .on_action(cx.listener(Self::ask_action))
+            .on_action(cx.listener(Self::change_home))
+            .on_action(cx.listener(Self::reveal_home))
             .child(
                 div()
                     .w(px(72.))
@@ -1630,5 +1681,9 @@ pub fn bind_workspace_keys(cx: &mut App) {
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-n", NewTask, Some("Workspace")),
         KeyBinding::new("ctrl-n", NewTask, Some("Workspace")),
+        KeyBinding::new("cmd-shift-o", ChangeHome, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-o", ChangeHome, Some("Workspace")),
+        KeyBinding::new("cmd-shift-f", RevealHome, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-f", RevealHome, Some("Workspace")),
     ]);
 }
