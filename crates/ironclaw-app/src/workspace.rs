@@ -6,7 +6,10 @@ use crate::model::{
 };
 use crate::text_input::{Submitted, TextInput};
 use crate::theme::{self, initials};
-use farm::{Capability, FarmTask, TaskState};
+use farm::{
+    Capability, CreateAgentSpec, FarmTask, MarketplaceCatalog, MarketplaceKind, TaskState,
+    HOW_TOOLS_LOAD,
+};
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, SharedString,
     Window,
@@ -17,8 +20,23 @@ use std::time::Duration;
 
 actions!(
     workspace,
-    [Quit, NewTask, AskTeammate, ChangeHome, RevealHome]
+    [
+        Quit,
+        NewTask,
+        AskTeammate,
+        CreateAgent,
+        ChangeHome,
+        RevealHome
+    ]
 );
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarketplaceFilter {
+    All,
+    Wasm,
+    Mcp,
+    A2a,
+}
 
 pub enum WorkspaceEvent {
     ChangeHome,
@@ -36,6 +54,11 @@ enum Dialog {
         capability_idx: usize,
         assignments: Vec<Capability>,
         note: String,
+        error: String,
+    },
+    CreateAgent {
+        reports_to_idx: usize,
+        selected_tools: Vec<String>,
         error: String,
     },
 }
@@ -56,6 +79,11 @@ pub struct Workspace {
     chat_ready: bool,
     composer: Entity<TextInput>,
     request: Entity<TextInput>,
+    agent_id: Entity<TextInput>,
+    agent_name: Entity<TextInput>,
+    agent_role: Entity<TextInput>,
+    catalog: MarketplaceCatalog,
+    marketplace_filter: MarketplaceFilter,
     dialog: Dialog,
     focus_handle: FocusHandle,
 }
@@ -66,6 +94,9 @@ impl Workspace {
     pub fn open(home: crate::home::OpenedHome, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| TextInput::new(cx, "Message agent…"));
         let request = cx.new(|cx| TextInput::new(cx, "Describe the outcome and constraints."));
+        let agent_id = cx.new(|cx| TextInput::new(cx, "agent-id"));
+        let agent_name = cx.new(|cx| TextInput::new(cx, "Display name"));
+        let agent_role = cx.new(|cx| TextInput::new(cx, "Role"));
         cx.subscribe(&composer, |this, _input, submitted: &Submitted, cx| {
             this.send_chat(submitted.0.clone(), cx);
         })
@@ -86,11 +117,20 @@ impl Workspace {
             chat_ready: false,
             composer,
             request,
+            agent_id,
+            agent_name,
+            agent_role,
+            catalog: MarketplaceCatalog {
+                how_tools_load: HOW_TOOLS_LOAD.to_string(),
+                entries: Vec::new(),
+            },
+            marketplace_filter: MarketplaceFilter::All,
             dialog: Dialog::Hidden,
             focus_handle: cx.focus_handle(),
         };
         workspace.spawn_loops(cx);
         workspace.refresh(cx);
+        workspace.load_marketplace(cx);
         workspace
     }
 
@@ -217,6 +257,9 @@ impl Workspace {
         }
         self.view = view;
         self.dialog = Dialog::Hidden;
+        if view == WorkspaceView::Marketplace {
+            self.load_marketplace(cx);
+        }
         cx.notify();
     }
 
@@ -544,6 +587,152 @@ impl Workspace {
         self.open_ask_teammate(cx);
     }
 
+    fn create_agent_action(&mut self, _: &CreateAgent, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_create_agent(cx);
+    }
+
+    fn load_marketplace(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result: Result<MarketplaceCatalog, String> = cx
+                .background_executor()
+                .spawn(async move { client.marketplace() })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(catalog) => this.catalog = catalog,
+                    Err(err) => this.error = Some(err),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_create_agent(&mut self, cx: &mut Context<Self>) {
+        if self.catalog.entries.is_empty() {
+            self.load_marketplace(cx);
+        }
+        self.agent_id.update(cx, |input, cx| input.clear(cx));
+        self.agent_name.update(cx, |input, cx| input.clear(cx));
+        self.agent_role.update(cx, |input, cx| input.clear(cx));
+        self.request.update(cx, |input, cx| input.clear(cx));
+        self.dialog = Dialog::CreateAgent {
+            reports_to_idx: 0,
+            selected_tools: Vec::new(),
+            error: String::new(),
+        };
+        cx.notify();
+    }
+
+    fn submit_create_agent(&mut self, cx: &mut Context<Self>) {
+        let Dialog::CreateAgent {
+            reports_to_idx,
+            selected_tools,
+            ..
+        } = &self.dialog
+        else {
+            return;
+        };
+        let id = self.agent_id.read(cx).text();
+        let name = self.agent_name.read(cx).text();
+        let role = self.agent_role.read(cx).text();
+        if id.trim().is_empty() || name.trim().is_empty() || role.trim().is_empty() {
+            if let Dialog::CreateAgent { error, .. } = &mut self.dialog {
+                *error = "Agent id, name, and role are required.".into();
+            }
+            cx.notify();
+            return;
+        }
+        let reports_to = if *reports_to_idx == 0 {
+            None
+        } else {
+            self.agents
+                .get(*reports_to_idx - 1)
+                .map(|agent| agent.id.clone())
+        };
+        let spec = CreateAgentSpec {
+            id: id.trim().to_string(),
+            name: name.trim().to_string(),
+            role: role.trim().to_string(),
+            reports_to,
+            skill_id: None,
+            skill_description: {
+                let text = self.request.read(cx).text();
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            },
+            tools: selected_tools.clone(),
+        };
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result: Result<FarmAgent, String> = cx
+                .background_executor()
+                .spawn(async move { client.create_agent(&spec) })
+                .await;
+            this.update(cx, |this, cx| match result {
+                Ok(agent) => {
+                    this.dialog = Dialog::Hidden;
+                    this.selected_agent_id = Some(agent.id);
+                    this.view = WorkspaceView::Marketplace;
+                    this.refresh(cx);
+                    this.load_marketplace(cx);
+                }
+                Err(err) => {
+                    if let Dialog::CreateAgent { error, .. } = &mut this.dialog {
+                        *error = err;
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn install_marketplace_tool(&mut self, tool_id: String, cx: &mut Context<Self>) {
+        let Some(agent_id) = self
+            .selected_agent_id
+            .clone()
+            .or_else(|| self.agents.first().map(|agent| agent.id.clone()))
+        else {
+            self.error = Some("Create or select an agent before installing a tool.".into());
+            cx.notify();
+            return;
+        };
+        self.selected_agent_id = Some(agent_id.clone());
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result: Result<MarketplaceCatalog, String> = cx
+                .background_executor()
+                .spawn(async move { client.install_tool(&agent_id, &tool_id) })
+                .await;
+            this.update(cx, |this, cx| match result {
+                Ok(catalog) => {
+                    this.catalog = catalog;
+                    this.error = None;
+                    this.refresh(cx);
+                }
+                Err(err) => {
+                    this.error = Some(err);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn choose_install_target(&mut self, agent_id: String, cx: &mut Context<Self>) {
+        self.selected_agent_id = Some(agent_id);
+        cx.notify();
+    }
+
     fn channel_button(
         &self,
         id: &'static str,
@@ -682,6 +871,12 @@ impl Workspace {
                         "# architecture",
                         WorkspaceView::Architecture,
                         cx,
+                    ))
+                    .child(self.channel_button(
+                        "channel-marketplace",
+                        "# marketplace",
+                        WorkspaceView::Marketplace,
+                        cx,
                     )),
             )
             .child(
@@ -774,6 +969,8 @@ impl Workspace {
             self.view.description().to_string()
         };
         let chat_actions = self.view == WorkspaceView::Chat && self.selected_agent().is_some();
+        let marketplace_actions =
+            matches!(self.view, WorkspaceView::Marketplace | WorkspaceView::Team);
         div()
             .px_5()
             .h(px(77.))
@@ -802,6 +999,15 @@ impl Workspace {
                 div()
                     .flex()
                     .gap_2()
+                    .when(marketplace_actions, |el| {
+                        el.child(self.action_button(
+                            "create-agent",
+                            "Create agent",
+                            self.view == WorkspaceView::Marketplace,
+                            cx,
+                            |this, cx| this.open_create_agent(cx),
+                        ))
+                    })
                     .when(chat_actions, |el| {
                         el.child(self.action_button(
                             "ask-teammate",
@@ -815,7 +1021,7 @@ impl Workspace {
                         el.child(self.action_button(
                             "new-task",
                             "New task",
-                            true,
+                            self.view != WorkspaceView::Marketplace,
                             cx,
                             |this, cx| this.open_new_task(cx),
                         ))
@@ -886,6 +1092,7 @@ impl Workspace {
                 WorkspaceView::Team => self.render_team(cx).into_any_element(),
                 WorkspaceView::Architecture => self.render_architecture().into_any_element(),
                 WorkspaceView::Chat => self.render_chat(cx).into_any_element(),
+                WorkspaceView::Marketplace => self.render_marketplace(cx).into_any_element(),
             })
     }
 
@@ -1174,6 +1381,238 @@ impl Workspace {
                     )),
             )
             .into_any_element()
+    }
+
+    fn render_marketplace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let filter = self.marketplace_filter;
+        let selected = self.selected_agent_id.clone();
+        let agents = self.agents.clone();
+        let entries: Vec<_> = self
+            .catalog
+            .entries
+            .iter()
+            .filter(|entry| match filter {
+                MarketplaceFilter::All => true,
+                MarketplaceFilter::Wasm => entry.kind == MarketplaceKind::Wasm,
+                MarketplaceFilter::Mcp => entry.kind == MarketplaceKind::Mcp,
+                MarketplaceFilter::A2a => entry.kind == MarketplaceKind::A2a,
+            })
+            .cloned()
+            .collect();
+        let how = if self.catalog.how_tools_load.is_empty() {
+            HOW_TOOLS_LOAD.to_string()
+        } else {
+            self.catalog.how_tools_load.clone()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme::accent_2())
+                    .bg(theme::panel())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_color(theme::text()).child("How tools load"))
+                    .children(how.lines().map(|line| {
+                        div()
+                            .text_sm()
+                            .text_color(theme::muted())
+                            .child(line.to_string())
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(self.filter_chip("filter-all", "All", MarketplaceFilter::All, cx))
+                    .child(self.filter_chip("filter-wasm", "Wasm", MarketplaceFilter::Wasm, cx))
+                    .child(self.filter_chip("filter-mcp", "MCP", MarketplaceFilter::Mcp, cx))
+                    .child(self.filter_chip("filter-a2a", "A2A", MarketplaceFilter::A2a, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child("Install onto"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(agents.into_iter().map(|agent| {
+                                let active = selected.as_deref() == Some(agent.id.as_str());
+                                let agent_id = agent.id.clone();
+                                div()
+                                    .id(SharedString::from(format!("install-target-{}", agent.id)))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(if active {
+                                        theme::accent()
+                                    } else {
+                                        theme::border()
+                                    })
+                                    .bg(if active {
+                                        theme::panel_2()
+                                    } else {
+                                        theme::panel()
+                                    })
+                                    .text_xs()
+                                    .text_color(theme::text())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.choose_install_target(agent_id.clone(), cx)
+                                    }))
+                                    .child(format!("{} · {}", agent.name, agent.role))
+                            })),
+                    ),
+            )
+            .when(entries.is_empty(), |el| {
+                el.child(
+                    div()
+                        .p_8()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme::border())
+                        .text_color(theme::muted())
+                        .child("No marketplace listings match this filter."),
+                )
+            })
+            .children(entries.into_iter().map(|entry| {
+                let installed = selected
+                    .as_ref()
+                    .map(|id| entry.installed_on.iter().any(|agent| agent == id))
+                    .unwrap_or(false);
+                let tool_id = entry.id.clone();
+                div()
+                    .id(SharedString::from(format!("tool-{}", entry.id)))
+                    .p_4()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::panel())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme::accent_2())
+                                            .child(kind_label(entry.kind)),
+                                    )
+                                    .child(
+                                        div().text_color(theme::text()).child(entry.title.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("install-{}", entry.id)))
+                                    .px_3()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(if installed {
+                                        theme::panel_2()
+                                    } else {
+                                        theme::accent()
+                                    })
+                                    .text_color(theme::text())
+                                    .text_xs()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.install_marketplace_tool(tool_id.clone(), cx)
+                                    }))
+                                    .child(if installed { "Installed" } else { "Install" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::muted())
+                            .child(entry.summary.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted())
+                            .child(format!("Loads as {}", entry.loads_as)),
+                    )
+                    .child(div().text_xs().text_color(theme::muted()).child(
+                        if entry.installed_on.is_empty() {
+                            "Not installed on any agent yet".into()
+                        } else {
+                            format!("Installed on {}", entry.installed_on.join(", "))
+                        },
+                    ))
+            }))
+    }
+
+    fn filter_chip(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        filter: MarketplaceFilter,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.marketplace_filter == filter;
+        div()
+            .id(id)
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(if active {
+                theme::accent()
+            } else {
+                theme::panel_2()
+            })
+            .text_color(theme::text())
+            .text_xs()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.marketplace_filter = filter;
+                cx.notify();
+            }))
+            .child(label)
+    }
+
+    fn labeled_field(&self, label: &'static str, input: Entity<TextInput>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_xs().text_color(theme::muted()).child(label))
+            .child(
+                div()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme::border())
+                    .bg(theme::bg())
+                    .child(input),
+            )
     }
 
     fn render_inspector(&self) -> impl IntoElement {
@@ -1476,6 +1915,108 @@ impl Workspace {
                     this.submit_ask_teammate(cx)
                 })
             }
+            Dialog::CreateAgent {
+                reports_to_idx,
+                selected_tools,
+                error,
+            } => {
+                let reports_to_idx = *reports_to_idx;
+                let selected_tools = selected_tools.clone();
+                let reports_to_label = if reports_to_idx == 0 {
+                    "No manager".into()
+                } else {
+                    self.agents
+                        .get(reports_to_idx - 1)
+                        .map(|agent| format!("{} — {}", agent.name, agent.role))
+                        .unwrap_or_else(|| "No manager".into())
+                };
+                let listings = self.catalog.entries.clone();
+                let reports_row = self.cycle_row(
+                    "create-reports-to",
+                    "Reports to",
+                    reports_to_label,
+                    cx,
+                    |this, next, _cx| {
+                        if let Dialog::CreateAgent { reports_to_idx, .. } = &mut this.dialog {
+                            let count = this.agents.len() + 1;
+                            *reports_to_idx = if next {
+                                (*reports_to_idx + 1) % count
+                            } else {
+                                (*reports_to_idx + count - 1) % count
+                            };
+                        }
+                    },
+                );
+                let tool_chips =
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(listings.into_iter().map(|entry| {
+                            let selected = selected_tools.iter().any(|id| id == &entry.id);
+                            let tool_id = entry.id.clone();
+                            div()
+                                .id(SharedString::from(format!("create-tool-{}", entry.id)))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .border_1()
+                                .border_color(if selected {
+                                    theme::accent()
+                                } else {
+                                    theme::border()
+                                })
+                                .bg(if selected {
+                                    theme::panel_2()
+                                } else {
+                                    theme::bg()
+                                })
+                                .text_xs()
+                                .text_color(theme::text())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Dialog::CreateAgent { selected_tools, .. } =
+                                        &mut this.dialog
+                                    {
+                                        if let Some(index) =
+                                            selected_tools.iter().position(|id| id == &tool_id)
+                                        {
+                                            selected_tools.remove(index);
+                                        } else {
+                                            selected_tools.push(tool_id.clone());
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(format!("{} · {}", kind_label(entry.kind), entry.title))
+                        }));
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(self.labeled_field("Agent id", self.agent_id.clone()))
+                    .child(self.labeled_field("Name", self.agent_name.clone()))
+                    .child(self.labeled_field("Role", self.agent_role.clone()))
+                    .child(reports_row)
+                    .child(self.labeled_field("Skill description (optional)", self.request.clone()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .child("Attach marketplace tools"),
+                            )
+                            .child(tool_chips),
+                    )
+                    .into_any_element();
+                self.modal("Create agent", error.clone(), cx, body, |this, cx| {
+                    this.submit_create_agent(cx)
+                })
+            }
         }
     }
 
@@ -1602,6 +2143,14 @@ impl Workspace {
     }
 }
 
+fn kind_label(kind: MarketplaceKind) -> &'static str {
+    match kind {
+        MarketplaceKind::Wasm => "Wasm",
+        MarketplaceKind::Mcp => "MCP",
+        MarketplaceKind::A2a => "A2A",
+    }
+}
+
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -1616,6 +2165,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quit))
             .on_action(cx.listener(Self::new_task_action))
             .on_action(cx.listener(Self::ask_action))
+            .on_action(cx.listener(Self::create_agent_action))
             .on_action(cx.listener(Self::change_home))
             .on_action(cx.listener(Self::reveal_home))
             .child(
@@ -1681,6 +2231,8 @@ pub fn bind_workspace_keys(cx: &mut App) {
         KeyBinding::new("ctrl-q", Quit, None),
         KeyBinding::new("cmd-n", NewTask, Some("Workspace")),
         KeyBinding::new("ctrl-n", NewTask, Some("Workspace")),
+        KeyBinding::new("cmd-shift-n", CreateAgent, Some("Workspace")),
+        KeyBinding::new("ctrl-shift-n", CreateAgent, Some("Workspace")),
         KeyBinding::new("cmd-shift-o", ChangeHome, Some("Workspace")),
         KeyBinding::new("ctrl-shift-o", ChangeHome, Some("Workspace")),
         KeyBinding::new("cmd-shift-f", RevealHome, Some("Workspace")),
