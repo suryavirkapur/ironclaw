@@ -1,14 +1,14 @@
 # Engineering workspace direction
 
 The custom workspace should be a collaboration product over the farm control plane, not another
-agent runtime. Telegram and the web workspace must produce the same durable tasks and observe the
+agent runtime. Telegram and the desktop workspace must produce the same durable tasks and observe the
 same results.
 
 ## Current slice
 
-`/ui` now provides a live roster, delivery board, task inspector, capability-aware assignment form,
-and architecture view. It reads and writes the existing `/api/farm/*` endpoints; no duplicate task
-state exists in the browser.
+`ironclaw-app` is a GPUI desktop workspace with a live roster, delivery board, task inspector,
+capability-aware assignment form, and architecture view. It reads and writes the existing
+`/api/farm/*` endpoints; no duplicate task state exists in the client.
 
 ## Proposed collaboration model
 

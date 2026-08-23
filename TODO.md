@@ -3,7 +3,8 @@
 ## Done
 
 - IronClaw scaffold created as a workspace with crates:
-  - `ironclawd` (host daemon: Axum server, WebSocket handler, serves `/ui` from `include_dir`)
+  - `ironclawd` (host daemon: Axum server, WebSocket handler, headless HTTP API)
+  - `ironclaw-app` (GPUI desktop workspace talking to the daemon)
   - `irowclaw` (guest runtime stub with local transport hook)
   - `common` (config, protocol types, transport, VM manager interface)
   - `memory` (SQLite helpers, chunking, vector extension loader stub)
