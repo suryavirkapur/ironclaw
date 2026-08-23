@@ -9,6 +9,28 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
+    pub fn new(base_url: impl Into<String>, token: Option<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            token,
+        }
+    }
+
+    pub fn from_home(home: &crate::home::OpenedHome) -> Self {
+        let token = std::env::var("IRONCLAW_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if std::env::var("IRONCLAW_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            return Self::from_env();
+        }
+        Self::new(home.daemon_url.clone(), token)
+    }
+
     pub fn from_env() -> Self {
         let base_url = std::env::var("IRONCLAW_URL")
             .ok()
