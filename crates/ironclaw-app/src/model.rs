@@ -61,6 +61,10 @@ pub struct FarmAgent {
     pub mcp_servers: usize,
     #[serde(default)]
     pub a2a_skills: usize,
+    #[serde(default)]
+    pub marketplace_allow: Vec<String>,
+    #[serde(default)]
+    pub marketplace_deny: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -239,6 +243,8 @@ mod tests {
             wasm_tools: 0,
             mcp_servers: 0,
             a2a_skills: 1,
+            marketplace_allow: Vec::new(),
+            marketplace_deny: Vec::new(),
         }];
         let tasks = vec![
             sample_task(TaskState::Working, "nora"),

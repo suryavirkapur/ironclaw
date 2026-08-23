@@ -184,6 +184,37 @@ fn encode_path(value: &str) -> String {
 }
 
 #[cfg(test)]
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut chunk).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(header_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let body_start = header_end + 4;
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        (name.eq_ignore_ascii_case("content-length"))
+                            .then(|| value.trim().parse::<usize>().unwrap_or(0))
+                    })
+                })
+                .unwrap_or(0);
+            if buf.len() >= body_start + content_length {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -246,9 +277,7 @@ mod tests {
                 "/api/farm/agents/qa/tools",
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut buf = [0u8; 2048];
-                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]);
+                let request = read_http_request(&mut stream);
                 assert!(request.contains(expected), "{request}");
                 let body = match expected {
                     "/api/farm/marketplace" => {

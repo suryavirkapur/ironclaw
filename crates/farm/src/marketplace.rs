@@ -29,9 +29,34 @@ WasmExecutor maps each `[[wasm_tools]]` row to a module under the agent's tools 
 (no WASI, no ambient network). MCP and A2A never enter the guest — the host brokers them \
 after the registry check.\n\
 4. Installing from this marketplace rewrites the manifest and reloads the registry. The agent \
-picks up the new catalog on the next VM start.\n\n\
+picks up the new catalog on the next VM start.\n\
+5. Restricted listings (GitHub MCP, allowlisted fetch, observability MCP) install only when the \
+agent's `[marketplace].allow` list includes them. `[marketplace].deny` and the farm denylist \
+always block.\n\n\
 Guest builtins such as file_read or browser come from guest config flags, not from the farm \
 catalog. Farm-local work is Wasm-only.";
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketplaceAccess {
+    #[default]
+    Open,
+    Restricted,
+    Blocked,
+}
+
+/// Farm-wide marketplace allow/deny overlay.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MarketplaceGate {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+}
+
+impl MarketplaceGate {
+    pub fn from_lists(allow: Vec<String>, deny: Vec<String>) -> Self {
+        Self { allow, deny }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +75,10 @@ pub struct MarketplaceEntry {
     pub publisher: String,
     pub loads_as: String,
     pub installed_on: Vec<String>,
+    #[serde(default)]
+    pub access: MarketplaceAccess,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -96,6 +125,7 @@ struct BuiltinTool {
     loads_as: &'static str,
     wasm: Option<WasmTool>,
     mcp: Option<McpServerAccess>,
+    access: MarketplaceAccess,
 }
 
 fn object_schema() -> serde_json::Value {
@@ -153,6 +183,7 @@ fn builtins() -> Vec<BuiltinTool> {
                 CapabilityEffect::Read,
             )),
             mcp: None,
+            access: MarketplaceAccess::Open,
         },
         BuiltinTool {
             id: "wasm.diff_review",
@@ -168,6 +199,7 @@ fn builtins() -> Vec<BuiltinTool> {
                 CapabilityEffect::Read,
             )),
             mcp: None,
+            access: MarketplaceAccess::Open,
         },
         BuiltinTool {
             id: "wasm.test_runner",
@@ -183,6 +215,7 @@ fn builtins() -> Vec<BuiltinTool> {
                 CapabilityEffect::Read,
             )),
             mcp: None,
+            access: MarketplaceAccess::Open,
         },
         BuiltinTool {
             id: "wasm.web_fetch",
@@ -198,6 +231,7 @@ fn builtins() -> Vec<BuiltinTool> {
                 CapabilityEffect::External,
             )),
             mcp: None,
+            access: MarketplaceAccess::Restricted,
         },
         BuiltinTool {
             id: "mcp.observability",
@@ -215,6 +249,7 @@ fn builtins() -> Vec<BuiltinTool> {
                 &["service-catalog", "runbooks"],
                 &["observability:read"],
             )),
+            access: MarketplaceAccess::Restricted,
         },
         BuiltinTool {
             id: "mcp.github",
@@ -232,13 +267,19 @@ fn builtins() -> Vec<BuiltinTool> {
                 &["repo-catalog"],
                 &["github:read"],
             )),
+            access: MarketplaceAccess::Restricted,
         },
     ]
 }
 
 pub fn catalog(registry: &FarmRegistry) -> MarketplaceCatalog {
+    catalog_with(registry, &MarketplaceGate::default())
+}
+
+pub fn catalog_with(registry: &FarmRegistry, gate: &MarketplaceGate) -> MarketplaceCatalog {
     let mut entries = Vec::new();
     for builtin in builtins() {
+        let (access, blocked_reason) = listing_access(builtin.id, builtin.access, gate);
         entries.push(MarketplaceEntry {
             id: builtin.id.to_string(),
             kind: builtin.kind,
@@ -247,11 +288,14 @@ pub fn catalog(registry: &FarmRegistry) -> MarketplaceCatalog {
             publisher: builtin.publisher.to_string(),
             loads_as: builtin.loads_as.to_string(),
             installed_on: agents_with_builtin(registry, &builtin),
+            access,
+            blocked_reason,
         });
     }
     for record in registry.agents() {
         for skill in &record.manifest.skills {
             let id = format!("a2a.{}.{}", record.manifest.id, skill.id);
+            let (access, blocked_reason) = listing_access(&id, MarketplaceAccess::Open, gate);
             let installed_on = registry
                 .agents()
                 .filter(|candidate| {
@@ -275,6 +319,8 @@ pub fn catalog(registry: &FarmRegistry) -> MarketplaceCatalog {
                     record.manifest.id, skill.id
                 ),
                 installed_on,
+                access,
+                blocked_reason,
             });
         }
     }
@@ -370,6 +416,7 @@ pub fn new_agent(spec: &CreateAgentSpec) -> Result<AgentManifest, MarketplaceErr
             data_classes: Vec::new(),
             requires_approval: false,
         }],
+        marketplace: Default::default(),
     })
 }
 
@@ -378,8 +425,17 @@ pub fn install(
     agent_id: &str,
     listing_id: &str,
 ) -> Result<Vec<AgentManifest>, MarketplaceError> {
+    install_with(registry, agent_id, listing_id, &MarketplaceGate::default())
+}
+
+pub fn install_with(
+    registry: &FarmRegistry,
+    agent_id: &str,
+    listing_id: &str,
+    gate: &MarketplaceGate,
+) -> Result<Vec<AgentManifest>, MarketplaceError> {
     let mut manifests = snapshot(registry);
-    apply_listing(&mut manifests, agent_id, listing_id)?;
+    apply_listing(&mut manifests, agent_id, listing_id, gate)?;
     FarmRegistry::from_manifests(manifests.values().cloned().collect())?;
     Ok(changed(registry, &manifests))
 }
@@ -388,6 +444,14 @@ pub fn create_agent(
     registry: &FarmRegistry,
     spec: CreateAgentSpec,
 ) -> Result<Vec<AgentManifest>, MarketplaceError> {
+    create_agent_with(registry, spec, &MarketplaceGate::default())
+}
+
+pub fn create_agent_with(
+    registry: &FarmRegistry,
+    spec: CreateAgentSpec,
+    gate: &MarketplaceGate,
+) -> Result<Vec<AgentManifest>, MarketplaceError> {
     let mut manifests = snapshot(registry);
     if manifests.contains_key(spec.id.trim()) {
         return Err(MarketplaceError::msg(format!(
@@ -395,7 +459,10 @@ pub fn create_agent(
             spec.id.trim()
         )));
     }
-    let created = new_agent(&spec)?;
+    let mut created = new_agent(&spec)?;
+    created.marketplace.allow.extend(spec.tools.iter().cloned());
+    created.marketplace.allow.sort();
+    created.marketplace.allow.dedup();
     if let Some(manager_id) = created.reports_to.clone() {
         let manager = manifests.get_mut(&manager_id).ok_or_else(|| {
             MarketplaceError::msg(format!("reports_to agent {manager_id} does not exist"))
@@ -407,7 +474,7 @@ pub fn create_agent(
     let agent_id = created.id.clone();
     manifests.insert(agent_id.clone(), created);
     for tool_id in &spec.tools {
-        apply_listing(&mut manifests, &agent_id, tool_id)?;
+        apply_listing(&mut manifests, &agent_id, tool_id, gate)?;
     }
     FarmRegistry::from_manifests(manifests.values().cloned().collect())?;
     Ok(changed(registry, &manifests))
@@ -436,13 +503,71 @@ fn changed(
         .collect()
 }
 
+fn listing_access(
+    listing_id: &str,
+    intrinsic: MarketplaceAccess,
+    gate: &MarketplaceGate,
+) -> (MarketplaceAccess, Option<String>) {
+    if gate.deny.iter().any(|id| id == listing_id) {
+        return (
+            MarketplaceAccess::Blocked,
+            Some("blocked by the farm marketplace denylist".into()),
+        );
+    }
+    if !gate.allow.is_empty() && !gate.allow.iter().any(|id| id == listing_id) {
+        return (
+            MarketplaceAccess::Blocked,
+            Some("not on the farm marketplace allowlist".into()),
+        );
+    }
+    if intrinsic == MarketplaceAccess::Restricted {
+        return (MarketplaceAccess::Restricted, None);
+    }
+    (MarketplaceAccess::Open, None)
+}
+
+pub fn agent_can_install(
+    agent: &AgentManifest,
+    listing_id: &str,
+    access: MarketplaceAccess,
+) -> Result<(), String> {
+    if access == MarketplaceAccess::Blocked {
+        return Err(format!("{listing_id} is blocked for this farm"));
+    }
+    if agent.marketplace.deny.iter().any(|id| id == listing_id) {
+        return Err(format!(
+            "{listing_id} is on agent {} marketplace deny list",
+            agent.id
+        ));
+    }
+    if access == MarketplaceAccess::Restricted
+        && !agent.marketplace.allow.iter().any(|id| id == listing_id)
+    {
+        return Err(format!(
+            "{listing_id} is restricted; add it to agent {} marketplace allow list",
+            agent.id
+        ));
+    }
+    Ok(())
+}
+
 fn apply_listing(
     manifests: &mut BTreeMap<String, AgentManifest>,
     agent_id: &str,
     listing_id: &str,
+    gate: &MarketplaceGate,
 ) -> Result<(), MarketplaceError> {
-    if manifests.get(agent_id).is_none() {
+    let Some(agent) = manifests.get(agent_id) else {
         return Err(MarketplaceError::msg(format!("unknown agent: {agent_id}")));
+    };
+    let intrinsic = builtins()
+        .iter()
+        .find(|item| item.id == listing_id)
+        .map(|item| item.access)
+        .unwrap_or(MarketplaceAccess::Open);
+    let (access, reason) = listing_access(listing_id, intrinsic, gate);
+    if let Err(message) = agent_can_install(agent, listing_id, access) {
+        return Err(MarketplaceError::msg(reason.unwrap_or(message)));
     }
     if let Some(builtin) = builtins().into_iter().find(|item| item.id == listing_id) {
         let agent = manifests.get_mut(agent_id).expect("agent exists");
@@ -566,10 +691,18 @@ description = "Write code"
     fn catalog_includes_builtins_and_a2a_skills() {
         let catalog = catalog(&team());
         assert!(catalog.how_tools_load.contains("FarmRegistry"));
-        assert!(catalog
+        let github = catalog
             .entries
             .iter()
-            .any(|entry| entry.id == "wasm.cluster_logs"));
+            .find(|entry| entry.id == "mcp.github")
+            .unwrap();
+        assert_eq!(github.access, MarketplaceAccess::Restricted);
+        let logs = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id == "wasm.cluster_logs")
+            .unwrap();
+        assert_eq!(logs.access, MarketplaceAccess::Open);
         assert!(catalog
             .entries
             .iter()
@@ -585,11 +718,56 @@ description = "Write code"
             .wasm_tools
             .iter()
             .any(|tool| tool.id == "cluster_logs"));
+    }
 
+    #[test]
+    fn restricted_listing_requires_allow_list() {
+        let registry = team();
+        let err = install(&registry, "worker", "mcp.github").unwrap_err();
+        assert!(err.to_string().contains("restricted"));
+
+        let mut manifests: Vec<_> = registry
+            .agents()
+            .map(|record| record.manifest.clone())
+            .collect();
+        let worker = manifests
+            .iter_mut()
+            .find(|manifest| manifest.id == "worker")
+            .unwrap();
+        worker.marketplace.allow.push("mcp.github".into());
+        worker.marketplace.allow.push("mcp.observability".into());
+        let registry = FarmRegistry::from_manifests(manifests).unwrap();
+        let changed = install(&registry, "worker", "mcp.github").unwrap();
+        assert!(changed[0].mcp.iter().any(|server| server.id == "github"));
         let changed = install(&registry, "worker", "mcp.observability").unwrap();
         assert!(changed[0].mcp.iter().any(|server| {
             server.id == "observability" && server.tools.iter().any(|tool| tool == "logs.search")
         }));
+    }
+
+    #[test]
+    fn deny_list_and_farm_gate_block_install() {
+        let mut manifests: Vec<_> = team()
+            .agents()
+            .map(|record| record.manifest.clone())
+            .collect();
+        let worker = manifests
+            .iter_mut()
+            .find(|manifest| manifest.id == "worker")
+            .unwrap();
+        worker.marketplace.deny.push("wasm.cluster_logs".into());
+        let registry = FarmRegistry::from_manifests(manifests).unwrap();
+        let err = install(&registry, "worker", "wasm.cluster_logs").unwrap_err();
+        assert!(err.to_string().contains("deny"));
+
+        let err = install_with(
+            &team(),
+            "worker",
+            "wasm.test_runner",
+            &MarketplaceGate::from_lists(Vec::new(), vec!["wasm.test_runner".into()]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("denylist"));
     }
 
     #[test]
@@ -657,5 +835,37 @@ description = "Write code"
             .find(|manifest| manifest.id == "worker")
             .unwrap();
         assert!(worker.a2a.accept_from.iter().any(|id| id == "qa"));
+    }
+
+    #[test]
+    fn create_agent_auto_allows_restricted_tools() {
+        let created = create_agent(
+            &team(),
+            CreateAgentSpec {
+                id: "qa".into(),
+                name: "Quinn".into(),
+                role: "QA Engineer".into(),
+                reports_to: None,
+                skill_id: None,
+                skill_description: None,
+                tools: vec!["mcp.github".into()],
+            },
+        )
+        .unwrap();
+        let qa = created.iter().find(|manifest| manifest.id == "qa").unwrap();
+        assert!(qa.marketplace.allow.iter().any(|id| id == "mcp.github"));
+        assert!(qa.mcp.iter().any(|server| server.id == "github"));
+    }
+
+    #[test]
+    fn farm_allowlist_blocks_unlisted_tools() {
+        let err = install_with(
+            &team(),
+            "worker",
+            "wasm.cluster_logs",
+            &MarketplaceGate::from_lists(vec!["wasm.test_runner".into()], Vec::new()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("allowlist"));
     }
 }

@@ -20,8 +20,9 @@ pub use artifact::{ArtifactError, ArtifactRecord, ArtifactStore};
 pub use capability::{Capability, CapabilityEffect, CapabilityKind, CapabilityUri};
 pub use manifest::{AgentManifest, ManifestError};
 pub use marketplace::{
-    catalog, create_agent, install, CreateAgentSpec, MarketplaceCatalog, MarketplaceEntry,
-    MarketplaceError, MarketplaceKind, HOW_TOOLS_LOAD,
+    agent_can_install, catalog, catalog_with, create_agent, create_agent_with, install,
+    install_with, CreateAgentSpec, MarketplaceAccess, MarketplaceCatalog, MarketplaceEntry,
+    MarketplaceError, MarketplaceGate, MarketplaceKind, HOW_TOOLS_LOAD,
 };
 pub use reconcile::{AgentRuntimeState, ReconcileAction, ReconcilePlan, RuntimePhase};
 pub use registry::{AgentRecord, FarmRegistry};

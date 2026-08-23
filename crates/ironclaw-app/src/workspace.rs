@@ -7,8 +7,8 @@ use crate::model::{
 use crate::text_input::{Submitted, TextInput};
 use crate::theme::{self, initials};
 use farm::{
-    Capability, CreateAgentSpec, FarmTask, MarketplaceCatalog, MarketplaceKind, TaskState,
-    HOW_TOOLS_LOAD,
+    Capability, CreateAgentSpec, FarmTask, MarketplaceAccess, MarketplaceCatalog, MarketplaceKind,
+    TaskState, HOW_TOOLS_LOAD,
 };
 use gpui::{
     actions, div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, SharedString,
@@ -1452,7 +1452,7 @@ impl Workspace {
                             .flex()
                             .flex_wrap()
                             .gap_2()
-                            .children(agents.into_iter().map(|agent| {
+                            .children(agents.iter().cloned().map(|agent| {
                                 let active = selected.as_deref() == Some(agent.id.as_str());
                                 let agent_id = agent.id.clone();
                                 div()
@@ -1497,7 +1497,28 @@ impl Workspace {
                     .as_ref()
                     .map(|id| entry.installed_on.iter().any(|agent| agent == id))
                     .unwrap_or(false);
+                let selected_agent = selected
+                    .as_deref()
+                    .and_then(|id| agents.iter().find(|agent| agent.id == id));
+                let block_reason = listing_block_reason(selected_agent, &entry);
+                let blocked = block_reason.is_some();
+                let action_label = if installed {
+                    "Installed".to_string()
+                } else if let Some(reason) = block_reason {
+                    reason
+                } else {
+                    "Install".to_string()
+                };
                 let tool_id = entry.id.clone();
+                let access_label = match entry.access {
+                    MarketplaceAccess::Open => kind_label(entry.kind).to_string(),
+                    MarketplaceAccess::Restricted => {
+                        format!("{} · allowlist", kind_label(entry.kind))
+                    }
+                    MarketplaceAccess::Blocked => {
+                        format!("{} · denylist", kind_label(entry.kind))
+                    }
+                };
                 div()
                     .id(SharedString::from(format!("tool-{}", entry.id)))
                     .p_4()
@@ -1522,7 +1543,7 @@ impl Workspace {
                                         div()
                                             .text_xs()
                                             .text_color(theme::accent_2())
-                                            .child(kind_label(entry.kind)),
+                                            .child(access_label),
                                     )
                                     .child(
                                         div().text_color(theme::text()).child(entry.title.clone()),
@@ -1535,7 +1556,7 @@ impl Workspace {
                                     .py_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(if installed {
+                                    .bg(if installed || blocked {
                                         theme::panel_2()
                                     } else {
                                         theme::accent()
@@ -1543,9 +1564,11 @@ impl Workspace {
                                     .text_color(theme::text())
                                     .text_xs()
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.install_marketplace_tool(tool_id.clone(), cx)
+                                        if !installed && !blocked {
+                                            this.install_marketplace_tool(tool_id.clone(), cx)
+                                        }
                                     }))
-                                    .child(if installed { "Installed" } else { "Install" }),
+                                    .child(action_label),
                             ),
                     )
                     .child(
@@ -2149,6 +2172,32 @@ fn kind_label(kind: MarketplaceKind) -> &'static str {
         MarketplaceKind::Mcp => "MCP",
         MarketplaceKind::A2a => "A2A",
     }
+}
+
+fn listing_block_reason(
+    agent: Option<&FarmAgent>,
+    entry: &farm::MarketplaceEntry,
+) -> Option<String> {
+    if entry.access == MarketplaceAccess::Blocked {
+        return Some(
+            entry
+                .blocked_reason
+                .clone()
+                .unwrap_or_else(|| "Denylisted".into()),
+        );
+    }
+    let Some(agent) = agent else {
+        return None;
+    };
+    if agent.marketplace_deny.iter().any(|id| id == &entry.id) {
+        return Some("Denylisted".into());
+    }
+    if entry.access == MarketplaceAccess::Restricted
+        && !agent.marketplace_allow.iter().any(|id| id == &entry.id)
+    {
+        return Some("Allowlist only".into());
+    }
+    None
 }
 
 impl Render for Workspace {

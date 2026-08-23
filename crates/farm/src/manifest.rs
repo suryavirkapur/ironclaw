@@ -31,6 +31,20 @@ pub struct AgentManifest {
     pub a2a: A2aPolicy,
     #[serde(default)]
     pub skills: Vec<AgentSkill>,
+    #[serde(default)]
+    pub marketplace: MarketplacePolicy,
+}
+
+/// Per-agent marketplace allow/deny lists.
+///
+/// `deny` always blocks. Restricted listings also require an explicit `allow`
+/// entry. Open listings stay installable unless denied.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MarketplacePolicy {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 fn schema_version() -> u32 {
@@ -366,6 +380,8 @@ impl AgentManifest {
                 )));
             }
         }
+        validate_unique_names("marketplace allow", &self.marketplace.allow)?;
+        validate_unique_names("marketplace deny", &self.marketplace.deny)?;
         validate_unique_names("A2A delegate", &self.a2a.delegate_to)?;
         validate_unique_names("A2A caller", &self.a2a.accept_from)?;
         if self.a2a.max_concurrent_tasks == 0 {

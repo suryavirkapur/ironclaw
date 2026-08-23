@@ -376,6 +376,10 @@ pub struct FarmAgentSummary {
     pub wasm_tools: usize,
     pub mcp_servers: usize,
     pub a2a_skills: usize,
+    #[serde(default)]
+    pub marketplace_allow: Vec<String>,
+    #[serde(default)]
+    pub marketplace_deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +460,8 @@ fn farm_agent_summary(record: &farm::AgentRecord) -> FarmAgentSummary {
         wasm_tools: record.manifest.wasm_tools.len(),
         mcp_servers: record.manifest.mcp.len(),
         a2a_skills: record.manifest.skills.len(),
+        marketplace_allow: record.manifest.marketplace.allow.clone(),
+        marketplace_deny: record.manifest.marketplace.deny.clone(),
     }
 }
 
@@ -466,11 +472,18 @@ fn farm_write_error(err: impl std::fmt::Display) -> (StatusCode, Json<ApiError>)
     )
 }
 
+fn farm_marketplace_gate(state: &AppState) -> farm::MarketplaceGate {
+    farm::MarketplaceGate::from_lists(
+        state.host_config.farm.marketplace_allow.clone(),
+        state.host_config.farm.marketplace_deny.clone(),
+    )
+}
+
 async fn farm_marketplace(
     State(state): State<AppState>,
     Extension(principal): Extension<security::ControlPlanePrincipal>,
 ) -> Json<farm::MarketplaceCatalog> {
-    let mut catalog = farm::catalog(&state.farm());
+    let mut catalog = farm::catalog_with(&state.farm(), &farm_marketplace_gate(&state));
     catalog.entries.retain(|entry| {
         entry
             .installed_on
@@ -512,7 +525,8 @@ async fn farm_agent_create(
         tools: request.tools,
     };
     let snapshot = state.farm().clone();
-    let changed = farm::create_agent(&snapshot, spec).map_err(farm_write_error)?;
+    let changed = farm::create_agent_with(&snapshot, spec, &farm_marketplace_gate(&state))
+        .map_err(farm_write_error)?;
     state.persist_farm(&changed).map_err(farm_write_error)?;
     let record = state
         .farm()
@@ -543,10 +557,18 @@ async fn farm_agent_install_tool(
 ) -> Result<Json<farm::MarketplaceCatalog>, (StatusCode, Json<ApiError>)> {
     require_agent_access(&principal, &agent_id)?;
     let snapshot = state.farm().clone();
-    let changed =
-        farm::install(&snapshot, &agent_id, &request.tool_id).map_err(farm_write_error)?;
+    let changed = farm::install_with(
+        &snapshot,
+        &agent_id,
+        &request.tool_id,
+        &farm_marketplace_gate(&state),
+    )
+    .map_err(farm_write_error)?;
     state.persist_farm(&changed).map_err(farm_write_error)?;
-    Ok(Json(farm::catalog(&state.farm())))
+    Ok(Json(farm::catalog_with(
+        &state.farm(),
+        &farm_marketplace_gate(&state),
+    )))
 }
 
 async fn farm_agent_capabilities(
@@ -1575,6 +1597,13 @@ mod api_test {
             .unwrap()
             .iter()
             .any(|entry| entry["id"] == "wasm.cluster_logs"));
+        let github = catalog_json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "mcp.github")
+            .unwrap();
+        assert_eq!(github["access"], "restricted");
 
         let created = router
             .clone()
@@ -1607,6 +1636,37 @@ mod api_test {
         assert_eq!(created_json["wasm_tools"], 1);
 
         let installed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/agents/qa/tools")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tool_id": "wasm.diff_review"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.status(), StatusCode::OK);
+        let installed_body = to_bytes(installed.into_body(), 256 * 1024).await.unwrap();
+        let installed_json: serde_json::Value = serde_json::from_slice(&installed_body).unwrap();
+        let diff_review = installed_json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "wasm.diff_review")
+            .unwrap();
+        assert!(diff_review["installed_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "qa"));
+
+        let restricted = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1620,20 +1680,32 @@ mod api_test {
             )
             .await
             .unwrap();
-        assert_eq!(installed.status(), StatusCode::OK);
-        let installed_body = to_bytes(installed.into_body(), 256 * 1024).await.unwrap();
-        let installed_json: serde_json::Value = serde_json::from_slice(&installed_body).unwrap();
-        let observability = installed_json["entries"]
-            .as_array()
+        assert_eq!(restricted.status(), StatusCode::BAD_REQUEST);
+        let restricted_body = to_bytes(restricted.into_body(), 64 * 1024).await.unwrap();
+        let restricted_json: serde_json::Value = serde_json::from_slice(&restricted_body).unwrap();
+        assert!(restricted_json["error"]
+            .as_str()
             .unwrap()
-            .iter()
-            .find(|entry| entry["id"] == "mcp.observability")
+            .contains("restricted"));
+
+        let denied = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/agents/product-manager/tools")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tool_id": "mcp.github"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
             .unwrap();
-        assert!(observability["installed_on"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|id| id == "qa"));
+        assert_eq!(denied.status(), StatusCode::BAD_REQUEST);
+        let denied_body = to_bytes(denied.into_body(), 64 * 1024).await.unwrap();
+        let denied_json: serde_json::Value = serde_json::from_slice(&denied_body).unwrap();
+        assert!(denied_json["error"].as_str().unwrap().contains("deny"));
 
         std::env::remove_var("IRONCLAW_TEST_ORG_A_TOKEN");
         std::env::remove_var("OPENAI_API_KEY");

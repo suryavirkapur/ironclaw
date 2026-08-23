@@ -19,3 +19,6 @@ max_concurrent_tasks = 3
 [[skills]]
 id = "shape_feature"
 description = "Turn a customer problem into a scoped feature brief with acceptance criteria."
+
+[marketplace]
+deny = ["mcp.github", "wasm.web_fetch"]

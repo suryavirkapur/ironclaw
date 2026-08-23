@@ -348,6 +348,13 @@ pub struct HostFarmConfig {
     /// an agent guest.
     #[serde(default)]
     pub mcp_credential_env: std::collections::BTreeMap<String, String>,
+    /// Farm-wide marketplace allowlist. Empty means every listing is eligible
+    /// unless denied or restricted by the listing itself.
+    #[serde(default)]
+    pub marketplace_allow: Vec<String>,
+    /// Farm-wide marketplace denylist. These listing ids cannot be installed.
+    #[serde(default)]
+    pub marketplace_deny: Vec<String>,
 }
 
 fn default_agent_manifests_dir() -> PathBuf {
@@ -362,6 +369,8 @@ impl Default for HostFarmConfig {
             public_base_url: None,
             entry_agent: None,
             mcp_credential_env: std::collections::BTreeMap::new(),
+            marketplace_allow: Vec::new(),
+            marketplace_deny: Vec::new(),
         }
     }
 }
