@@ -82,9 +82,9 @@ only administrators may access `/api/admin/*`. Agent, task, and artifact reads a
 the principal's agent scope and return 404 across an isolation boundary. Every protected request,
 including denials, is written to `control_plane_audit` with a request ID and authorization decision.
 
-Browser WebSockets use a one-time, agent-bound ticket obtained from `POST /api/auth/ws-ticket`, so
-the bearer token is not placed in the WebSocket URL. The workspace accepts a token through a
-prompt and retains it only in the browser tab's session storage.
+The desktop workspace uses a one-time, agent-bound ticket from `POST /api/auth/ws-ticket`,
+so the bearer token is not placed in the WebSocket URL. Set `IRONCLAW_TOKEN` when the
+control plane requires a bearer.
 
 The daemon refuses a non-loopback bind when control-plane authentication is disabled.
 Terminate TLS in a trusted reverse proxy and forward only to Ironclaw's loopback listener. The

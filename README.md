@@ -2,8 +2,9 @@
 
 Self-hosted AI agents, each in its own Firecracker microVM.
 
-Install the daemon and the CLI. The first time `ironclawd` starts and the host
-looks usable, it writes a config home and then runs from that home.
+Install the daemon, the CLI, and the desktop workspace. The first time
+`ironclawd` starts and the host looks usable, it writes a config home and then
+runs from that home.
 
 ## Install
 
@@ -12,9 +13,10 @@ Linux x86_64 with KVM. From a clone:
 ```bash
 cargo install --path crates/ironclawd --features firecracker --locked
 cargo install --path crates/ironclaw-cli --locked
+cargo install --path crates/ironclaw-app --locked
 ```
 
-That puts `ironclawd` and `ironclaw` on your PATH. You also need:
+That puts `ironclawd`, `ironclaw`, and `ironclaw-app` on your PATH. You also need:
 
 - [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) as `firecracker`
 - read/write access to `/dev/kvm`
@@ -66,7 +68,13 @@ ironclaw doctor
 ironclaw chat
 ```
 
-The workspace is at [http://127.0.0.1:9938/ui](http://127.0.0.1:9938/ui).
+The desktop workspace is `ironclaw-app`. It talks to the daemon at
+`IRONCLAW_URL` (default `http://127.0.0.1:9938`). Set `IRONCLAW_TOKEN` if the
+control plane requires a bearer token.
+
+```bash
+ironclaw-app
+```
 
 To write the home and exit without listening:
 
@@ -130,7 +138,7 @@ id = "research"
 description = "Research a question and return a sourced brief."
 ```
 
-Open [http://127.0.0.1:9938/ui](http://127.0.0.1:9938/ui) and pick an agent.
+Open `ironclaw-app` and pick an agent.
 Delegation only happens when both `delegate_to` and `accept_from` allow it.
 
 The five-person engineering demo is the same idea, with Telegram optional:

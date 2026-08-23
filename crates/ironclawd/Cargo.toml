@@ -9,12 +9,10 @@ axum = { version = "*", features = ["ws"] }
 common = { path = "../common" }
 dirs = "*"
 futures = "*"
-include_dir = "*"
 irowclaw = { path = "../irowclaw" }
 memory = { path = "../memory" }
 security = { path = "../security" }
 tools = { path = "../tools" }
-mime_guess = "*"
 nix = { version = "*", features = ["signal"] }
 prost = "*"
 reqwest = { version = "*", default-features = false, features = ["json", "multipart", "rustls-tls"] }

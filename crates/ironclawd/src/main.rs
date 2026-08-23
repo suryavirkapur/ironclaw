@@ -34,7 +34,6 @@ use daemon::GatewayCommand;
 use farm::{FarmRegistry, FarmTask, TaskLedger, TaskState};
 use futures::{SinkExt, StreamExt};
 use host_tools::{run_host_tool, truncate_tool_output};
-use include_dir::{include_dir, Dir};
 use llm_client::{ConversationMessage, LlmClient, ToolLoopObservation, ToolPlan};
 use memory::{
     build_memory_block, forget_memories_by_query, forget_memory_by_id, initialize_schema,
@@ -61,7 +60,6 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use whatsapp::should_enable_whatsapp;
 
-static UI_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui");
 const TELEGRAM_CHUNK_MAX_CHARS: usize = 4096;
 const MAX_INBOUND_FILE_BYTES: usize = 8 * 1024 * 1024;
 const TELEGRAM_TRANSCRIPT_MAX_TURNS: usize = 50;
@@ -169,8 +167,6 @@ async fn run_server(
         )
         .route("/api/gateway/status", get(gateway_status_handler))
         .route("/webhooks/{channel}", post(webhook_handler))
-        .route("/ui", get(ui_index_handler))
-        .route("/ui/{*path}", get(ui_asset_handler))
         .with_state(state.clone());
     let protected_legacy_routes = Router::new()
         .route("/api/soul-guard/pending", get(soul_guard_pending_handler))
@@ -1864,19 +1860,6 @@ async fn dispatch_farm_task(state: &AppState, task: &FarmTask) -> Result<(), Iro
     result
 }
 
-async fn ui_index_handler() -> Response {
-    ui_file_response("index.html")
-}
-
-async fn ui_asset_handler(Path(path): Path<String>) -> Response {
-    let path = if path.is_empty() {
-        "index.html"
-    } else {
-        path.as_str()
-    };
-    ui_file_response(path)
-}
-
 #[derive(Deserialize)]
 struct SoulGuardDecisionRequest {
     id: i64,
@@ -2258,22 +2241,6 @@ fn enforce_rate_limit(
         "{reason}; retry_after_seconds={}",
         decision.retry_after_seconds
     )))
-}
-
-fn ui_file_response(path: &str) -> Response {
-    match UI_DIR.get_file(path) {
-        Some(file) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let mut response = Response::new(file.contents().into());
-            response.headers_mut().insert(
-                "content-type",
-                HeaderValue::from_str(mime.as_ref())
-                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
-            );
-            response
-        }
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
-    }
 }
 
 fn guest_config_path() -> PathBuf {
