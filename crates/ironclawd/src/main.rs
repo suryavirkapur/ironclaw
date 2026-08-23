@@ -54,7 +54,7 @@ use soul_guard::{
 use std::cmp::min;
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -465,7 +465,7 @@ struct AppState {
     guest_allow_browser: bool,
     soul_guard_db_path: Arc<PathBuf>,
     security_db_path: Arc<PathBuf>,
-    farm_registry: Arc<FarmRegistry>,
+    farm_registry: Arc<RwLock<FarmRegistry>>,
     farm_tasks: TaskLedger,
     farm_artifacts: farm::ArtifactStore,
     control_plane_authorizer: Arc<security::ControlPlaneAuthorizer>,
@@ -491,7 +491,7 @@ impl AppState {
                 )));
             }
         }
-        let farm_registry = Arc::new(farm_registry);
+        let farm_registry = Arc::new(RwLock::new(farm_registry));
         let mcp_gateway = Arc::new(
             mcp::McpGateway::new(farm_registry.clone(), config.farm.clone())
                 .map_err(|err| IronclawError::new(format!("MCP gateway init failed: {err}")))?,
@@ -593,6 +593,34 @@ impl AppState {
 
     fn idle_timeout_duration(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.host_config.idle_timeout_minutes.saturating_mul(60))
+    }
+
+    pub(crate) fn farm(&self) -> std::sync::RwLockReadGuard<'_, FarmRegistry> {
+        self.farm_registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    fn replace_farm(&self, registry: FarmRegistry) {
+        *self
+            .farm_registry
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = registry;
+    }
+
+    pub(crate) fn persist_farm(&self, manifests: &[farm::AgentManifest]) -> Result<(), String> {
+        if !self.host_config.farm.enabled {
+            return Err("agent farm is disabled in host config".into());
+        }
+        let snapshot = self.farm().clone();
+        let reloaded = FarmRegistry::persist_and_reload(
+            &self.host_config.farm.manifests_dir,
+            &snapshot,
+            manifests,
+        )
+        .map_err(|err| err.to_string())?;
+        self.replace_farm(reloaded);
+        Ok(())
     }
 
     fn issue_ws_ticket(
@@ -2502,12 +2530,9 @@ async fn host_plan_tool_response(
     let request = decode_host_plan_request(raw_request);
     if request.observations.is_empty() {
         if allow_direct_a2a_shortcut {
-            if let Some(plan) = deterministic_a2a_plan(
-                &state.farm_registry,
-                user_id,
-                &request.user_text,
-                allowed_tools,
-            ) {
+            if let Some(plan) =
+                deterministic_a2a_plan(&state.farm(), user_id, &request.user_text, allowed_tools)
+            {
                 return tool_plan_to_json(&plan);
             }
         }
@@ -2525,7 +2550,7 @@ async fn host_plan_tool_response(
         MEMORY_PROMPT_BUDGET_CHARS,
     )
     .map_err(|err| format!("memory retrieval failed: {err}"))?;
-    let organization = agent_organization_context(&state.farm_registry, user_id);
+    let organization = agent_organization_context(&state.farm(), user_id);
     if !organization.is_empty() {
         memory_block.push_str("\n\n");
         memory_block.push_str(&organization);
@@ -2880,7 +2905,7 @@ async fn create_delegated_task(
         .parse()
         .map_err(|err| format!("delegate capability is invalid: {err}"))?;
     let allowed = state
-        .farm_registry
+        .farm()
         .capabilities_for(requester)
         .map_err(|err| err.to_string())?
         .into_iter()
@@ -2901,15 +2926,17 @@ async fn create_delegated_task(
     }
     let depth = parent.delegation_depth.saturating_add(1);
     let requester_record = state
-        .farm_registry
+        .farm()
         .get(requester)
+        .cloned()
         .ok_or_else(|| format!("unknown requester: {requester}"))?;
     if depth > requester_record.manifest.a2a.max_delegation_depth {
         return Err("delegation depth limit exceeded".to_string());
     }
     let assignee_record = state
-        .farm_registry
+        .farm()
         .get(&input.assignee)
+        .cloned()
         .ok_or_else(|| format!("unknown assignee: {}", input.assignee))?;
     let active_tasks = state
         .farm_tasks
@@ -3974,7 +4001,7 @@ async fn execute_telegram_team_command(
                 .list()
                 .map_err(|err| IronclawError::new(err.to_string()))?;
             let mut lines = vec!["Engineering team".to_string()];
-            for record in state.farm_registry.agents() {
+            for record in state.farm().agents() {
                 let active = tasks
                     .iter()
                     .filter(|task| task.assignee == record.manifest.id && !task.state.terminal())
@@ -3999,7 +4026,7 @@ async fn execute_telegram_team_command(
             session.user_id
         )),
         TelegramTeamCommand::Agent(Some(agent_id)) => {
-            let Some(record) = state.farm_registry.get(&agent_id) else {
+            let Some(record) = state.farm().get(&agent_id).cloned() else {
                 return Ok(format!(
                     "Unknown agent: {agent_id}. Use /team to list agents."
                 ));
@@ -4083,7 +4110,7 @@ fn create_channel_farm_task(
         .parse()
         .map_err(|err| IronclawError::new(format!("invalid task capability: {err}")))?;
     let allowed = state
-        .farm_registry
+        .farm()
         .capabilities_for(requester)
         .map_err(|err| IronclawError::new(err.to_string()))?
         .into_iter()
@@ -4094,8 +4121,9 @@ fn create_channel_farm_task(
         )));
     }
     let assignee_record = state
-        .farm_registry
+        .farm()
         .get(assignee)
+        .cloned()
         .ok_or_else(|| IronclawError::new(format!("unknown assignee: {assignee}")))?;
     let active_tasks = state
         .farm_tasks
@@ -4573,7 +4601,7 @@ fn allowed_tools_for_agent(state: &AppState, agent_id: &str) -> Vec<String> {
         state.guest_allow_bash,
         state.guest_allow_browser,
     );
-    let Some(record) = state.farm_registry.get(agent_id) else {
+    let Some(record) = state.farm().get(agent_id).cloned() else {
         return tools;
     };
     // Farm agents install reusable tools exclusively as Wasm modules.
@@ -4601,7 +4629,7 @@ fn allowed_tools_for_agent(state: &AppState, agent_id: &str) -> Vec<String> {
 
 fn agent_manifest_toml_for(state: &AppState, agent_id: &str) -> String {
     state
-        .farm_registry
+        .farm()
         .get(agent_id)
         .and_then(|record| toml::to_string(&record.manifest).ok())
         .unwrap_or_default()
