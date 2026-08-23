@@ -953,9 +953,15 @@ async function refresh() {
       window.setTimeout(refresh, 0);
       return;
     }
+    if (/429|rate limit/i.test(error.message) && state.agents.length) {
+      elements.connectionLabel.textContent = "rate limited";
+      return;
+    }
     elements.healthDot.classList.remove("online");
     elements.connectionLabel.textContent = "offline";
-    if (state.view !== "chat" && state.view !== "channel") elements.content.replaceChildren(node("div", "empty-state error", error.message));
+    if (!state.agents.length && state.view !== "chat" && state.view !== "channel") {
+      elements.content.replaceChildren(node("div", "empty-state error", error.message));
+    }
   }
 }
 
@@ -993,4 +999,4 @@ elements.membersForm.addEventListener("submit", submitMembers);
 window.addEventListener("beforeunload", closeChat);
 
 refresh();
-setInterval(refresh, 3000);
+setInterval(refresh, 15000);
