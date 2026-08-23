@@ -1,18 +1,19 @@
+mod app;
 mod chat;
 mod client;
+mod home;
 mod model;
+mod picker;
 mod text_input;
 mod theme;
 mod workspace;
 
+use app::{bind_app_keys, AppRoot};
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
-use text_input::bind_text_input_keys;
-use workspace::{bind_workspace_keys, Workspace};
 
 fn main() {
     Application::new().run(|cx: &mut App| {
-        bind_text_input_keys(cx);
-        bind_workspace_keys(cx);
+        bind_app_keys(cx);
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         cx.open_window(
             WindowOptions {
@@ -25,7 +26,7 @@ fn main() {
                 show: true,
                 ..Default::default()
             },
-            |_, cx| cx.new(|cx| Workspace::new(cx)),
+            |_, cx| cx.new(AppRoot::new),
         )
         .unwrap();
         cx.activate(true);

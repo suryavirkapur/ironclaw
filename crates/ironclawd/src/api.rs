@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::{IntoParams, OpenApi, ToSchema};
-use utoipa_scalar::{Scalar, Servable};
 
 use crate::AppState;
 
@@ -74,7 +73,7 @@ use crate::AppState;
 )]
 pub struct ApiDoc;
 
-/// build the complete router with openapi + scalar ui
+/// build the complete router, including generated OpenAPI JSON for tests and clients
 pub fn build_router(state: AppState) -> Router {
     let public_routes = Router::new()
         // health
@@ -133,10 +132,7 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             control_plane_auth,
         ));
-    public_routes
-        .merge(protected_routes)
-        .with_state(state)
-        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
+    public_routes.merge(protected_routes).with_state(state)
 }
 
 #[derive(Deserialize)]

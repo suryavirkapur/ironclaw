@@ -68,9 +68,11 @@ ironclaw doctor
 ironclaw chat
 ```
 
-The desktop workspace is `ironclaw-app`. It talks to the daemon at
-`IRONCLAW_URL` (default `http://127.0.0.1:9938`). Set `IRONCLAW_TOKEN` if the
-control plane requires a bearer token.
+The desktop workspace is `ironclaw-app`. It is a native GPUI app: first pick the
+daemon config folder (the directory that contains `ironclawd.toml`), then the
+app opens that folder in the file manager and connects to the daemon listed in
+the config (`[server] bind` / `port`). You can still override the URL with
+`IRONCLAW_URL` and set `IRONCLAW_TOKEN` if the control plane requires a bearer.
 
 ```bash
 ironclaw-app
