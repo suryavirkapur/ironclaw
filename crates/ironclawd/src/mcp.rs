@@ -3,19 +3,22 @@ use farm::FarmRegistry;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct McpGateway {
     client: reqwest::Client,
-    registry: Arc<FarmRegistry>,
+    registry: Arc<RwLock<FarmRegistry>>,
     config: Arc<HostFarmConfig>,
     sessions: Arc<Mutex<HashMap<(String, String), Option<String>>>>,
 }
 
 impl McpGateway {
-    pub fn new(registry: Arc<FarmRegistry>, config: HostFarmConfig) -> Result<Self, String> {
+    pub fn new(
+        registry: Arc<RwLock<FarmRegistry>>,
+        config: HostFarmConfig,
+    ) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -38,13 +41,17 @@ impl McpGateway {
     ) -> Result<Value, String> {
         let record = self
             .registry
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
             .get(subject)
+            .cloned()
             .ok_or_else(|| format!("unknown agent: {subject}"))?;
         let server = record
             .manifest
             .mcp
             .iter()
             .find(|server| server.id == server_id)
+            .cloned()
             .ok_or_else(|| format!("MCP server {server_id} is not exposed to {subject}"))?;
         if !server.tools.iter().any(|allowed| allowed == tool) {
             return Err(format!(
@@ -59,7 +66,7 @@ impl McpGateway {
             None => {
                 let (response, session) = self
                     .post(
-                        server,
+                        &server,
                         token.as_deref(),
                         None,
                         json!({
@@ -76,7 +83,7 @@ impl McpGateway {
                     .await?;
                 reject_jsonrpc_error(&response)?;
                 self.post(
-                    server,
+                    &server,
                     token.as_deref(),
                     session.as_deref(),
                     json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
@@ -89,7 +96,7 @@ impl McpGateway {
 
         let (response, _) = self
             .post(
-                server,
+                &server,
                 token.as_deref(),
                 session.as_deref(),
                 json!({

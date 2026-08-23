@@ -105,6 +105,37 @@ impl FarmRegistry {
         self.agents.get(id)
     }
 
+    pub fn write_manifest(path: &Path, manifest: &AgentManifest) -> Result<(), RegistryError> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|err| RegistryError::io(parent, err))?;
+            }
+        }
+        let body = toml::to_string_pretty(manifest).map_err(|err| RegistryError::TomlWrite(err))?;
+        std::fs::write(path, body).map_err(|err| RegistryError::io(path, err))?;
+        Ok(())
+    }
+
+    pub fn persist_and_reload(
+        dir: &Path,
+        current: &FarmRegistry,
+        manifests: &[AgentManifest],
+    ) -> Result<FarmRegistry, RegistryError> {
+        std::fs::create_dir_all(dir).map_err(|err| RegistryError::io(dir, err))?;
+        for manifest in manifests {
+            let path = current
+                .get(&manifest.id)
+                .map(|record| record.manifest_path.clone())
+                .filter(|path| {
+                    path.extension().and_then(|value| value.to_str()) == Some("toml")
+                        && path.parent().is_some()
+                })
+                .unwrap_or_else(|| dir.join(format!("{}.agent.toml", manifest.id)));
+            Self::write_manifest(&path, manifest)?;
+        }
+        Self::load_dir(dir)
+    }
+
     pub fn capabilities_for(&self, subject: &str) -> Result<Vec<Capability>, RegistryError> {
         let agent = self
             .get(subject)
@@ -340,6 +371,8 @@ pub enum RegistryError {
     UnknownAgent(String),
     #[error("failed to serialize agent manifest: {0}")]
     Serialize(serde_json::Error),
+    #[error("failed to encode agent manifest TOML: {0}")]
+    TomlWrite(toml::ser::Error),
 }
 
 impl RegistryError {
