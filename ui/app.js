@@ -74,6 +74,20 @@ function initials(name) {
   return name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
 }
 
+const AVATAR_COLORS = ["#6b64c9", "#2f7f79", "#4d6f94", "#7a6148", "#5f754a", "#8a5a72", "#3d6d8a"];
+
+function avatarColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i += 1) hash = (hash * 3 + name.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+function avatar(name, extraClass) {
+  const element = node("span", extraClass ? `avatar ${extraClass}` : "avatar", initials(name));
+  element.style.setProperty("--avatar-bg", avatarColor(name));
+  return element;
+}
+
 function taskState(task) {
   return String(task.state || "unknown").toLowerCase();
 }
@@ -121,7 +135,7 @@ function renderSidebar() {
     row.type = "button";
     if (state.selectedAgentId === agent.id && state.view === "chat") row.classList.add("selected");
     row.addEventListener("click", () => openAgentChat(agent.id));
-    row.append(node("span", "avatar", initials(agent.name)));
+    row.append(avatar(agent.name));
     const identity = node("span", "agent-identity");
     identity.append(node("strong", "", agent.name), node("small", "", agent.role));
     row.append(identity, node("span", activeCount(agent.id) ? "presence busy" : "presence"));
@@ -177,7 +191,7 @@ function renderAgents() {
     const card = node("button", "person-card");
     card.type = "button";
     card.addEventListener("click", () => openAgentChat(agent.id));
-    card.append(node("span", "avatar large", initials(agent.name)), node("h3", "", agent.name), node("p", "", agent.role), node("small", "", `${agent.a2a_skills} skills · ${activeCount(agent.id)} active tasks`), node("span", "chat-cta", "Open conversation →"));
+    card.append(avatar(agent.name, "large"), node("h3", "", agent.name), node("p", "", agent.role), node("small", "", `${agent.a2a_skills} skills · ${activeCount(agent.id)} active tasks`), node("span", "chat-cta", "Open conversation →"));
     grid.append(card);
   }
   elements.content.append(grid);
@@ -219,7 +233,7 @@ function renderChat() {
   const messages = thread(agent.id);
   if (!messages.length) {
     const welcome = node("div", "chat-welcome");
-    welcome.append(node("span", "avatar large", initials(agent.name)), node("h3", "", `Talk with ${agent.name}`), node("p", "", "This conversation uses the agent’s private MicroVM and memory. Upload images or documents up to 8 MB."));
+    welcome.append(avatar(agent.name, "large"), node("h3", "", `Talk with ${agent.name}`), node("p", "", "This conversation uses the agent’s private MicroVM and memory. Upload images or documents up to 8 MB."));
     const memoryHint = node("button", "memory-hint", "Try: remember the launch phrase is blue-orchid");
     memoryHint.type = "button";
     memoryHint.addEventListener("click", () => {
