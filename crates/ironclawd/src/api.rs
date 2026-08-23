@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::{IntoParams, OpenApi, ToSchema};
-use utoipa_scalar::{Scalar, Servable};
 
 use crate::AppState;
 
@@ -74,7 +73,7 @@ use crate::AppState;
 )]
 pub struct ApiDoc;
 
-/// build the complete router with openapi + scalar ui
+/// build the complete router, including generated OpenAPI JSON for tests and clients
 pub fn build_router(state: AppState) -> Router {
     let public_routes = Router::new()
         // health
@@ -111,10 +110,18 @@ pub fn build_router(state: AppState) -> Router {
         // heartbeat
         .route("/api/admin/heartbeat", get(admin_heartbeat_status))
         // agent farm control plane
-        .route("/api/farm/agents", get(farm_agents_list))
+        .route(
+            "/api/farm/agents",
+            get(farm_agents_list).post(farm_agent_create),
+        )
+        .route("/api/farm/marketplace", get(farm_marketplace))
         .route(
             "/api/farm/agents/{agent_id}/capabilities",
             get(farm_agent_capabilities),
+        )
+        .route(
+            "/api/farm/agents/{agent_id}/tools",
+            post(farm_agent_install_tool),
         )
         .route(
             "/api/farm/tasks",
@@ -133,10 +140,7 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             control_plane_auth,
         ));
-    public_routes
-        .merge(protected_routes)
-        .with_state(state)
-        .merge(Scalar::with_url("/api/docs", ApiDoc::openapi()))
+    public_routes.merge(protected_routes).with_state(state)
 }
 
 #[derive(Deserialize)]
@@ -432,23 +436,117 @@ async fn farm_agents_list(
 ) -> Json<Vec<FarmAgentSummary>> {
     Json(
         state
-            .farm_registry
+            .farm()
             .agents()
             .filter(|record| principal.allows_agent(&record.manifest.id))
-            .map(|record| FarmAgentSummary {
-                id: record.manifest.id.clone(),
-                name: record.manifest.name.clone(),
-                role: record.manifest.role.clone(),
-                reports_to: record.manifest.reports_to.clone(),
-                enabled: record.manifest.enabled,
-                memory_engine: record.manifest.memory.engine.clone(),
-                revision: record.revision.clone(),
-                wasm_tools: record.manifest.wasm_tools.len(),
-                mcp_servers: record.manifest.mcp.len(),
-                a2a_skills: record.manifest.skills.len(),
-            })
+            .map(farm_agent_summary)
             .collect(),
     )
+}
+
+fn farm_agent_summary(record: &farm::AgentRecord) -> FarmAgentSummary {
+    FarmAgentSummary {
+        id: record.manifest.id.clone(),
+        name: record.manifest.name.clone(),
+        role: record.manifest.role.clone(),
+        reports_to: record.manifest.reports_to.clone(),
+        enabled: record.manifest.enabled,
+        memory_engine: record.manifest.memory.engine.clone(),
+        revision: record.revision.clone(),
+        wasm_tools: record.manifest.wasm_tools.len(),
+        mcp_servers: record.manifest.mcp.len(),
+        a2a_skills: record.manifest.skills.len(),
+    }
+}
+
+fn farm_write_error(err: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError::new(err.to_string())),
+    )
+}
+
+async fn farm_marketplace(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+) -> Json<farm::MarketplaceCatalog> {
+    let mut catalog = farm::catalog(&state.farm());
+    catalog.entries.retain(|entry| {
+        entry
+            .installed_on
+            .iter()
+            .any(|id| principal.allows_agent(id))
+            || principal.allows_agent("*")
+            || entry.installed_on.is_empty()
+    });
+    Json(catalog)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFarmAgentRequest {
+    id: String,
+    name: String,
+    role: String,
+    #[serde(default)]
+    reports_to: Option<String>,
+    #[serde(default)]
+    skill_id: Option<String>,
+    #[serde(default)]
+    skill_description: Option<String>,
+    #[serde(default)]
+    tools: Vec<String>,
+}
+
+async fn farm_agent_create(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Json(request): Json<CreateFarmAgentRequest>,
+) -> Result<Json<FarmAgentSummary>, (StatusCode, Json<ApiError>)> {
+    let spec = farm::CreateAgentSpec {
+        id: request.id.clone(),
+        name: request.name,
+        role: request.role,
+        reports_to: request.reports_to,
+        skill_id: request.skill_id,
+        skill_description: request.skill_description,
+        tools: request.tools,
+    };
+    let snapshot = state.farm().clone();
+    let changed = farm::create_agent(&snapshot, spec).map_err(farm_write_error)?;
+    state.persist_farm(&changed).map_err(farm_write_error)?;
+    let record = state
+        .farm()
+        .get(request.id.trim())
+        .cloned()
+        .ok_or_else(|| farm_write_error("created agent was not registered"))?;
+    if !principal.allows_agent(&record.manifest.id) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new(
+                "created agent is outside this principal's scope",
+            )),
+        ));
+    }
+    Ok(Json(farm_agent_summary(&record)))
+}
+
+#[derive(Debug, Deserialize)]
+struct InstallFarmToolRequest {
+    tool_id: String,
+}
+
+async fn farm_agent_install_tool(
+    State(state): State<AppState>,
+    Extension(principal): Extension<security::ControlPlanePrincipal>,
+    Path(agent_id): Path<String>,
+    Json(request): Json<InstallFarmToolRequest>,
+) -> Result<Json<farm::MarketplaceCatalog>, (StatusCode, Json<ApiError>)> {
+    require_agent_access(&principal, &agent_id)?;
+    let snapshot = state.farm().clone();
+    let changed =
+        farm::install(&snapshot, &agent_id, &request.tool_id).map_err(farm_write_error)?;
+    state.persist_farm(&changed).map_err(farm_write_error)?;
+    Ok(Json(farm::catalog(&state.farm())))
 }
 
 async fn farm_agent_capabilities(
@@ -458,7 +556,7 @@ async fn farm_agent_capabilities(
 ) -> Result<Json<Vec<farm::Capability>>, (StatusCode, Json<ApiError>)> {
     require_agent_access(&principal, &agent_id)?;
     state
-        .farm_registry
+        .farm()
         .capabilities_for(&agent_id)
         .map(Json)
         .map_err(|err| (StatusCode::NOT_FOUND, Json(ApiError::new(err.to_string()))))
@@ -480,7 +578,7 @@ async fn farm_agent_card(
             )
         });
     state
-        .farm_registry
+        .farm()
         .agent_card(&agent_id, &base_url)
         .map(Json)
         .map_err(|err| (StatusCode::NOT_FOUND, Json(ApiError::new(err.to_string()))))
@@ -652,7 +750,7 @@ async fn farm_task_create(
     require_agent_access(&principal, &requester_agent)?;
     require_agent_access(&principal, &request.assignee)?;
     let allowed = state
-        .farm_registry
+        .farm()
         .capabilities_for(&requester_agent)
         .map_err(|err| (StatusCode::FORBIDDEN, Json(ApiError::new(err.to_string()))))?
         .into_iter()
@@ -716,8 +814,9 @@ async fn farm_task_create(
         .map(|task| task.delegation_depth.saturating_add(1))
         .unwrap_or(0);
     let requester = state
-        .farm_registry
+        .farm()
         .get(&requester_agent)
+        .cloned()
         .expect("capability lookup proved requester exists");
     if depth > requester.manifest.a2a.max_delegation_depth {
         return Err((
@@ -727,8 +826,9 @@ async fn farm_task_create(
     }
 
     let assignee = state
-        .farm_registry
+        .farm()
         .get(&request.assignee)
+        .cloned()
         .expect("capability lookup proved assignee exists");
     let active_tasks = state
         .farm_tasks
@@ -1415,6 +1515,127 @@ mod api_test {
         assert!(audit_count >= 5);
         std::env::remove_var("IRONCLAW_TEST_ORG_A_TOKEN");
         std::env::remove_var("IRONCLAW_TEST_ORG_B_TOKEN");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    fn copy_agent_manifests(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().and_then(|value| value.to_str()) == Some("toml") {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn marketplace_lists_tools_and_creates_agents() {
+        let _guard = AUTH_ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        copy_agent_manifests(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../demos/engineering-team/agents"),
+            &agents_dir,
+        );
+        let token = "org-a-control-plane-token-00000003".to_string();
+        std::env::set_var("IRONCLAW_TEST_ORG_A_TOKEN", &token);
+        std::env::set_var("OPENAI_API_KEY", "test-only-api-key");
+        let mut config = common::config::HostConfig::default_for_local(temp.path().join("users"));
+        config.execution_mode = HostExecutionMode::HostOnly;
+        config.farm.enabled = true;
+        config.farm.manifests_dir = agents_dir;
+        config.farm.entry_agent = Some("product-manager".to_string());
+        config.security.control_plane.enabled = true;
+        config.security.control_plane.principals = vec![HostControlPlanePrincipalConfig {
+            id: "alice".to_string(),
+            organization_id: "org-a".to_string(),
+            role: HostControlPlaneRole::Admin,
+            token_env: "IRONCLAW_TEST_ORG_A_TOKEN".to_string(),
+            default_agent: "product-manager".to_string(),
+            allowed_agents: Vec::new(),
+        }];
+        let state = AppState::new(config).unwrap();
+        let router = build_router(state);
+
+        let catalog = router
+            .clone()
+            .oneshot(authorized_request("/api/farm/marketplace", &token))
+            .await
+            .unwrap();
+        assert_eq!(catalog.status(), StatusCode::OK);
+        let catalog_body = to_bytes(catalog.into_body(), 256 * 1024).await.unwrap();
+        let catalog_json: serde_json::Value = serde_json::from_slice(&catalog_body).unwrap();
+        assert!(catalog_json["how_tools_load"]
+            .as_str()
+            .unwrap()
+            .contains("FarmRegistry"));
+        assert!(catalog_json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "wasm.cluster_logs"));
+
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/agents")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "qa",
+                            "name": "Quinn",
+                            "role": "QA Engineer",
+                            "reports_to": "engineering-lead",
+                            "skill_id": "verify_release",
+                            "skill_description": "Verify a release.",
+                            "tools": ["wasm.test_runner"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::OK, "{:?}", created);
+        let created_body = to_bytes(created.into_body(), 64 * 1024).await.unwrap();
+        let created_json: serde_json::Value = serde_json::from_slice(&created_body).unwrap();
+        assert_eq!(created_json["id"], "qa");
+        assert_eq!(created_json["wasm_tools"], 1);
+
+        let installed = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/farm/agents/qa/tools")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tool_id": "mcp.observability"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed.status(), StatusCode::OK);
+        let installed_body = to_bytes(installed.into_body(), 256 * 1024).await.unwrap();
+        let installed_json: serde_json::Value = serde_json::from_slice(&installed_body).unwrap();
+        let observability = installed_json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "mcp.observability")
+            .unwrap();
+        assert!(observability["installed_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "qa"));
+
+        std::env::remove_var("IRONCLAW_TEST_ORG_A_TOKEN");
         std::env::remove_var("OPENAI_API_KEY");
     }
 }
