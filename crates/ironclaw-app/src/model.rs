@@ -10,6 +10,7 @@ pub enum WorkspaceView {
     Team,
     Architecture,
     Chat,
+    Marketplace,
 }
 
 impl WorkspaceView {
@@ -19,6 +20,7 @@ impl WorkspaceView {
             Self::Team => "team",
             Self::Architecture => "architecture",
             Self::Chat => "conversations",
+            Self::Marketplace => "marketplace",
         }
     }
 
@@ -35,6 +37,7 @@ impl WorkspaceView {
             Self::Team => "Isolated agents with private memory and capabilities",
             Self::Architecture => "One shared control plane, private agent VMs",
             Self::Chat => "Choose an agent from the sidebar",
+            Self::Marketplace => "Install Wasm, MCP, and A2A tools by rewriting agent manifests",
         }
     }
 }
@@ -256,5 +259,13 @@ mod tests {
             Some(("backend-engineer".into(), "implement_backend".into()))
         );
         assert_eq!(parse_a2a_uri("not-a-uri"), None);
+    }
+
+    #[test]
+    fn marketplace_view_explains_tool_loading() {
+        assert_eq!(WorkspaceView::Marketplace.title(), "marketplace");
+        assert!(WorkspaceView::Marketplace
+            .description()
+            .contains("rewriting agent manifests"));
     }
 }

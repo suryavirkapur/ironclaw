@@ -1,5 +1,5 @@
 use crate::model::{FarmAgent, HealthStatus, Snapshot, WsTicket};
-use farm::{Capability, FarmTask};
+use farm::{Capability, CreateAgentSpec, FarmTask, MarketplaceCatalog};
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug)]
@@ -98,6 +98,36 @@ impl DaemonClient {
 
     pub fn ws_ticket(&self, agent_id: &str) -> Result<WsTicket, String> {
         self.post_json("/api/auth/ws-ticket", json!({ "agent_id": agent_id }))
+    }
+
+    pub fn marketplace(&self) -> Result<MarketplaceCatalog, String> {
+        self.get_json("/api/farm/marketplace")
+    }
+
+    pub fn create_agent(&self, spec: &CreateAgentSpec) -> Result<FarmAgent, String> {
+        self.post_json(
+            "/api/farm/agents",
+            json!({
+                "id": spec.id,
+                "name": spec.name,
+                "role": spec.role,
+                "reports_to": spec.reports_to,
+                "skill_id": spec.skill_id,
+                "skill_description": spec.skill_description,
+                "tools": spec.tools,
+            }),
+        )
+    }
+
+    pub fn install_tool(
+        &self,
+        agent_id: &str,
+        tool_id: &str,
+    ) -> Result<MarketplaceCatalog, String> {
+        self.post_json(
+            &format!("/api/farm/agents/{}/tools", encode_path(agent_id)),
+            json!({ "tool_id": tool_id }),
+        )
     }
 
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, String> {
@@ -202,6 +232,68 @@ mod tests {
         assert_eq!(snapshot.health, "ok · live");
         assert_eq!(snapshot.agents[0].name, "Maya");
         assert!(snapshot.tasks.is_empty());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn marketplace_create_and_install_hit_farm_endpoints() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for expected in [
+                "/api/farm/marketplace",
+                "/api/farm/agents",
+                "/api/farm/agents/qa/tools",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                assert!(request.contains(expected), "{request}");
+                let body = match expected {
+                    "/api/farm/marketplace" => {
+                        r#"{"how_tools_load":"FarmRegistry compiles manifests","entries":[{"id":"wasm.test_runner","kind":"wasm","title":"Test runner","summary":"Run tests","publisher":"Ironclaw","loads_as":"local://qa/test_runner","installed_on":[]}]}"#
+                    }
+                    "/api/farm/agents" => {
+                        assert!(request.contains("POST"), "{request}");
+                        r#"{"id":"qa","name":"Quinn","role":"QA Engineer","wasm_tools":1,"mcp_servers":0,"a2a_skills":1}"#
+                    }
+                    _ => {
+                        assert!(request.contains("tool_id"), "{request}");
+                        r#"{"how_tools_load":"FarmRegistry compiles manifests","entries":[{"id":"mcp.observability","kind":"mcp","title":"Observability","summary":"Logs","publisher":"Ironclaw","loads_as":"mcp://observability/logs.search","installed_on":["qa"]}]}"#
+                    }
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        let client = DaemonClient {
+            base_url: format!("http://127.0.0.1:{port}"),
+            token: None,
+        };
+        let catalog = client.marketplace().unwrap();
+        assert!(catalog.how_tools_load.contains("FarmRegistry"));
+        assert_eq!(catalog.entries[0].id, "wasm.test_runner");
+        let created = client
+            .create_agent(&CreateAgentSpec {
+                id: "qa".into(),
+                name: "Quinn".into(),
+                role: "QA Engineer".into(),
+                reports_to: Some("engineering-lead".into()),
+                skill_id: None,
+                skill_description: None,
+                tools: vec!["wasm.test_runner".into()],
+            })
+            .unwrap();
+        assert_eq!(created.id, "qa");
+        let installed = client.install_tool("qa", "mcp.observability").unwrap();
+        assert!(installed.entries[0]
+            .installed_on
+            .iter()
+            .any(|id| id == "qa"));
         server.join().unwrap();
     }
 }
