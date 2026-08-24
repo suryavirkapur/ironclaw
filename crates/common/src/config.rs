@@ -489,7 +489,7 @@ fn default_requests_per_minute() -> u32 {
 }
 
 fn default_requests_per_hour() -> u32 {
-    1000
+    10_000
 }
 
 impl Default for HostRateLimitConfig {

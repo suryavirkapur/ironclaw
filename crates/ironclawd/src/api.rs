@@ -248,22 +248,25 @@ pub(crate) async fn control_plane_auth(
         );
         return response;
     }
-    let rate_limit_identity = format!("organization:{}", principal.organization_id);
-    if let Err(error) = crate::enforce_rate_limit(&state, &rate_limit_identity, "control-plane", 0)
-    {
-        let response = api_auth_error(StatusCode::TOO_MANY_REQUESTS, &error.to_string());
-        audit_control_plane(
-            &state,
-            &request_id,
-            Some(&principal),
-            &method,
-            &path,
-            "rate_limit",
-            &path,
-            "deny",
-            response.status().as_u16(),
-        );
-        return response;
+    if state.host_config.security.control_plane.enabled {
+        let rate_limit_identity = format!("organization:{}", principal.organization_id);
+        if let Err(error) =
+            crate::enforce_rate_limit(&state, &rate_limit_identity, "control-plane", 0)
+        {
+            let response = api_auth_error(StatusCode::TOO_MANY_REQUESTS, &error.to_string());
+            audit_control_plane(
+                &state,
+                &request_id,
+                Some(&principal),
+                &method,
+                &path,
+                "rate_limit",
+                &path,
+                "deny",
+                response.status().as_u16(),
+            );
+            return response;
+        }
     }
     request.extensions_mut().insert(principal.clone());
     let mut response = next.run(request).await;

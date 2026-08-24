@@ -159,7 +159,9 @@ impl Workspace {
             {
                 break;
             }
-            cx.background_executor().timer(Duration::from_secs(3)).await;
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
         })
         .detach();
     }
@@ -812,6 +814,12 @@ impl Workspace {
                                         cx.open_with_system(&this.home);
                                     }))
                                     .child(self.home.display().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::muted())
+                                    .child(self.client.base_url.clone()),
                             ),
                     )
                     .child(
@@ -1488,8 +1496,14 @@ impl Workspace {
                         .rounded_lg()
                         .border_1()
                         .border_color(theme::border())
-                        .text_color(theme::muted())
-                        .child("No marketplace listings match this filter."),
+                        .text_color(if self.error.is_some() {
+                            theme::danger()
+                        } else {
+                            theme::muted()
+                        })
+                        .child(self.error.clone().unwrap_or_else(|| {
+                            "No marketplace listings match this filter.".into()
+                        })),
                 )
             })
             .children(entries.into_iter().map(|entry| {
